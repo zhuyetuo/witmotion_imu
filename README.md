@@ -1,2 +1,181 @@
 # witmotion_imu
-WT901SDCL-BT50 IMU设备相关的操作
+
+WT901SDCL-BT50（维特智能 9轴 IMU，BLE 5.0）数据采集与解析工具集。
+
+包含两个独立但可配合使用的脚本：
+
+| 脚本 | 用途 |
+|---|---|
+| `parse_wit.py` | 解析设备离线记录的原始二进制日志文件（如 `WIT12.TXT`），导出官方格式 / CSV / Label Studio 格式 |
+| `wit_ble_live.py` | 通过 BLE 直连设备，实时接收数据，写入 Label Studio 格式 CSV 或直接打印到终端 |
+
+两个脚本必须放在**同一个文件夹**下——`wit_ble_live.py` 会直接 import `parse_wit.py` 里的协议解析逻辑，保证离线文件和实时采集解析出来的数值、时间格式完全一致。
+
+---
+
+## 环境准备
+
+```bash
+pip install bleak          # 仅 wit_ble_live.py 需要，parse_wit.py 无第三方依赖
+```
+
+`bleak` 是跨平台 BLE 库，Windows 上基于系统自带的 WinRT 蓝牙 API，**不需要先在 Windows 蓝牙设置里手动配对**，代码直接扫描/连接即可。
+
+---
+
+## 一、离线文件解析：`parse_wit.py`
+
+把设备记录的原始二进制日志（28字节一帧的 `0x55 0x61` 数据包）解析成可读格式。
+
+### 数据包格式
+
+```
+偏移  长度  内容
+0     1    包头 0x55
+1     1    类型 0x61
+2     2    AccX   (int16)  量程 ±16g     物理值 = raw/32768*16
+4     2    AccY
+6     2    AccZ
+8     2    GyroX  (int16)  量程 ±2000°/s 物理值 = raw/32768*2000
+10    2    GyroY
+12    2    GyroZ
+14    2    AngleX (int16)  量程 ±180°    物理值 = raw/32768*180
+16    2    AngleY
+18    2    AngleZ
+20    1    年 (year - 2000)
+21    1    月
+22    1    日
+23    1    时
+24    1    分
+25    1    秒
+26    2    毫秒 (uint16)
+```
+
+该设备未启用磁场/温度/四元数输出，对应字段在导出表里为空。
+
+### 用法
+
+```bash
+# 还原成跟官方上位机回放结果(data_.txt)逐字节一致的Tab分隔文本
+python parse_wit.py WIT12.TXT -o out.txt
+
+# 严格按数据包对齐输出（不复刻官方工具的 AccX 错位 bug，推荐用于后续分析）
+python parse_wit.py WIT12.TXT -o out.txt --no-quirk
+
+# 导出标准CSV（逗号分隔，utf-8-sig编码，Excel/WPS双击打开不乱码）
+python parse_wit.py WIT12.TXT -o out.csv
+
+# 导出 Label Studio 时间序列标注可识别的CSV
+python parse_wit.py WIT12.TXT -o labelstudio.csv
+```
+
+`--format` 可以无视文件名后缀强制指定格式：
+
+```bash
+python parse_wit.py WIT12.TXT -o out.txt --format csv
+python parse_wit.py WIT12.TXT -o out.csv  --format labelstudio
+```
+
+### 关于官方回放工具的 AccX 错位现象
+
+逐字节核对官方上位机回放结果 `data_.txt` 后发现：官方工具导出时，AccX 这一列相对于同一行的其它列（芯片时间、AccY/AccZ、角速度、角度）整体错后了一个采样点。`parse_wit.py` 默认完全复刻这个行为，方便逐行对照官方导出结果；加 `--no-quirk` 则关闭复刻，直接输出严格对齐的正确数据。**做后续分析/训练用的数据建议始终加 `--no-quirk`**（或者直接用 `labelstudio` 格式，该格式不受此参数影响，始终严格对齐）。
+
+### Label Studio 格式
+
+导出列：`timestamp, acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z`
+
+`timestamp` 直接用设备芯片时间，格式为 `YYYY-MM-DD HH:MM:SS.fff`（毫秒前用 **点** 分隔，例如 `2026-06-22 11:35:19.011`）。
+
+在 Label Studio 的 Time Series 标注配置里，`timeFormat` 字段要填：
+
+```
+%Y-%m-%d %H:%M:%S.%L
+```
+
+> D3（Label Studio 底层时间解析库）不支持 `%f` 微秒格式，必须用 `%L` 三位毫秒，且分隔符要跟数据里的字符完全一致（点号），否则会报错 `timeColumn (timestamp) cannot be parsed`。
+
+#### 自动坏帧检测与剔除
+
+设备采集过程中如果发生过短暂的蓝牙断连重连，芯片时钟会被重新初始化，可能出现两种异常：
+
+1. **孤立复位帧**：某一帧时间戳突然"整点归零"式回退（例如从 `13:47:05.661` 跳到 `13:00:00.000`）。
+2. **整段重传**：复位帧之后，设备会把断连前一小段数据完整重发一遍——这些帧的时间戳和数值跟之前某一段完全重复。
+
+这两种情况都会导致 Label Studio 报错 `timeColumn (timestamp) must be incremental and sequentially ordered`。
+
+`labelstudio` 格式默认会自动检测并剔除这类坏帧/重复段（不管坏段是1帧还是连续多帧），保证导出的 `timestamp` 严格单调递增，终端会打印具体丢弃了哪些原始序号方便核对。如果想保留原始数据不做任何剔除，加 `--keep-bad-frames`。
+
+---
+
+## 二、实时BLE采集：`wit_ble_live.py`
+
+直接通过 BLE 连接设备，实时接收数据。
+
+### 用法
+
+```bash
+# 第一步：先扫描，确认能看到设备
+python wit_ble_live.py --scan
+
+# 第二步：按名称关键字自动连接（设备名一般是 WTSDCL 或含 WT901）
+python wit_ble_live.py --name WTSDCL -o live_labelstudio.csv
+
+# 也可以用MAC地址直连
+python wit_ble_live.py --address AA:BB:CC:DD:EE:FF -o live_labelstudio.csv
+
+# 只在终端实时打印数据，不创建/写入任何文件
+python wit_ble_live.py --name WTSDCL --print-only
+
+# 如果默认UUID订阅不到数据，先列出设备真实的服务/特征值
+python wit_ble_live.py --name WTSDCL --list-services
+```
+
+按 `Ctrl+C` 停止采集，已写入的CSV文件会被正常关闭保存。
+
+实时采集同样会自动剔除蓝牙重连导致的坏帧（行为跟离线脚本一致），可用 `--keep-bad-frames` 关闭。
+
+### 已知GATT UUID（按优先级自动尝试，无需手动指定）
+
+```
+0000ffe4-0000-1000-8000-00805f9a34fb   Notify（推荐，默认优先尝试）
+0000ffe1-0000-1000-8000-00805f9a34fb   备用 Notify（部分批次/固件）
+0000ffe5-0000-1000-8000-00805f9a34fb   备用/读写特征值
+```
+
+如果以上UUID都订阅失败，用 `--list-services` 打印出设备实际暴露的服务/特征值列表，照实际输出用 `--notify-uuid` 指定即可，不需要改代码。
+
+### ⚠️ 重要：BLE 只能同时维持一个连接
+
+**如果 WitMotion 官方上位机软件正在连着设备，`wit_ble_live.py` 会扫描不到这个设备。**
+
+这不是脚本的bug，是 BLE 协议本身的限制——设备一旦被某个程序连接，就会停止广播（因为已经"被占用"，没必要再让别人发现），跟蓝牙耳机不能同时配对两台手机是一个道理。
+
+解决方法：
+
+1. 在官方上位机软件里把该设备**断开连接**（或直接关闭软件）
+2. 等几秒钟让设备恢复 BLE 广播
+3. 再运行 `python wit_ble_live.py --scan`，应该就能扫到了
+
+---
+
+## 常见问题排查
+
+| 现象 | 原因 / 解决方法 |
+|---|---|
+| `--scan` 扫不到任何设备 | 确认 Windows 蓝牙已打开；电脑需支持 BLE 5.0 或插了 BLE 适配器 |
+| `--scan` 扫到了别的设备，但扫不到这台IMU | 大概率是官方上位机软件还连着它，参见上面"BLE 只能同时维持一个连接" |
+| 按地址 `--address` 连接报"未找到设备" | 同上；也可能是地址大小写问题（一般无影响），优先用 `--name` 重试 |
+| 连接成功但订阅特征值失败 / 收不到数据 | 用 `--list-services` 看设备真实UUID，再用 `--notify-uuid` 手动指定 |
+| 导入 Label Studio 报 `cannot be parsed` | 确认 timeFormat 填的是 `%Y-%m-%d %H:%M:%S.%L`（注意是点不是冒号分隔毫秒） |
+| 导入 Label Studio 报 `must be incremental and sequentially ordered` | 一般是用了 `--keep-bad-frames` 导致坏帧没被过滤；去掉该参数重新导出即可 |
+
+---
+
+## 文件清单
+
+```
+witmotion_imu/
+├── parse_wit.py        # 离线文件解析（必需）
+├── wit_ble_live.py     # 实时BLE采集（依赖 parse_wit.py 同目录存在）
+└── README.md           # 本文档
+```
