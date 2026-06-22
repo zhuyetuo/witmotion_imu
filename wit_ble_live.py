@@ -36,8 +36,11 @@ WitMotion BLE 模组的 GATT UUID（经典款 WT901BLECL 已验证，WT901SDCL-B
     # 第一步：先扫描，确认能看到设备、记下设备名称或MAC地址
     python wit_ble_live.py --scan
 
-    # 第二步：按名称关键字自动查找并连接（推荐，不用记MAC地址）
+    # 按名称关键字自动查找并连接（推荐，不用记MAC地址）
     python wit_ble_live.py --name WT901 -o live_labelstudio.csv
+
+    # 只在终端实时打印数据，不创建/写入任何文件
+    python wit_ble_live.py --name WT901 --print-only
 
     # 也可以用MAC地址直连（Windows上bleak的地址就是标准MAC格式）
     python wit_ble_live.py --address AA:BB:CC:DD:EE:FF -o live_labelstudio.csv
@@ -257,12 +260,20 @@ async def run(args):
 
     buffer = StreamingByteBuffer()
     writer = None
-    if not args.list_services:
+    print_only = args.print_only
+
+    if args.list_services:
+        pass  # 既不打印数据也不写文件，仅列服务
+    elif print_only:
+        print('打印模式: 不创建/写入任何文件，仅在终端实时显示数据。')
+    else:
         writer = LiveCsvWriter(args.output, keep_bad_frames=args.keep_bad_frames)
         print(f'实时数据将写入: {args.output}')
         print('提示: 在 Label Studio 的 Time Series 标注配置里，timeFormat 请填: %Y-%m-%d %H:%M:%S.%L')
 
-    stop_event = asyncio.Event()
+    print_count = [0]
+    last_good_time_print = [None]
+    dropped_count_print = [0]
 
     def notification_handler(sender, data: bytearray):
         packets = buffer.feed(bytes(data))
@@ -270,11 +281,29 @@ async def run(args):
             p = parse_one_packet(pkt)
             if p is None:
                 continue
-            writer.write_packet(p)
-            if writer.count_written % 50 == 0:
+
+            if print_only:
+                t = p['chip_time']
+                # 打印模式下也做同样的坏帧过滤提示（仅提示，不影响打印，除非用户没加 --keep-bad-frames）
+                if not args.keep_bad_frames and t is not None and last_good_time_print[0] is not None and t <= last_good_time_print[0]:
+                    dropped_count_print[0] += 1
+                    print(f'  [丢弃坏帧] 时间戳非单调递增: {fmt_chip_time_dotms(p)}')
+                    continue
+                if t is not None:
+                    last_good_time_print[0] = t
+                print_count[0] += 1
+                ts = fmt_chip_time_dotms(p)
                 acc = p['acc']
-                print(f'  已接收 {writer.count_written} 帧  最新加速度: '
-                      f'X={acc[0]:.3f} Y={acc[1]:.3f} Z={acc[2]:.3f} g')
+                gyro = p['gyro']
+                print(f'[{print_count[0]:>6d}] {ts}  '
+                      f'acc=({acc[0]:+.3f}, {acc[1]:+.3f}, {acc[2]:+.3f})g  '
+                      f'gyro=({gyro[0]:+7.3f}, {gyro[1]:+7.3f}, {gyro[2]:+7.3f})°/s')
+            else:
+                writer.write_packet(p)
+                if writer.count_written % 50 == 0:
+                    acc = p['acc']
+                    print(f'  已接收 {writer.count_written} 帧  最新加速度: '
+                          f'X={acc[0]:.3f} Y={acc[1]:.3f} Z={acc[2]:.3f} g')
 
     async with BleakClient(device) as client:
         print('已连接。')
@@ -301,7 +330,8 @@ async def run(args):
         if subscribed is None:
             print('所有候选 UUID 均订阅失败。请先运行 --list-services 查看该设备真实的'
                   '服务/特征值列表，然后用 --notify-uuid 指定正确的 Notify 特征值。')
-            writer.close()
+            if writer is not None:
+                writer.close()
             return
 
         print(f'已订阅特征值 {subscribed}，开始接收数据... (按 Ctrl+C 停止)')
@@ -316,9 +346,13 @@ async def run(args):
                 await client.stop_notify(subscribed)
             except Exception:
                 pass
-            writer.close()
-            print(f'\n采集结束。共写入 {writer.count_written} 帧，丢弃坏帧 {writer.count_dropped} 个。'
-                  f'\n文件已保存: {args.output}')
+            if writer is not None:
+                writer.close()
+                print(f'\n采集结束。共写入 {writer.count_written} 帧，丢弃坏帧 {writer.count_dropped} 个。'
+                      f'\n文件已保存: {args.output}')
+            elif print_only:
+                print(f'\n采集结束。共打印 {print_count[0]} 帧，丢弃坏帧 {dropped_count_print[0]} 个。'
+                      f'\n（打印模式未写入任何文件。）')
 
 
 def main():
@@ -331,6 +365,8 @@ def main():
     ap.add_argument('--address', default=None, help='直接按 MAC 地址连接（优先于 --name）')
     ap.add_argument('--scan-timeout', type=float, default=8.0, help='扫描超时时间（秒），默认8秒')
     ap.add_argument('-o', '--output', default='live_labelstudio.csv', help='实时写入的CSV文件路径')
+    ap.add_argument('--print-only', action='store_true',
+                     help='只在终端实时打印每一帧数据，不创建/写入任何CSV文件')
     ap.add_argument('--notify-uuid', default=None,
                      help='手动指定 Notify 特征值 UUID；不指定则按内置候选列表依次尝试')
     ap.add_argument('--list-services', action='store_true',
