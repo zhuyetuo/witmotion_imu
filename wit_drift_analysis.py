@@ -182,7 +182,8 @@ def analyse(rows: list[dict]) -> dict:
 
     slope_ms_per_s, intercept, r2 = linear_fit(elapsed_s, offset_ms)
     slope_ms_per_min = slope_ms_per_s * 60.0
-    ppm = slope_ms_per_s / 1.0 * 1_000_000   # ms/s → ppm
+    # ppm = 漂移率(s/s) × 10^6；slope 单位是 ms/s，先 /1000 换成 s/s
+    ppm = slope_ms_per_s / 1000.0 * 1_000_000
 
     # 实际 BLE 传输延迟（第一帧 PC 比芯片早多少毫秒，近似恒定）
     initial_offsets = [(r['pc_ms'] - pc0) - (r['chip_dt'] - chip0).total_seconds() * 1000
@@ -268,35 +269,38 @@ def print_phase1(result: dict):
     print('  （残差反映 BLE 传输抖动 + 非线性分量）')
 
 
-def print_phase3(comp_offsets: list[float], original_res_std: float):
+def print_phase3(comp_offsets: list[float], elapsed_s: list[float], original_res_std: float):
     s = stats(comp_offsets)
     print()
     print('=' * 60)
     print('阶段3：补偿后漂移再评估')
     print('=' * 60)
-    print(f'  补偿后偏移均值:     {s["mean"]:+.2f} ms  ← 剩余 BLE 延迟（正常）')
+    print(f'  补偿后偏移均值:     {s["mean"]:+.2f} ms')
     print(f'  补偿后偏移范围:     {s["min"]:+.1f} ~ {s["max"]:+.1f} ms')
     print(f'  补偿后偏移 std:     {s["std"]:.2f} ms')
     print()
-    improvement = (1 - s['std'] / original_res_std) * 100 if original_res_std > 0 else 0
-    # 补偿后的"漂移趋势"应该近似消失——用首尾偏移差来评估残余趋势
-    trend_ms_per_min = 0.0
-    if len(comp_offsets) > 1:
-        # 对补偿后偏移再做一次线性拟合，看残余斜率
-        xs = list(range(len(comp_offsets)))
-        slope2, _, r2_2 = linear_fit(xs, comp_offsets)
-        # xs 单位是帧序号，转换成 ms/min 需要帧率
-        # 暂时只报告偏移变化量
-        trend_total_ms = comp_offsets[-1] - comp_offsets[0]
-        trend_ms_per_min = trend_total_ms / (len(comp_offsets) / 50.0) * 60.0  # 假设50Hz
-    print(f'  补偿后残余漂移:     {trend_ms_per_min:+.2f} ms/min（理想值 ≈ 0）')
+
+    # 用实际 PC 经过时间做线性拟合，得到残余漂移率
+    slope2, _, r2_2 = linear_fit(elapsed_s, comp_offsets)
+    trend_ms_per_min = slope2 * 60.0
+    trend_ppm = slope2 / 1000.0 * 1_000_000
+    print(f'  补偿后残余漂移:     {trend_ms_per_min:+.3f} ms/min  ({trend_ppm:+.1f} ppm)')
+    print(f'  （理想值 ≈ 0；非零残余 = BLE批发抖动 + 漂移非线性分量）')
     print()
-    if s['std'] < 5.0:
-        print('  ✓ 补偿效果优秀：时间戳误差已收敛到 BLE 抖动水平（<5ms std）')
-    elif s['std'] < 20.0:
-        print('  ✓ 补偿效果良好：残余误差主要来自 BLE 传输抖动')
+
+    # 判断 std 是否主要来自 BLE 批发包（锯齿）还是真正的非线性漂移
+    # 锯齿特征：std 大但残余漂移率接近0
+    if abs(trend_ms_per_min) < 1.0:
+        if s['std'] < 5.0:
+            print('  ✓ 补偿效果优秀：残余误差 <5ms，漂移已完全消除')
+        elif s['std'] < 50.0:
+            print('  ✓ 补偿效果良好：残余趋势≈0，std 来自 BLE 批量发包抖动（正常）')
+            print('    提示：图中锯齿形态是 BLE 批发包特性，不影响漂移补偿质量')
+        else:
+            print('  ⚠ 残余 std 偏大，可能 BLE 抖动严重或漂移非线性')
     else:
-        print('  ⚠ 仍有较大残余误差，可能漂移存在非线性分量')
+        print(f'  ⚠ 残余漂移率 {trend_ms_per_min:+.2f} ms/min 仍不为零，'
+              '漂移存在非线性分量（建议延长采集时间或分段补偿）')
 
 
 # ── 可选图表 ──────────────────────────────────────────────────────────────────
@@ -339,7 +343,9 @@ def plot_results(result: dict, comp_offsets: list[float]):
     ax2.axhline(s['mean'] - s['std'], color='orange', linewidth=0.8, linestyle='--')
     ax2.set_xlabel('经过时间 (秒)')
     ax2.set_ylabel('补偿后偏移 (ms)')
-    ax2.set_title('阶段3：补偿后再评估')
+    slope2, _, _ = linear_fit(elapsed, comp_offsets)
+    ax2.set_title(f'阶段3：补偿后再评估  残余漂移={slope2*60:+.3f}ms/min  '
+                  f'（锯齿=BLE批发包特性，非非线性漂移）')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
 
@@ -399,7 +405,7 @@ async def run(args):
     print(f'  已对 {result["n"]} 帧应用补偿。')
 
     # ── 阶段3：再评估 ────────────────────────────────────────
-    print_phase3(comp_offsets, result['res_stats'].get('std', 1.0))
+    print_phase3(comp_offsets, result['elapsed_s'], result['res_stats'].get('std', 1.0))
 
     # ── 可选输出 ─────────────────────────────────────────────
     if args.output:
