@@ -56,6 +56,9 @@ RX_UUID       = 'a6ed0203-d344-460a-8075-b9e8ec90d71b'  # Write，App→设备
 
 DEVICE_NAME   = 'HICC_PetCollar'
 
+# 设备把北京时间当 UTC 算 Unix ms，PC 时间需加此偏移才能对齐芯片时间基准
+TZ_OFFSET_MS  = 8 * 3600 * 1000.0
+
 # ── 帧常量 ─────────────────────────────────────────────────────────────────
 FRAME_HEADER  = bytes([0x55, 0xAA])
 CMD_REPORT    = 0x05
@@ -414,9 +417,6 @@ async def run_calibrate(args):
 
     buf = FrameBuffer()
     samples: list[tuple[float, float]] = []   # (pc_ms, chip_ms)
-
-    # 设备把北京时间当 UTC 算 Unix ms，所以比较时 PC 时间也要加 8h 对齐
-    TZ_OFFSET_MS = 8 * 3600 * 1000.0
 
     def notification_handler(sender, data: bytearray):
         pc_ms = time.time() * 1000.0 + TZ_OFFSET_MS
