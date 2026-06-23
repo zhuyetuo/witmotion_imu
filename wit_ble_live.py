@@ -247,7 +247,114 @@ async def find_device(name_filter, address, timeout=8.0):
     return target
 
 
+async def run_calibrate(args):
+    """
+    时间漂移评估模式。
+    前提：已用官方上位机软件对设备做过时间校准，设备芯片时间已准确。
+    连接后采集 --cal-duration 秒的数据，逐帧对比 PC 系统时间与片上时间戳，
+    统计平均偏移（BLE传输延迟）和漂移率（ms/min，反映晶振精度）。
+    """
+    device = await find_device(args.name, args.address, timeout=args.scan_timeout)
+    if device is None:
+        sys.exit(1)
+
+    print(f'连接中: {device.name or "(无名称)"}  {device.address}')
+
+    buf = StreamingByteBuffer()
+    samples: list[tuple[float, datetime]] = []  # (pc_recv_time_epoch_ms, chip_datetime)
+    duration = args.cal_duration
+
+    def notification_handler(sender, data: bytearray):
+        pc_epoch_ms = time.time() * 1000.0
+        packets = buf.feed(bytes(data))
+        for pkt in packets:
+            p = parse_one_packet(pkt)
+            if p is None or p['chip_time'] is None:
+                continue
+            chip_dt = p['chip_time']          # naive datetime（设备本地时间）
+            samples.append((pc_epoch_ms, chip_dt))
+            # 用 PC 当前本地时间与片上时间对比（两者同属本地时间域）
+            pc_local_dt = datetime.now()
+            offset_ms = (pc_local_dt - chip_dt).total_seconds() * 1000.0
+            elapsed_s = (pc_epoch_ms - samples[0][0]) / 1000.0 if len(samples) > 1 else 0.0
+            chip_str = chip_dt.strftime('%H:%M:%S.') + f'{p["ms"]:03d}'
+            pc_str   = pc_local_dt.strftime('%H:%M:%S.') + f'{int(pc_local_dt.microsecond/1000):03d}'
+            print(f'  [{len(samples):>4d}] PC={pc_str}  片上={chip_str}  '
+                  f'PC-chip={offset_ms:+.1f}ms  elapsed={elapsed_s:.1f}s')
+
+    async with BleakClient(device) as client:
+        print('已连接。')
+
+        notify_uuid = args.notify_uuid
+        candidates = [notify_uuid] if notify_uuid else DEFAULT_NOTIFY_CANDIDATES
+        subscribed = None
+        for uuid in candidates:
+            try:
+                await client.start_notify(uuid, notification_handler)
+                subscribed = uuid
+                break
+            except Exception as e:
+                print(f'  尝试订阅 {uuid} 失败: {e}')
+
+        if subscribed is None:
+            print('订阅失败，请用 --list-services 核实 UUID。')
+            return
+
+        print(f'已订阅 {subscribed}，开始采集（{duration:.0f} 秒）...\n')
+        try:
+            await asyncio.sleep(duration)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+        finally:
+            try:
+                await client.stop_notify(subscribed)
+            except Exception:
+                pass
+
+    if len(samples) < 2:
+        print('帧数太少，无法统计。')
+        return
+
+    pc_epoch0, chip_dt0 = samples[0]
+    pc_epoch1, chip_dt1 = samples[-1]
+    total_pc_s   = (pc_epoch1 - pc_epoch0) / 1000.0
+    total_chip_s = (chip_dt1 - chip_dt0).total_seconds()
+
+    offsets_ms = [(datetime.now().replace(
+                       hour=chip_dt.hour, minute=chip_dt.minute,
+                       second=chip_dt.second, microsecond=chip_dt.microsecond * 1000
+                   ) - chip_dt).total_seconds() * 1000
+                  for _, chip_dt in samples]
+
+    # 重新算一遍用 PC 本地时间做参照
+    ref_pc0 = datetime.fromtimestamp(pc_epoch0 / 1000.0)
+    offsets_ms = [
+        (datetime.fromtimestamp(pc_ms / 1000.0) - chip_dt).total_seconds() * 1000.0
+        for pc_ms, chip_dt in samples
+    ]
+    avg_offset  = sum(offsets_ms) / len(offsets_ms)
+    drift_ms_per_min = (offsets_ms[-1] - offsets_ms[0]) / total_pc_s * 60.0 if total_pc_s > 0 else 0.0
+    drift_ppm = (total_pc_s - total_chip_s) / total_pc_s * 1_000_000 if total_pc_s > 0 else 0.0
+
+    print(f'\n── 漂移评估结果（{len(samples)} 帧，{total_pc_s:.1f} 秒）──')
+    print(f'  平均偏移 (PC-chip):  {avg_offset:+.1f} ms  ← BLE 传输延迟')
+    print(f'  偏移范围:            {min(offsets_ms):+.1f} ~ {max(offsets_ms):+.1f} ms')
+    print(f'  漂移率:              {drift_ms_per_min:+.2f} ms/min  ({drift_ppm:+.1f} ppm)')
+    print(f'  推算 1小时误差:      {drift_ms_per_min*60:+.0f} ms')
+    print(f'  推算 1天误差:        {drift_ms_per_min*60*24/1000:+.2f} 秒')
+    if abs(drift_ms_per_min) < 1.0:
+        print('  ✓ 晶振精度良好（<1 ms/min）')
+    elif abs(drift_ms_per_min) < 10.0:
+        print('  ⚠ 晶振有轻微漂移，长时采集建议重新校时')
+    else:
+        print('  ✗ 漂移较严重，建议检查晶振或重新用上位机校时')
+
+
 async def run(args):
+    if args.calibrate:
+        await run_calibrate(args)
+        return
+
     if args.scan:
         await scan_devices(timeout=args.scan_timeout)
         return
@@ -375,6 +482,11 @@ def main():
     ap.add_argument('--keep-bad-frames', action='store_true',
                      help='默认会丢弃时间戳非单调递增的坏帧（蓝牙重连导致的时钟复位/重传），'
                           '加此参数则全部写入不做过滤')
+    ap.add_argument('--calibrate', action='store_true',
+                     help='时间漂移评估模式：采集数据并逐帧对比 PC 时间与片上时间，'
+                          '统计漂移率（前提：已用官方上位机软件校准过设备时间）')
+    ap.add_argument('--cal-duration', type=float, default=30.0,
+                     help='漂移评估采集时长（秒），默认 30 秒')
     args = ap.parse_args()
 
     try:
