@@ -1,15 +1,17 @@
 # witmotion_imu
 
-WT901SDCL-BT50（维特智能 9轴 IMU，BLE 5.0）数据采集与解析工具集。
+IMU 数据采集与解析工具集，目前包含两套设备的支持：
 
-包含两个独立但可配合使用的脚本：
+- **WitMotion WT901SDCL-BT50**（维特智能 9轴 IMU，BLE 5.0，`0x55 0x61` 二进制协议）
+- **HICC_PetCollar**（自制宠物项圈 IMU，BLE，`0x55 0xAA` 自定义协议 v1.1）
 
-| 脚本 | 用途 |
-|---|---|
-| `parse_wit.py` | 解析设备离线记录的原始二进制日志文件（如 `WIT12.TXT`），导出官方格式 / CSV / Label Studio 格式 |
-| `wit_ble_live.py` | 通过 BLE 直连设备，实时接收数据，写入 Label Studio 格式 CSV 或直接打印到终端 |
+| 脚本 | 设备 | 用途 |
+|---|---|---|
+| `parse_wit.py` | WitMotion | 解析离线二进制日志（如 `WIT12.TXT`），导出官方格式 / CSV / Label Studio 格式 |
+| `wit_ble_live.py` | WitMotion | 通过 BLE 直连，实时接收数据，写入 Label Studio CSV 或打印到终端 |
+| `hicc_ble_debug.py` | HICC_PetCollar | 通过 BLE 连接自制设备，实时解析 0x55AA 帧，自动校时，打印数据或写入 CSV |
 
-两个脚本必须放在**同一个文件夹**下——`wit_ble_live.py` 会直接 import `parse_wit.py` 里的协议解析逻辑，保证离线文件和实时采集解析出来的数值、时间格式完全一致。
+`wit_ble_live.py` 与 `parse_wit.py` 必须放在**同一个文件夹**下——前者会 import 后者的协议解析逻辑。
 
 ---
 
@@ -171,11 +173,97 @@ python wit_ble_live.py --name WTSDCL --list-services
 
 ---
 
+---
+
+## 三、HICC_PetCollar BLE 调试：`hicc_ble_debug.py`
+
+连接自制宠物项圈设备，解析 `0x55 0xAA` 自定义协议（v1.1）。
+
+### 协议概要
+
+| 帧类型 | 频率 | 总长 | 内容 |
+|---|---|---|---|
+| 六轴帧 (cmd=0x05) | 25 Hz | 67 字节 | Unix 毫秒时间戳 + 加速度XYZ (m/s²) + 陀螺仪XYZ (rad/s) |
+| 温湿度帧 (cmd=0x05) | 1 Hz | 43 字节 | Unix 毫秒时间戳 + 室温 + 湿度 + 体温 + 电池电压 |
+| 校时请求 (cmd=0x06) | 上电后 | 7 字节 | 设备请求 App 下发当前时间 |
+
+BLE GATT UUID：
+
+| 特征 | UUID | 方向 |
+|---|---|---|
+| TX (Notify) | `A6ED0202-D344-460A-8075-B9E8EC90D71B` | 设备 → App（订阅接收） |
+| RX (Write)  | `A6ED0203-D344-460A-8075-B9E8EC90D71B` | App → 设备（写校时帧） |
+
+### 用法
+
+```bash
+# 先安装依赖（如果尚未安装）
+pip install bleak
+
+# 扫描附近所有 BLE 设备，确认能看到 HICC_PetCollar
+python hicc_ble_debug.py --scan
+
+# 连接指定 MAC，自动校时，终端实时打印数据
+python hicc_ble_debug.py --address EA:CB:3E:CF:00:1A
+
+# 连接并同时写入 CSV 文件（自动生成 _6axis.csv 和 _env.csv 两个文件）
+python hicc_ble_debug.py --address EA:CB:3E:CF:00:1A -o hicc_data.csv
+
+# 连接后只列出 GATT 服务/特征值，不接收数据（UUID 核对用）
+python hicc_ble_debug.py --address EA:CB:3E:CF:00:1A --list-services
+
+# 跳过校时（设备时钟已准确时使用）
+python hicc_ble_debug.py --address EA:CB:3E:CF:00:1A --no-timesync
+```
+
+按 `Ctrl+C` 停止，CSV 文件会被正常关闭保存。
+
+### 终端输出格式
+
+```
+[    1][6轴] 2026-06-23 10:00:00.040  acc=(+7.7431,+0.9338,+6.1844)m/s²  gyro=(+0.025635,+0.054542,+0.006545)rad/s
+[    2][6轴] 2026-06-23 10:00:00.080  ...
+[   25][环境] 2026-06-23 10:00:00.980  室温=26.4°C  湿度=57.2%RH  体温=38.5°C  电池=3800mV
+```
+
+### CSV 输出格式
+
+`_6axis.csv`（六轴，25Hz）：
+
+```
+timestamp,acc_x_ms2,acc_y_ms2,acc_z_ms2,gyro_x_rads,gyro_y_rads,gyro_z_rads
+2026-06-23 10:00:00.040,7.743124,0.933772,6.184443,0.025635,0.054542,0.006545
+```
+
+`_env.csv`（温湿度，1Hz）：
+
+```
+timestamp,temp_in_c,hum_in_pct,temp_body_c,batt_mv
+2026-06-23 10:00:00.980,26.4,57.2,38.5,3800
+```
+
+### 已知设备 MAC 地址
+
+```
+EA:CB:3E:CF:00:1A
+EA:CB:3E:CF:00:1B
+EA:CB:3E:CF:00:1D
+```
+
+### 注意事项
+
+- 脚本连接后会**立刻主动下发校时帧**（北京时间），不需要等设备请求。收到设备的校时请求时也会自动响应。
+- BLE 分包重组：设备请求 MTU=247，脚本内置 `FrameBuffer` 按帧头+长度字段自动重组跨包分片。
+- 校验失败的帧会打印原始 hex 并丢弃，正常帧不受影响。
+
+---
+
 ## 文件清单
 
 ```
 witmotion_imu/
-├── parse_wit.py        # 离线文件解析（必需）
-├── wit_ble_live.py     # 实时BLE采集（依赖 parse_wit.py 同目录存在）
+├── parse_wit.py        # WitMotion 离线文件解析（必需）
+├── wit_ble_live.py     # WitMotion 实时 BLE 采集（依赖 parse_wit.py 同目录存在）
+├── hicc_ble_debug.py   # HICC_PetCollar 自制设备 BLE 调试（独立，无额外依赖）
 └── README.md           # 本文档
 ```
