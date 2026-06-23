@@ -153,13 +153,14 @@ def decode_report(dp: dict, frame_type: str) -> dict:
     out = {'frame_type': frame_type}
 
     # 时间戳
+    # 设备把我们下发的北京时间当作 UTC naive 计算 Unix ms，
+    # 所以解码时用 utcfromtimestamp 直接还原，不做时区转换。
     if DP_TIMESTAMP in dp:
         ts_ms = dp[DP_TIMESTAMP]   # v1.1: int64 毫秒
         try:
-            dt_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
-            dt_cst = dt_utc.astimezone(TZ_CST)
+            dt = datetime.utcfromtimestamp(ts_ms / 1000.0)
             out['timestamp_ms'] = ts_ms
-            out['timestamp_str'] = dt_cst.strftime('%Y-%m-%d %H:%M:%S.') + f'{ts_ms % 1000:03d}'
+            out['timestamp_str'] = dt.strftime('%Y-%m-%d %H:%M:%S.') + f'{ts_ms % 1000:03d}'
         except (OSError, OverflowError, ValueError):
             out['timestamp_ms'] = ts_ms
             out['timestamp_str'] = f'raw={ts_ms}'
@@ -393,9 +394,106 @@ async def find_tx_uuid(client: BleakClient) -> str | None:
     return None
 
 
+# ── 时间校准 ───────────────────────────────────────────────────────────────
+
+async def run_calibrate(args):
+    """
+    时间校准模式：连接设备、发送校时，然后收 --cal-duration 秒的六轴帧，
+    逐帧打印 PC 收包时刻与片上时间戳的偏移（offset = PC_ms - chip_ms），
+    最后统计平均偏移和时间漂移率（ms/s）。
+
+    偏移接近 0  → 校时准确，BLE 传输延迟可忽略
+    偏移持续增大/减小 → 片上时钟有漂移，漂移率 = Δoffset / Δt
+    """
+    if not args.address:
+        print('--calibrate 需要指定 --address')
+        sys.exit(1)
+
+    duration = args.cal_duration
+    print(f'连接中: {args.address} ...')
+
+    buf = FrameBuffer()
+    samples: list[tuple[float, float]] = []   # (pc_ms, chip_ms)
+
+    def notification_handler(sender, data: bytearray):
+        pc_ms = time.time() * 1000.0
+        frames = buf.feed(bytes(data))
+        for frame in frames:
+            if frame[3] != CMD_REPORT:
+                continue
+            data_len = struct.unpack('>H', frame[4:6])[0]
+            payload = frame[6:6 + data_len]
+            dp = parse_dp_sequence(payload)
+            if DP_TIMESTAMP not in dp:
+                continue
+            # 只用六轴帧（25Hz），跳过温湿度帧
+            has_env = (DP_TEMP_IN in dp or DP_HUM_IN in dp or
+                       DP_TEMP_BODY in dp or DP_BATT_MV in dp)
+            if has_env:
+                continue
+            chip_ms = float(dp[DP_TIMESTAMP])
+            offset_ms = pc_ms - chip_ms
+            samples.append((pc_ms, chip_ms))
+            elapsed = pc_ms - samples[0][0] if len(samples) > 1 else 0.0
+            print(f'  [{len(samples):>4d}] chip={chip_ms:.0f}ms  '
+                  f'PC-chip={offset_ms:+.1f}ms  '
+                  f'elapsed={elapsed/1000:.2f}s')
+
+    async with BleakClient(args.address) as client:
+        print(f'已连接: {args.address}')
+        rx_uuid = await find_rx_uuid(client)
+        tx_uuid = await find_tx_uuid(client)
+        if tx_uuid is None:
+            print('错误: 未找到 TX Notify 特征')
+            return
+        if rx_uuid:
+            print(f'  [校时] 下发当前北京时间...')
+            await send_timesync(client, rx_uuid)
+        await asyncio.sleep(0.2)   # 等设备处理校时
+
+        await client.start_notify(tx_uuid, notification_handler)
+        print(f'开始校准采集（{duration} 秒）...\n')
+        try:
+            await asyncio.sleep(duration)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            pass
+        finally:
+            try:
+                await client.stop_notify(tx_uuid)
+            except Exception:
+                pass
+
+    if len(samples) < 2:
+        print('采集到的帧太少，无法计算漂移。')
+        return
+
+    offsets = [pc - chip for pc, chip in samples]
+    avg_offset = sum(offsets) / len(offsets)
+    # 用首尾线性拟合估算漂移率
+    t0_pc, t0_chip = samples[0]
+    t1_pc, t1_chip = samples[-1]
+    total_pc_s   = (t1_pc   - t0_pc)   / 1000.0
+    total_chip_s = (t1_chip - t0_chip) / 1000.0
+    drift_ppm = (total_pc_s - total_chip_s) / total_pc_s * 1_000_000 if total_pc_s > 0 else 0.0
+    drift_ms_per_min = (offsets[-1] - offsets[0]) / total_pc_s * 60.0 if total_pc_s > 0 else 0.0
+
+    print(f'\n── 校准结果（{len(samples)} 帧，{total_pc_s:.1f} 秒）──')
+    print(f'  平均偏移 (PC-chip): {avg_offset:+.1f} ms')
+    print(f'  偏移变化范围:       {min(offsets):+.1f} ~ {max(offsets):+.1f} ms')
+    print(f'  漂移率:             {drift_ms_per_min:+.2f} ms/min  ({drift_ppm:+.1f} ppm)')
+    if abs(avg_offset) < 100:
+        print('  ✓ 时间同步良好')
+    else:
+        print(f'  ⚠ 偏移较大（{avg_offset:+.0f}ms），建议检查校时是否成功')
+
+
 # ── 主运行逻辑 ─────────────────────────────────────────────────────────────
 
 async def run(args):
+    if args.calibrate:
+        await run_calibrate(args)
+        return
+
     if args.scan:
         await scan_devices(timeout=args.scan_timeout)
         return
@@ -516,6 +614,11 @@ def main():
                     help='跳过校时（设备时钟已准确时使用）')
     ap.add_argument('--verbose', action='store_true',
                     help='连接后打印完整的 GATT 服务/特征值列表，再开始接收')
+    ap.add_argument('--calibrate', action='store_true',
+                    help='时间校准模式：发校时帧后采集数据，逐帧打印 PC时间−片上时间 偏移，'
+                         '最后统计平均偏移和漂移率（ms/min）')
+    ap.add_argument('--cal-duration', type=float, default=30.0,
+                    help='校准采集时长（秒），默认 30 秒')
     args = ap.parse_args()
 
     try:
