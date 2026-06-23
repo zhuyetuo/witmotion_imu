@@ -89,16 +89,16 @@ async def _run_wit(args):
         packets = buf.feed(bytes(data))
         for pkt in packets:
             p = parse_one_packet(pkt)
-            if p is None or 'acc_x' not in p:
+            if p is None or p['chip_time'] is None:
                 continue
             row = {
                 'pc_ms':  pc_ms,
-                'acc_x':  p['acc_x'],
-                'acc_y':  p['acc_y'],
-                'acc_z':  p['acc_z'],
-                'gyro_x': p['gyro_x'],
-                'gyro_y': p['gyro_y'],
-                'gyro_z': p['gyro_z'],
+                'acc_x':  p['acc'][0],
+                'acc_y':  p['acc'][1],
+                'acc_z':  p['acc'][2],
+                'gyro_x': p['gyro'][0],
+                'gyro_y': p['gyro'][1],
+                'gyro_z': p['gyro'][2],
             }
             try:
                 imu_queue.put_nowait(row)
