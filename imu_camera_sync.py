@@ -226,12 +226,13 @@ def ble_thread_main(args):
 
 # ── 主循环（摄像头 + 显示 + 录制） ─────────────────────────────────────────
 
-def draw_imu_overlay(frame, imu: dict | None, frame_idx: int, elapsed: float, recording: bool):
+def draw_imu_overlay(frame, imu: dict | None, frame_idx: int, elapsed: float,
+                     recording: bool, cam_fps: float, imu_fps: float, imu_target_hz: int):
     h, w = frame.shape[:2]
     overlay = frame.copy()
 
     # 半透明背景条
-    cv2.rectangle(overlay, (0, 0), (w, 160), (0, 0, 0), -1)
+    cv2.rectangle(overlay, (0, 0), (w, 185), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.45, frame, 0.55, 0, frame)
 
     def put(text, row, color=(200, 255, 200)):
@@ -240,15 +241,16 @@ def draw_imu_overlay(frame, imu: dict | None, frame_idx: int, elapsed: float, re
 
     ts = datetime.now().strftime('%H:%M:%S.%f')[:12]
     rec_tag = '  [REC]' if recording else ''
-    put(f'{ts}  frame={frame_idx}  t={elapsed:.1f}s{rec_tag}', 0, (255, 255, 100))
+    put(f'{ts}  t={elapsed:.1f}s{rec_tag}', 0, (255, 255, 100))
+    put(f'CAM {cam_fps:5.1f} fps   |   IMU {imu_fps:5.1f} Hz (期望 {imu_target_hz} Hz)', 1, (255, 200, 100))
 
     if imu:
-        put(f"Acc  X={imu['acc_x']:+7.3f}  Y={imu['acc_y']:+7.3f}  Z={imu['acc_z']:+7.3f}  m/s²", 1)
-        put(f"Gyro X={imu['gyro_x']:+7.4f}  Y={imu['gyro_y']:+7.4f}  Z={imu['gyro_z']:+7.4f}  rad/s", 2)
+        put(f"Acc  X={imu['acc_x']:+7.3f}  Y={imu['acc_y']:+7.3f}  Z={imu['acc_z']:+7.3f}  m/s²", 2)
+        put(f"Gyro X={imu['gyro_x']:+7.4f}  Y={imu['gyro_y']:+7.4f}  Z={imu['gyro_z']:+7.4f}  rad/s", 3)
         imu_age_ms = time.time() * 1000.0 - imu['pc_ms']
-        put(f"IMU delay={imu_age_ms:.0f}ms", 3, (160, 200, 255))
+        put(f"IMU delay={imu_age_ms:.0f}ms", 4, (160, 200, 255))
     else:
-        put('等待 IMU 数据...', 1, (100, 100, 255))
+        put('等待 IMU 数据...', 2, (100, 100, 255))
 
     return frame
 
@@ -294,6 +296,16 @@ def run_camera(args):
     last_imu    = None
     elapsed     = 0.0
 
+    # FPS 统计：用滑动窗口（最近 1 秒内收到的时间戳列表）
+    cam_ts_window: list[float] = []
+    imu_ts_window: list[float] = []
+
+    def fps_from_window(ts_list: list[float], now: float) -> float:
+        cutoff = now - 1.0
+        while ts_list and ts_list[0] < cutoff:
+            ts_list.pop(0)
+        return float(len(ts_list))
+
     try:
         while not stop_event.is_set():
             ret, frame = cap.read()
@@ -304,27 +316,22 @@ def run_camera(args):
             cam_ts = time.time()
             frame_idx += 1
             elapsed = cam_ts - start_time
+            cam_ts_window.append(cam_ts)
 
-            # 排空队列，取最新一帧 IMU
+            # 排空队列，收集本轮所有 IMU 帧（用于 CSV 写入 + FPS 统计）
+            imu_pending: list[dict] = []
             while True:
                 try:
-                    last_imu = imu_queue.get_nowait()
+                    r = imu_queue.get_nowait()
+                    imu_ts_window.append(r['pc_ms'] / 1000.0)
+                    imu_pending.append(r)
                 except queue.Empty:
                     break
+            if imu_pending:
+                last_imu = imu_pending[-1]
 
-            # 如果在录制，把所有排队的 IMU 都写入 CSV（last_imu 已在上面取出）
             if imu_csv_writer:
-                pending = []
-                if last_imu:
-                    pending.append(last_imu)
-                while True:
-                    try:
-                        pending.append(imu_queue.get_nowait())
-                    except queue.Empty:
-                        break
-                if pending:
-                    last_imu = pending[-1]
-                for r in pending:
+                for r in imu_pending:
                     ts_str = datetime.fromtimestamp(r['pc_ms'] / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                     imu_csv_writer.writerow([
                         ts_str,
@@ -332,9 +339,20 @@ def run_camera(args):
                         f"{r['gyro_x']:.6f}", f"{r['gyro_y']:.6f}", f"{r['gyro_z']:.6f}",
                     ])
 
+            # 如果在录制，把本轮从队列取到的 IMU 帧都写入 CSV
+            # （IMU 帧已在上面的 while 循环里全部取出，此处直接用 imu_ts_window 判断）
+            # 注意：imu_ts_window 只记录时间戳，CSV 需要完整数据，改用独立列表
+            # → 见下方 imu_pending 列表
+
+            cam_fps = fps_from_window(cam_ts_window, cam_ts)
+            imu_fps = fps_from_window(imu_ts_window, cam_ts)
+
             # 绘制叠加信息
+            imu_target_hz = 20 if args.device == 'wit' else 25
             frame = draw_imu_overlay(frame, last_imu, frame_idx, elapsed,
-                                     recording=(record_mode and args.output is not None))
+                                     recording=(record_mode and args.output is not None),
+                                     cam_fps=cam_fps, imu_fps=imu_fps,
+                                     imu_target_hz=imu_target_hz)
 
             if video_writer:
                 video_writer.write(frame)
