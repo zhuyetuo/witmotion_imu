@@ -123,7 +123,10 @@ async def _run_wit(args):
         while not stop_event.is_set():
             await asyncio.sleep(0.1)
 
-        await client.stop_notify(subscribed)
+        try:
+            await client.stop_notify(subscribed)
+        except Exception:
+            pass
 
     print('WitMotion BLE 已断开。')
 
@@ -219,8 +222,9 @@ def ble_thread_main(args):
             loop.run_until_complete(_run_hicc(args))
     except Exception as e:
         print(f'BLE 线程异常: {e}')
-        stop_event.set()
     finally:
+        # BLE 退出（无论正常/异常/设备掉线）都通知摄像头循环结束
+        stop_event.set()
         loop.close()
 
 
@@ -276,21 +280,23 @@ def run_camera(args):
     print(f'摄像头分辨率: {actual_w}x{actual_h}  目标帧率: {target_fps} fps')
 
     record_mode = args.duration and args.duration > 0
-    out_prefix  = args.output or f'rec_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+    ts_tag  = datetime.now().strftime('%Y%m%d_%H%M%S')
+    dev_tag = args.device                                   # 'wit' or 'hicc'
+    base    = f'{args.output}_{dev_tag}_{ts_tag}' if args.output else f'rec_{dev_tag}_{ts_tag}'
 
     video_writer = None
     imu_csv_file = None
     imu_csv_writer = None
 
     if record_mode and args.output:
-        video_path = f'{out_prefix}_video.mp4'
-        imu_path   = f'{out_prefix}_imu.csv'
+        video_path = f'{base}_video.mp4'
+        imu_path   = f'{base}_imu.csv'
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         video_writer = cv2.VideoWriter(video_path, fourcc, float(target_fps), (actual_w, actual_h))
         imu_csv_file   = open(imu_path, 'w', newline='', encoding='utf-8-sig')
         imu_csv_writer = csv.writer(imu_csv_file)
-        imu_csv_writer.writerow(['pc_timestamp', 'acc_x_ms2', 'acc_y_ms2', 'acc_z_ms2',
-                                  'gyro_x_rads', 'gyro_y_rads', 'gyro_z_rads'])
+        imu_csv_writer.writerow(['timestamp', 'acc_x', 'acc_y', 'acc_z',
+                                  'gyro_x', 'gyro_y', 'gyro_z'])
         print(f'录制模式: {args.duration}s  视频→{video_path}  IMU→{imu_path}')
     elif record_mode:
         print('录制模式（无 -o 参数，不保存文件）。')
@@ -392,7 +398,7 @@ def run_camera(args):
         cv2.destroyAllWindows()
         print(f'\n共采集 {frame_idx} 帧视频  {elapsed:.1f}s  目标 {target_fps} fps')
         if args.output and record_mode:
-            print(f'已保存: {out_prefix}_video.mp4  {out_prefix}_imu.csv')
+            print(f'已保存: {base}_video.mp4  {base}_imu.csv')
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
