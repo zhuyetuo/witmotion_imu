@@ -113,13 +113,18 @@ python parse_wit.py WIT12.TXT -o out.csv  --format labelstudio
 
 直接通过 BLE 连接设备，实时接收数据。
 
-### 用法
+### 标准使用流程
 
 ```bash
 # 第一步：先扫描，确认能看到设备
 python wit_ble_live.py --scan
 
-# 第二步：按名称关键字自动连接（设备名一般是 WTSDCL 或含 WT901）
+# 第二步（可选）：用官方上位机软件给设备校准时间，再断开上位机连接
+# 第三步：时间漂移评估（评估芯片时钟精度，默认 30 秒，可加 --cal-duration 改时长）
+python wit_ble_live.py --name WTSDCL --calibrate
+python wit_ble_live.py --name WTSDCL --calibrate --cal-duration 60
+
+# 第四步：正式采集
 python wit_ble_live.py --name WTSDCL -o live_labelstudio.csv
 
 # 也可以用MAC地址直连
@@ -135,6 +140,38 @@ python wit_ble_live.py --name WTSDCL --list-services
 按 `Ctrl+C` 停止采集，已写入的CSV文件会被正常关闭保存。
 
 实时采集同样会自动剔除蓝牙重连导致的坏帧（行为跟离线脚本一致），可用 `--keep-bad-frames` 关闭。
+
+### 时间校准与漂移评估
+
+WitMotion 设备**没有自动校时**，需要先用官方上位机软件手动同步时间，再断开上位机。用 `--calibrate` 模式评估校准后的漂移情况：
+
+```bash
+# 1. 打开官方上位机软件 → 连接设备 → 校准时间 → 断开连接（关闭软件）
+# 2. 评估时间漂移（30秒，约750帧）
+python wit_ble_live.py --name WTSDCL --calibrate --cal-duration 30
+```
+
+输出示例：
+
+```
+  [   1] PC=14:30:24.312  片上=14:30:24.000  PC-chip=+312.0ms  elapsed=0.0s
+  [   2] PC=14:30:24.332  片上=14:30:24.020  PC-chip=+312.1ms  elapsed=0.0s
+  ...
+── 漂移评估结果（750 帧，30.0 秒）──
+  平均偏移 (PC-chip):  +315.2 ms  ← BLE 传输延迟
+  偏移范围:            +310.1 ~ +320.8 ms
+  漂移率:              +0.12 ms/min  (+2.0 ppm)
+  推算 1小时误差:      +7 ms
+  推算 1天误差:        +0.17 秒
+  ✓ 晶振精度良好（<1 ms/min）
+```
+
+| 指标 | 说明 |
+|---|---|
+| 平均偏移 | BLE 传输 + 缓冲延迟，正常约 300~500ms，与数据质量无关 |
+| 漂移率 | 片上晶振精度，决定长时采集的时间轴准确度 |
+| <1 ms/min | 晶振精度良好，数小时内误差可接受 |
+| >10 ms/min | 漂移严重，长时采集需要定期重新校时 |
 
 ### 已知GATT UUID（按优先级自动尝试，无需手动指定）
 
@@ -194,17 +231,21 @@ BLE GATT UUID：
 | TX (Notify) | `A6ED0202-D344-460A-8075-B9E8EC90D71B` | 设备 → App（订阅接收） |
 | RX (Write)  | `A6ED0203-D344-460A-8075-B9E8EC90D71B` | App → 设备（写校时帧） |
 
-### 用法
+### 标准使用流程
 
 ```bash
 # 先安装依赖（如果尚未安装）
 pip install bleak
 
-# 扫描附近所有 BLE 设备，确认能看到 HICC_PetCollar
+# 第一步：扫描附近所有 BLE 设备，确认能看到 HICC_PetCollar
 python hicc_ble_debug.py --scan
 
-# 连接指定 MAC，自动校时，终端实时打印数据
-python hicc_ble_debug.py --address EA:CB:3E:CF:00:1A
+# 第二步：时间校准与漂移评估（连接后自动下发北京时间，采集30秒）
+python hicc_ble_debug.py --address EA:CB:3E:CF:00:1B --calibrate
+python hicc_ble_debug.py --address EA:CB:3E:CF:00:1B --calibrate --cal-duration 10
+
+# 第三步：实时打印，观察时间漂移
+python hicc_ble_debug.py --address EA:CB:3E:CF:00:1B
 
 # 连接并同时写入 CSV 文件（自动生成 _6axis.csv 和 _env.csv 两个文件）
 python hicc_ble_debug.py --address EA:CB:3E:CF:00:1A -o hicc_data.csv
@@ -215,6 +256,28 @@ python hicc_ble_debug.py --address EA:CB:3E:CF:00:1A --list-services
 # 跳过校时（设备时钟已准确时使用）
 python hicc_ble_debug.py --address EA:CB:3E:CF:00:1A --no-timesync
 ```
+
+### 时间校准与漂移评估
+
+HICC_PetCollar **脚本连接时自动下发北京时间**，无需手动操作。`--calibrate` 模式评估校准后的漂移：
+
+```bash
+python hicc_ble_debug.py --address EA:CB:3E:CF:00:1B --calibrate --cal-duration 30
+```
+
+输出示例（实测）：
+
+```
+  [   1] chip=1750686624000ms  PC-chip=+12.3ms  elapsed=0.0s
+  ...
+── 校准结果（750 帧，30.0 秒）──
+  平均偏移 (PC-chip): +12.5 ms     ← BLE 传输延迟（比 WitMotion 低，因固件帧更小）
+  偏移变化范围:       +10.1 ~ +15.8 ms
+  漂移率:             -6.50 ms/min  (-108.3 ppm)
+  ⚠ 晶振有轻微漂移，长时采集建议重新校时
+```
+
+> 实测该设备晶振漂移约 **-6.5 ms/min（-108 ppm）**，1小时累计误差约 390ms，1天约 9.4秒。每次连接脚本都会自动重新校时，因此正常使用影响不大。
 
 按 `Ctrl+C` 停止，CSV 文件会被正常关闭保存。
 
