@@ -246,14 +246,14 @@ def draw_imu_overlay(frame, imu: dict | None, frame_idx: int, elapsed: float,
     def rate_color(actual, target):
         return (100, 100, 255) if abs(actual - target) / max(target, 1) > 0.2 else (255, 200, 100)
 
-    put(f'CAM {cam_fps:5.1f} fps  (目标 {target_fps} fps)', 1, rate_color(cam_fps, target_fps))
-    put(f'IMU {imu_fps:5.1f} Hz   (目标 {target_fps} Hz)', 2, rate_color(imu_fps, target_fps))
+    put(f'CAM {cam_fps:5.1f} fps  (target {target_fps} fps)', 1, rate_color(cam_fps, target_fps))
+    put(f'IMU {imu_fps:5.1f} Hz   (target {target_fps} Hz)', 2, rate_color(imu_fps, target_fps))
 
     if imu:
-        put(f"Acc  X={imu['acc_x']:+7.3f}  Y={imu['acc_y']:+7.3f}  Z={imu['acc_z']:+7.3f}  m/s²", 3)
+        put(f"Acc  X={imu['acc_x']:+7.3f}  Y={imu['acc_y']:+7.3f}  Z={imu['acc_z']:+7.3f}  m/s2", 3)
         put(f"Gyro X={imu['gyro_x']:+7.4f}  Y={imu['gyro_y']:+7.4f}  Z={imu['gyro_z']:+7.4f}  rad/s", 4)
     else:
-        put('等待 IMU 数据...', 3, (100, 100, 255))
+        put('Waiting for IMU...', 3, (100, 100, 255))
 
     return frame
 
