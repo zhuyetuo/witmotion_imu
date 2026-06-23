@@ -237,6 +237,71 @@ def build_rows(packets, device_name, reproduce_quirk=True, wallclock_start='10:4
 LABELSTUDIO_HEADER = ['timestamp', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z']
 
 
+def apply_drift_correction(packets, pc_start: datetime, pc_end: datetime):
+    """
+    对离线采集的数据做线性时间漂移补偿。
+
+    原理（两端锚点线性插值）：
+        采集前后各记录一次 PC 时间和芯片时间，以 PC 时间为真值，
+        按帧序号在两个锚点之间线性插值，把每帧的芯片时间校正到真实时刻。
+
+        corrected[i] = pc_start + (chip[i] - chip_start) × scale
+        scale = (pc_end - pc_start) / (chip_end - chip_start)
+
+    参数：
+        pc_start  : 采集开始时 PC 侧的真实时刻（datetime，需与 chip_start 同时记录）
+        pc_end    : 取回数据时 PC 侧的真实时刻（datetime，需与 chip_end 同时记录）
+
+    注意：
+        - 补偿后的时间轴以 PC 时间为准，不再依赖芯片晶振精度。
+        - 若芯片时间戳非单调（坏帧），建议先调用 fix_nonmonotonic_packets()。
+        - 温度剧变（>10°C）可能导致漂移非线性；如有条件，中途多记录几个锚点
+          做分段线性插值效果更好。
+
+    返回：
+        新的 packets 列表，chip_time / hour / minute / second / ms 字段已替换为校正值。
+    """
+    if not packets:
+        return packets
+
+    # 过滤出有效时间戳的帧
+    valid = [(i, p) for i, p in enumerate(packets) if p['chip_time'] is not None]
+    if len(valid) < 2:
+        print('警告: 有效时间戳帧数不足，无法做漂移补偿。', file=sys.stderr)
+        return packets
+
+    chip_start = valid[0][1]['chip_time']
+    chip_end   = valid[-1][1]['chip_time']
+    chip_span  = (chip_end - chip_start).total_seconds()
+    pc_span    = (pc_end - pc_start).total_seconds()
+
+    if chip_span <= 0:
+        print('警告: 芯片时间跨度为0，无法做漂移补偿。', file=sys.stderr)
+        return packets
+
+    scale = pc_span / chip_span
+    drift_ppm = (pc_span - chip_span) / pc_span * 1_000_000
+    print(f'漂移补偿: chip跨度={chip_span:.3f}s  PC跨度={pc_span:.3f}s  '
+          f'scale={scale:.6f}  漂移={drift_ppm:+.1f}ppm')
+
+    corrected = []
+    for p in packets:
+        p = dict(p)  # 浅拷贝，避免修改原始数据
+        if p['chip_time'] is not None:
+            elapsed_chip = (p['chip_time'] - chip_start).total_seconds()
+            new_dt = pc_start + timedelta(seconds=elapsed_chip * scale)
+            p['chip_time'] = new_dt
+            p['year']   = new_dt.year
+            p['month']  = new_dt.month
+            p['day']    = new_dt.day
+            p['hour']   = new_dt.hour
+            p['minute'] = new_dt.minute
+            p['second'] = new_dt.second
+            p['ms']     = new_dt.microsecond // 1000
+        corrected.append(p)
+    return corrected
+
+
 def fix_nonmonotonic_packets(packets):
     """
     检测并剔除时间戳/数据异常的坏帧，保证返回的序列时间戳严格单调递增。
@@ -386,6 +451,11 @@ def main():
     ap.add_argument('--keep-bad-frames', action='store_true',
                      help='labelstudio 格式默认会自动剔除时间戳非单调递增的孤立坏帧'
                           '（例如设备蓝牙重连导致时钟瞬间回退），加此参数则保留所有帧不做剔除')
+    ap.add_argument('--drift-start', default=None,
+                     help='漂移补偿起始锚点：采集开始时 PC 的真实时刻，格式 "YYYY-MM-DD HH:MM:SS"。'
+                          '需与 --drift-end 同时指定才生效。')
+    ap.add_argument('--drift-end', default=None,
+                     help='漂移补偿结束锚点：取回数据时 PC 的真实时刻，格式 "YYYY-MM-DD HH:MM:SS"。')
     args = ap.parse_args()
 
     with open(args.input, 'rb') as f:
@@ -395,6 +465,18 @@ def main():
     if not packets:
         print('未解析到任何 0x55 0x61 数据包，请检查输入文件。', file=sys.stderr)
         sys.exit(1)
+
+    # 漂移补偿（需同时指定两个锚点）
+    if args.drift_start and args.drift_end:
+        try:
+            pc_start = datetime.strptime(args.drift_start, '%Y-%m-%d %H:%M:%S')
+            pc_end   = datetime.strptime(args.drift_end,   '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            print('错误: --drift-start / --drift-end 格式应为 "YYYY-MM-DD HH:MM:SS"', file=sys.stderr)
+            sys.exit(1)
+        packets = apply_drift_correction(packets, pc_start, pc_end)
+    elif args.drift_start or args.drift_end:
+        print('警告: --drift-start 和 --drift-end 需同时指定，漂移补偿已跳过。', file=sys.stderr)
 
     device_name = args.device_name or args.input.split('/')[-1].split('\\')[-1]
 
