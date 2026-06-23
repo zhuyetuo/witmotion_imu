@@ -12,6 +12,7 @@ IMU 数据采集与解析工具集，目前包含两套设备的支持：
 | `wit_drift_analysis.py` | WitMotion | 三阶段时间漂移分析：测量 → 补偿 → 验证，含可视化图表 |
 | `hicc_ble_debug.py` | HICC_PetCollar | 通过 BLE 连接自制设备，实时解析 0x55AA 帧，自动校时，打印数据或写入 CSV |
 | `hicc_drift_analysis.py` | HICC_PetCollar | 三阶段时间漂移分析：测量 → 补偿 → 验证，含可视化图表 |
+| `imu_camera_sync.py` | 两者 | IMU + 摄像头同步采集，实时显示叠加，可录制视频和 Label Studio 格式 CSV |
 
 `wit_ble_live.py` 与 `parse_wit.py` 必须放在**同一个文件夹**下——前者会 import 后者的协议解析逻辑。
 
@@ -405,6 +406,63 @@ witmotion_imu/
 ├── wit_drift_analysis.py   # WitMotion 三阶段漂移分析（依赖 parse_wit.py + wit_ble_live.py）
 ├── hicc_ble_debug.py       # HICC_PetCollar 自制设备 BLE 调试（独立，无额外依赖）
 ├── hicc_drift_analysis.py  # HICC_PetCollar 三阶段漂移分析（依赖 hicc_ble_debug.py）
+├── imu_camera_sync.py      # IMU + 摄像头同步采集（依赖 wit_ble_live.py / hicc_ble_debug.py）
 └── README.md               # 本文档
 ```
+
+---
+
+## 四、IMU + 摄像头同步采集：`imu_camera_sync.py`
+
+同时连接 IMU 设备（BLE）和 USB 摄像头，实时显示画面并叠加 IMU 数据，可录制视频和同步 IMU CSV。
+
+```bash
+pip install bleak opencv-python
+```
+
+### 用法
+
+```bash
+# 实时显示（按 Q 退出）
+python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --fps 25
+python imu_camera_sync.py --device wit --name WTSDCL --fps 20
+
+# 录制 60 秒，保存视频 + IMU CSV
+python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --fps 25 --duration 60 -o rec
+python imu_camera_sync.py --device wit --name WTSDCL --fps 20 --duration 60 -o rec
+
+# 指定摄像头编号（默认 0）
+python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --fps 25 --camera 1
+```
+
+### 输出文件
+
+录制模式（`-o rec`）自动生成带设备类型和时间戳的文件名：
+
+```
+rec_hicc_20260623_181024_video.mp4   ← 视频
+rec_hicc_20260623_181024_imu.csv     ← IMU 数据（Label Studio 格式）
+
+rec_wit_20260623_181024_video.mp4
+rec_wit_20260623_181024_imu.csv
+```
+
+IMU CSV 格式（Label Studio 时间序列可直接导入）：
+
+```
+timestamp,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z
+2026-06-23 18:10:24.644,0.018432,-0.012051,0.997623,0.000012,-0.000034,0.000008
+```
+
+### 画面叠加信息
+
+```
+18:10:24.644  t=18.7s
+CAM  25.0 fps  (target 25 fps)
+IMU  25.1 Hz   (target 25 Hz)
+Acc  X= +0.018  Y= -0.012  Z= +0.998  m/s2
+Gyro X=+0.0000  Y=-0.0000  Z=+0.0000  rad/s
+```
+
+CAM fps 和 IMU Hz 偏离目标 >20% 时变红提示。`--fps` 范围 1-30，视频帧率和 IMU CSV 采样率同步。
 
