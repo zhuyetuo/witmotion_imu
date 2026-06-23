@@ -266,13 +266,16 @@ _frame_count = 0
 def print_decoded(d: dict):
     global _frame_count
     _frame_count += 1
-    ts = d.get('timestamp_str', '?')
+    chip_ts = d.get('timestamp_str', '?')
     ft = d.get('frame_type', '?')
+    # 电脑系统时间（北京时间）
+    pc_ts = datetime.now(TZ_CST).strftime('%H:%M:%S.') + \
+            f'{datetime.now(TZ_CST).microsecond // 1000:03d}'
 
     if ft == '6axis':
         ax, ay, az = d.get('acc_x', 0), d.get('acc_y', 0), d.get('acc_z', 0)
         gx, gy, gz = d.get('gyro_x', 0), d.get('gyro_y', 0), d.get('gyro_z', 0)
-        print(f'[{_frame_count:>5d}][6轴] {ts}  '
+        print(f'[{_frame_count:>5d}][6轴] PC={pc_ts}  片上={chip_ts}  '
               f'acc=({ax:+.4f},{ay:+.4f},{az:+.4f})m/s²  '
               f'gyro=({gx:+.6f},{gy:+.6f},{gz:+.6f})rad/s')
     elif ft == 'env':
@@ -280,7 +283,7 @@ def print_decoded(d: dict):
         h_in   = d.get('hum_in',    0)
         t_body = d.get('temp_body', 0)
         batt   = d.get('batt_mv',   0)
-        print(f'[{_frame_count:>5d}][环境] {ts}  '
+        print(f'[{_frame_count:>5d}][环境] PC={pc_ts}  片上={chip_ts}  '
               f'室温={t_in:.1f}°C  湿度={h_in:.1f}%RH  '
               f'体温={t_body:.1f}°C  电池={batt}mV')
     elif ft == 'timesync_request':
