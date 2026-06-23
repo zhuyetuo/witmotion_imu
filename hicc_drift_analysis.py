@@ -279,6 +279,10 @@ def plot_results(result, comp):
         print('\n提示: pip install matplotlib 可显示图表')
         return
 
+    # Windows 中文字体配置
+    plt.rcParams['font.family'] = ['Microsoft YaHei', 'SimHei', 'DejaVu Sans']
+    plt.rcParams['axes.unicode_minus'] = False
+
     elapsed = result['elapsed_s']
     raw_off = result['offset_ms']
     slope   = result['slope_ms_per_s']

@@ -313,6 +313,10 @@ def plot_results(result: dict, comp_offsets: list[float]):
         print('\n提示: 安装 matplotlib 可显示漂移趋势图: pip install matplotlib')
         return
 
+    # Windows 中文字体配置
+    plt.rcParams['font.family'] = ['Microsoft YaHei', 'SimHei', 'DejaVu Sans']
+    plt.rcParams['axes.unicode_minus'] = False
+
     elapsed = result['elapsed_s']
     raw_off = result['offset_ms']
     slope   = result['slope_ms_per_s']
