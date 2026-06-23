@@ -226,12 +226,12 @@ def ble_thread_main(args):
 
 # ── 主循环（摄像头 + 显示 + 录制） ─────────────────────────────────────────
 
-def draw_imu_overlay(frame, imu: dict | None, frame_idx: int, elapsed: float, recording: bool):
+def draw_imu_overlay(frame, imu: dict | None, frame_idx: int, elapsed: float,
+                     recording: bool, cam_fps: float, imu_fps: float, target_fps: int):
     h, w = frame.shape[:2]
     overlay = frame.copy()
 
-    # 半透明背景条
-    cv2.rectangle(overlay, (0, 0), (w, 160), (0, 0, 0), -1)
+    cv2.rectangle(overlay, (0, 0), (w, 185), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.45, frame, 0.55, 0, frame)
 
     def put(text, row, color=(200, 255, 200)):
@@ -240,32 +240,40 @@ def draw_imu_overlay(frame, imu: dict | None, frame_idx: int, elapsed: float, re
 
     ts = datetime.now().strftime('%H:%M:%S.%f')[:12]
     rec_tag = '  [REC]' if recording else ''
-    put(f'{ts}  frame={frame_idx}  t={elapsed:.1f}s{rec_tag}', 0, (255, 255, 100))
+    put(f'{ts}  t={elapsed:.1f}s{rec_tag}', 0, (255, 255, 100))
+
+    # 颜色：实际与目标相差 >20% 时变红提示
+    def rate_color(actual, target):
+        return (100, 100, 255) if abs(actual - target) / max(target, 1) > 0.2 else (255, 200, 100)
+
+    put(f'CAM {cam_fps:5.1f} fps  (目标 {target_fps} fps)', 1, rate_color(cam_fps, target_fps))
+    put(f'IMU {imu_fps:5.1f} Hz   (目标 {target_fps} Hz)', 2, rate_color(imu_fps, target_fps))
 
     if imu:
-        put(f"Acc  X={imu['acc_x']:+7.3f}  Y={imu['acc_y']:+7.3f}  Z={imu['acc_z']:+7.3f}  m/s²", 1)
-        put(f"Gyro X={imu['gyro_x']:+7.4f}  Y={imu['gyro_y']:+7.4f}  Z={imu['gyro_z']:+7.4f}  rad/s", 2)
-        imu_age_ms = time.time() * 1000.0 - imu['pc_ms']
-        put(f"IMU delay={imu_age_ms:.0f}ms", 3, (160, 200, 255))
+        put(f"Acc  X={imu['acc_x']:+7.3f}  Y={imu['acc_y']:+7.3f}  Z={imu['acc_z']:+7.3f}  m/s²", 3)
+        put(f"Gyro X={imu['gyro_x']:+7.4f}  Y={imu['gyro_y']:+7.4f}  Z={imu['gyro_z']:+7.4f}  rad/s", 4)
     else:
-        put('等待 IMU 数据...', 1, (100, 100, 255))
+        put('等待 IMU 数据...', 3, (100, 100, 255))
 
     return frame
 
 
 def run_camera(args):
+    target_fps = args.fps
+    frame_interval = 1.0 / target_fps  # 目标帧间隔（秒）
+
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
         print(f'无法打开摄像头 {args.camera}，请检查 --camera 参数。')
         stop_event.set()
         return
 
-    # 尝试设置 720p
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FPS, target_fps)
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f'摄像头分辨率: {actual_w}x{actual_h}')
+    print(f'摄像头分辨率: {actual_w}x{actual_h}  目标帧率: {target_fps} fps')
 
     record_mode = args.duration and args.duration > 0
     out_prefix  = args.output or f'rec_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
@@ -278,24 +286,45 @@ def run_camera(args):
         video_path = f'{out_prefix}_video.mp4'
         imu_path   = f'{out_prefix}_imu.csv'
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        video_writer = cv2.VideoWriter(video_path, fourcc, 30.0, (actual_w, actual_h))
+        video_writer = cv2.VideoWriter(video_path, fourcc, float(target_fps), (actual_w, actual_h))
         imu_csv_file   = open(imu_path, 'w', newline='', encoding='utf-8-sig')
         imu_csv_writer = csv.writer(imu_csv_file)
         imu_csv_writer.writerow(['pc_timestamp', 'acc_x_ms2', 'acc_y_ms2', 'acc_z_ms2',
                                   'gyro_x_rads', 'gyro_y_rads', 'gyro_z_rads'])
         print(f'录制模式: {args.duration}s  视频→{video_path}  IMU→{imu_path}')
     elif record_mode:
-        print('录制模式（无 -o 参数，不保存文件）：实时显示直到时间到。')
+        print('录制模式（无 -o 参数，不保存文件）。')
     else:
         print('实时模式（按 Q 或 Ctrl+C 退出）。')
 
-    start_time  = time.time()
-    frame_idx   = 0
-    last_imu    = None
-    elapsed     = 0.0
+    start_time   = time.time()
+    next_tick    = start_time      # 下一帧的目标时刻（用于精确限速）
+    frame_idx    = 0
+    last_imu: dict | None = None
+    elapsed      = 0.0
+
+    # FPS 统计：滑动 1 秒窗口
+    cam_ts_window: list[float] = []
+    imu_ts_window: list[float] = []
+
+    def fps_from_window(ts_list: list[float], now: float) -> float:
+        cutoff = now - 1.0
+        while ts_list and ts_list[0] < cutoff:
+            ts_list.pop(0)
+        return float(len(ts_list))
+
+    # IMU 按目标频率降采样：每 1/target_fps 秒最多输出一帧
+    imu_next_emit = start_time
 
     try:
         while not stop_event.is_set():
+            # ── 精确限速：等到 next_tick 再读帧 ──
+            now = time.time()
+            sleep_s = next_tick - now
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+            next_tick += frame_interval
+
             ret, frame = cap.read()
             if not ret:
                 print('摄像头读取失败，退出。')
@@ -304,50 +333,51 @@ def run_camera(args):
             cam_ts = time.time()
             frame_idx += 1
             elapsed = cam_ts - start_time
+            cam_ts_window.append(cam_ts)
 
-            # 排空队列，取最新一帧 IMU
+            # 排空 IMU 队列，记录所有帧时间戳（用于实际 Hz 统计）
+            # CSV/显示只取最新一帧（与当前视频帧对齐）
+            latest_imu: dict | None = None
             while True:
                 try:
-                    last_imu = imu_queue.get_nowait()
+                    r = imu_queue.get_nowait()
+                    imu_ts_window.append(r['pc_ms'] / 1000.0)
+                    latest_imu = r
                 except queue.Empty:
                     break
+            if latest_imu is not None:
+                last_imu = latest_imu
 
-            # 如果在录制，把所有排队的 IMU 都写入 CSV（last_imu 已在上面取出）
-            if imu_csv_writer:
-                pending = []
-                if last_imu:
-                    pending.append(last_imu)
-                while True:
-                    try:
-                        pending.append(imu_queue.get_nowait())
-                    except queue.Empty:
-                        break
-                if pending:
-                    last_imu = pending[-1]
-                for r in pending:
-                    ts_str = datetime.fromtimestamp(r['pc_ms'] / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                    imu_csv_writer.writerow([
-                        ts_str,
-                        f"{r['acc_x']:.6f}", f"{r['acc_y']:.6f}", f"{r['acc_z']:.6f}",
-                        f"{r['gyro_x']:.6f}", f"{r['gyro_y']:.6f}", f"{r['gyro_z']:.6f}",
-                    ])
+            # CSV：每帧写一条 IMU（与视频帧 1:1），目标频率控制
+            if imu_csv_writer and last_imu and cam_ts >= imu_next_emit:
+                r = last_imu
+                ts_str = datetime.fromtimestamp(r['pc_ms'] / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                imu_csv_writer.writerow([
+                    ts_str,
+                    f"{r['acc_x']:.6f}", f"{r['acc_y']:.6f}", f"{r['acc_z']:.6f}",
+                    f"{r['gyro_x']:.6f}", f"{r['gyro_y']:.6f}", f"{r['gyro_z']:.6f}",
+                ])
+                imu_next_emit += frame_interval
 
-            # 绘制叠加信息
+            cam_fps = fps_from_window(cam_ts_window, cam_ts)
+            imu_fps = fps_from_window(imu_ts_window, cam_ts)
+
             frame = draw_imu_overlay(frame, last_imu, frame_idx, elapsed,
-                                     recording=(record_mode and args.output is not None))
+                                     recording=(record_mode and args.output is not None),
+                                     cam_fps=cam_fps, imu_fps=imu_fps,
+                                     target_fps=target_fps)
 
             if video_writer:
                 video_writer.write(frame)
 
             cv2.imshow('IMU + Camera Sync', frame)
 
-            # 时长到达，停止录制
             if record_mode and elapsed >= args.duration:
                 print(f'\n已达到录制时长 {args.duration}s，停止。')
                 break
 
             key = cv2.waitKey(1) & 0xFF
-            if key in (ord('q'), ord('Q'), 27):  # Q 或 ESC
+            if key in (ord('q'), ord('Q'), 27):
                 break
 
     except KeyboardInterrupt:
@@ -360,7 +390,7 @@ def run_camera(args):
         if imu_csv_file:
             imu_csv_file.close()
         cv2.destroyAllWindows()
-        print(f'\n共采集 {frame_idx} 帧视频  {elapsed:.1f}s')
+        print(f'\n共采集 {frame_idx} 帧视频  {elapsed:.1f}s  目标 {target_fps} fps')
         if args.output and record_mode:
             print(f'已保存: {out_prefix}_video.mp4  {out_prefix}_imu.csv')
 
@@ -377,6 +407,9 @@ def main():
                     help='手动指定 WitMotion Notify UUID（找不到数据时用）')
     ap.add_argument('--camera', type=int, default=0,
                     help='摄像头编号，默认 0')
+    ap.add_argument('--fps', type=int, default=20,
+                    choices=range(1, 31), metavar='N',
+                    help='目标帧率/采样率（1-30，默认 20），视频和 IMU 输出同步到此频率')
     ap.add_argument('--duration', type=float, default=0,
                     help='录制时长（秒），0 或不填=实时模式，不自动停止')
     ap.add_argument('-o', '--output', default=None,
