@@ -415,8 +415,11 @@ async def run_calibrate(args):
     buf = FrameBuffer()
     samples: list[tuple[float, float]] = []   # (pc_ms, chip_ms)
 
+    # 设备把北京时间当 UTC 算 Unix ms，所以比较时 PC 时间也要加 8h 对齐
+    TZ_OFFSET_MS = 8 * 3600 * 1000.0
+
     def notification_handler(sender, data: bytearray):
-        pc_ms = time.time() * 1000.0
+        pc_ms = time.time() * 1000.0 + TZ_OFFSET_MS
         frames = buf.feed(bytes(data))
         for frame in frames:
             if frame[3] != CMD_REPORT:
