@@ -332,8 +332,9 @@ async def run_calibrate(args):
     print(f'  平均偏移 (PC-chip):  {avg_offset:+.1f} ms  ← BLE 传输延迟')
     print(f'  偏移范围:            {min(offsets_ms):+.1f} ~ {max(offsets_ms):+.1f} ms')
     print(f'  漂移率:              {drift_ms_per_min:+.2f} ms/min  ({drift_ppm:+.1f} ppm)')
-    print(f'  推算 1小时误差:      {drift_ms_per_min*60:+.0f} ms')
-    print(f'  推算 1天误差:        {drift_ms_per_min*60*24/1000:+.2f} 秒')
+    print(f'  推算 1分钟误差:      约 {abs(drift_ms_per_min):.1f} ms')
+    print(f'  推算 1小时误差:      约 {abs(drift_ms_per_min)*60/1000:.1f} 秒')
+    print(f'  推算 1天误差:        约 {abs(drift_ms_per_min)*1440/1000:.1f} 秒')
     if abs(drift_ms_per_min) < 1.0:
         print('  ✓ 晶振精度良好（<1 ms/min）')
     elif abs(drift_ms_per_min) < 10.0:
