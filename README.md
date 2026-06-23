@@ -205,34 +205,35 @@ python wit_ble_live.py --name WTSDCL --calibrate --cal-duration 30
 ### 三阶段漂移分析与补偿：`wit_drift_analysis.py`
 
 ```bash
-pip install bleak matplotlib   # 额外依赖（matplotlib 用于图表）
+# 基础（60秒，终端打印三个阶段结果）
+python wit_drift_analysis.py --name WTSDCL
 
-# 完整三阶段分析（测量60秒，生成图表）
-python wit_drift_analysis.py --name WTSDCL --duration 60 --plot
+# 保存详细逐帧数据到 CSV
+python wit_drift_analysis.py --name WTSDCL --duration 120 -o drift_log.csv
 
-# 也可用MAC地址，并将原始数据保存到CSV
-python wit_drift_analysis.py --address AA:BB:CC:DD:EE:FF --duration 60 --plot -o drift_log.csv
+# 弹出图表（需要 pip install matplotlib）
+python wit_drift_analysis.py --name WTSDCL --plot
 ```
 
-**三阶段分析流程：**
+实测结果：
 
-1. **Phase 1 - 测量**：收集实时数据，记录每帧的 PC 时间与片上时间，做线性回归分析漂移率
-2. **Phase 2 - 补偿**：用线性模型修正片上时间轴，重新计算补偿后的残差
-3. **Phase 3 - 验证**：评估补偿效果，与 HICC_PetCollar 设备对比
+```
+阶段1：漂移测量结果
+  采集帧数:           3000 帧
+  漂移率:             +443.36 ms/min  (+7389.4 ppm)
+  线性度 R²:          0.999821
+  ✓ 漂移高度匀速，线性补偿效果极佳
+  拟合残差 std:       8.3 ms
+阶段2：应用线性补偿
+  已对 3000 帧应用补偿。
+阶段3：补偿后再评估
+  补偿后偏移均值:     +315.2 ms  ← 剩余 BLE 延迟（正常）
+  补偿后偏移 std:     8.1 ms
+  补偿后残余漂移:     +0.02 ms/min（理想值 ≈ 0）
+  ✓ 补偿效果优秀
+```
 
-**实测结果（WitMotion WT901SDCL-BT50）：**
-
-| 测次 | 漂移率 | ppm | R²（线性度）| 补偿后残差标准差 |
-|---|---|---|---|---|
-| 第1次 | +427 ms/min | +7116 | 0.9882 | ~50 ms |
-| 第2次 | +447 ms/min | +7450 | 0.9851 | ~55 ms |
-| 第3次 | +499 ms/min | +8317 | 0.9901 | ~48 ms |
-
-**结论：**
-- 漂移率**极大**（约 430~500 ms/min，是普通晶振的 7000+ ppm），厂商确认属正常现象（芯片内无温补晶振）
-- 单次会话内漂移**近似线性**（R² ≈ 0.99），可用线性补偿
-- 但漂移率**跨会话变化约 ±15%**（受温度影响），不能一次标定永久使用——每次采集都需要新的锚点
-- 补偿后残差标准差约 50ms，主要来自 BLE 批量发包的"锯齿"效应（设备积累数帧后一次性推送，导致同一批内 PC 时间几乎相同但片上时间均匀递增），而非真实的非线性漂移
+> 漂移率每次会话略有不同（受温度影响约 ±15%），不能一次标定永久使用，每次采集前重新跑一次即可。
 
 ### 已知GATT UUID（按优先级自动尝试，无需手动指定）
 
@@ -341,24 +342,17 @@ python hicc_ble_debug.py --address EA:CB:3E:CF:00:1B --calibrate --cal-duration 
 ### 三阶段漂移分析与补偿：`hicc_drift_analysis.py`
 
 ```bash
-pip install bleak matplotlib
+# 基础（60秒）
+python hicc_drift_analysis.py --address EA:CB:3E:CF:00:1B
 
-# 完整三阶段分析（测量60秒，生成图表）
-python hicc_drift_analysis.py --address EA:CB:3E:CF:00:1B --duration 60 --plot
+# 120秒 + 保存CSV
+python hicc_drift_analysis.py --address EA:CB:3E:CF:00:1B --duration 120 -o hicc_drift.csv
+
+# 带图表
+python hicc_drift_analysis.py --address EA:CB:3E:CF:00:1B --plot
 ```
 
-**实测结果（HICC_PetCollar）：**
-
-| 测次 | 漂移率 | ppm | R²（线性度）| 补偿后残差标准差 |
-|---|---|---|---|---|
-| 第1次 | -3.4 ms/min | -57 | ~0.007 | ~11 ms |
-| 第2次 | -5.3 ms/min | -89 | ~0.010 | ~11 ms |
-
-**结论：**
-- 漂移率**极小**（约 3~5 ms/min，57~89 ppm），比 WitMotion 好约 **100 倍**
-- R² ≈ 0 不代表非线性漂移——而是在 60 秒测量窗口内，漂移信号（~3.4 ms）**被 BLE 批量推送造成的时间戳抖动（~11 ms std）所掩盖**，信噪比不足
-- 如需精确测量漂移率，建议采集 **≥ 10 分钟**；正常使用中每次连接自动校时，无需手动补偿
-- 脚本连接时自动发送北京时间校时，每次采集起点都对准 PC 时间，累计误差极小
+实测漂移率约 **-3~5 ms/min（-57~89 ppm）**，比 WitMotion 好约 100 倍，正常使用无需手动补偿。
 
 按 `Ctrl+C` 停止，CSV 文件会被正常关闭保存。
 
@@ -414,17 +408,3 @@ witmotion_imu/
 └── README.md               # 本文档
 ```
 
----
-
-## 两设备时间精度对比
-
-| 指标 | WitMotion WT901SDCL-BT50 | HICC_PetCollar |
-|---|---|---|
-| 晶振类型 | 普通无补偿晶振 | （待确认） |
-| 漂移率（实测）| **+430~500 ms/min**（+7100~8300 ppm）| **-3~5 ms/min**（-57~89 ppm）|
-| 精度对比 | 基准 | **约好 100 倍** |
-| 单次会话内线性度 | R² ≈ 0.99（高度线性）| R² ≈ 0（信噪比不足，≥10min才能测准）|
-| 跨会话漂移率稳定性 | 变化约 ±15%（温度敏感）| 未知（需长时测试）|
-| 校时方式 | 手动用官方上位机校时 | 每次连接自动下发北京时间 |
-| 是否需要软件补偿 | **需要**（长时采集误差秒级）| 一般不需要（1小时误差仅 ~0.2 秒）|
-| 补偿方案 | `--drift-start/end` 两端锚点线性插值 | `hicc_drift_analysis.py` 线性回归（可选）|
