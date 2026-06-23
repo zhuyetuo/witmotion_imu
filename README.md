@@ -440,11 +440,11 @@ python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --fps 25 --c
 录制模式（`-o rec`）自动生成带设备类型和时间戳的文件名：
 
 ```
-rec_hicc_20260623_181024_video.mp4   ← 视频
-rec_hicc_20260623_181024_imu.csv     ← IMU 数据（Label Studio 格式）
+rec_hicc_20260623_181024.mp4   ← 视频
+rec_hicc_20260623_181024.csv   ← IMU 数据（Label Studio 格式）
 
-rec_wit_20260623_181024_video.mp4
-rec_wit_20260623_181024_imu.csv
+rec_wit_20260623_181024.mp4
+rec_wit_20260623_181024.csv
 ```
 
 IMU CSV 格式（Label Studio 时间序列可直接导入）：

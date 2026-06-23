@@ -289,8 +289,8 @@ def run_camera(args):
     imu_csv_writer = None
 
     if record_mode and args.output:
-        video_path = f'{base}_video.mp4'
-        imu_path   = f'{base}_imu.csv'
+        video_path = f'{base}.mp4'
+        imu_path   = f'{base}.csv'
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         video_writer = cv2.VideoWriter(video_path, fourcc, float(target_fps), (actual_w, actual_h))
         imu_csv_file   = open(imu_path, 'w', newline='', encoding='utf-8-sig')
@@ -398,7 +398,7 @@ def run_camera(args):
         cv2.destroyAllWindows()
         print(f'\n共采集 {frame_idx} 帧视频  {elapsed:.1f}s  目标 {target_fps} fps')
         if args.output and record_mode:
-            print(f'已保存: {base}_video.mp4  {base}_imu.csv')
+            print(f'已保存: {base}.mp4  {base}.csv')
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
