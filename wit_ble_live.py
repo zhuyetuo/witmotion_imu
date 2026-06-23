@@ -320,14 +320,6 @@ async def run_calibrate(args):
     total_pc_s   = (pc_epoch1 - pc_epoch0) / 1000.0
     total_chip_s = (chip_dt1 - chip_dt0).total_seconds()
 
-    offsets_ms = [(datetime.now().replace(
-                       hour=chip_dt.hour, minute=chip_dt.minute,
-                       second=chip_dt.second, microsecond=chip_dt.microsecond * 1000
-                   ) - chip_dt).total_seconds() * 1000
-                  for _, chip_dt in samples]
-
-    # 重新算一遍用 PC 本地时间做参照
-    ref_pc0 = datetime.fromtimestamp(pc_epoch0 / 1000.0)
     offsets_ms = [
         (datetime.fromtimestamp(pc_ms / 1000.0) - chip_dt).total_seconds() * 1000.0
         for pc_ms, chip_dt in samples
