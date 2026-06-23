@@ -89,7 +89,7 @@ async def _run_wit(args):
         packets = buf.feed(bytes(data))
         for pkt in packets:
             p = parse_one_packet(pkt)
-            if p is None:
+            if p is None or 'acc_x' not in p:
                 continue
             row = {
                 'pc_ms':  pc_ms,
