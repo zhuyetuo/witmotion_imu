@@ -424,14 +424,14 @@ pip install bleak opencv-python
 
 ```bash
 # 实时显示（按 Q 退出）
-python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --fps 25
-python imu_camera_sync.py --device wit --name WTSDCL --fps 20
+python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --fps 25 --camera 0
+python imu_camera_sync.py --device wit --name WTSDCL --fps 20 --camera 0
 
 # 录制 60 秒，保存视频 + IMU CSV
-python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --fps 25 --duration 60 -o rec
-python imu_camera_sync.py --device wit --name WTSDCL --fps 20 --duration 60 -o rec
+python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --fps 25 --duration 60 -o rec --camera 0
+python imu_camera_sync.py --device wit --name WTSDCL --fps 20 --duration 60 -o rec --camera 0
 
-# 指定摄像头编号（默认 0）
+# 切换到第二个摄像头
 python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --fps 25 --camera 1
 ```
 
