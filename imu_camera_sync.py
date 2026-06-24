@@ -92,7 +92,8 @@ async def _run_wit(args):
             if p is None or p['chip_time'] is None:
                 continue
             row = {
-                'pc_ms':  pc_ms,
+                'pc_ms':     pc_ms,
+                'chip_time': p['chip_time'],   # datetime，用于 CSV 时间戳
                 'acc_x':  p['acc'][0],
                 'acc_y':  p['acc'][1],
                 'acc_z':  p['acc'][2],
@@ -140,6 +141,7 @@ def _setup_hicc():
             find_tx_uuid, find_rx_uuid, send_timesync,
             DP_ACC_X, DP_ACC_Y, DP_ACC_Z,
             DP_GYRO_X, DP_GYRO_Y, DP_GYRO_Z,
+            DP_TIMESTAMP,
             CMD_REPORT,
         )
     except ImportError as e:
@@ -147,13 +149,13 @@ def _setup_hicc():
         sys.exit(1)
     return (FrameBuffer, parse_dp_sequence, find_tx_uuid, find_rx_uuid,
             send_timesync, DP_ACC_X, DP_ACC_Y, DP_ACC_Z,
-            DP_GYRO_X, DP_GYRO_Y, DP_GYRO_Z, CMD_REPORT)
+            DP_GYRO_X, DP_GYRO_Y, DP_GYRO_Z, DP_TIMESTAMP, CMD_REPORT)
 
 
 async def _run_hicc(args):
     (FrameBuffer, parse_dp_sequence, find_tx_uuid, find_rx_uuid,
      send_timesync, DP_ACC_X, DP_ACC_Y, DP_ACC_Z,
-     DP_GYRO_X, DP_GYRO_Y, DP_GYRO_Z, CMD_REPORT) = _setup_hicc()
+     DP_GYRO_X, DP_GYRO_Y, DP_GYRO_Z, DP_TIMESTAMP, CMD_REPORT) = _setup_hicc()
 
     if not args.address:
         print('HICC 设备需要指定 --address')
@@ -175,13 +177,14 @@ async def _run_hicc(args):
             if DP_ACC_X not in dps or DP_GYRO_X not in dps:
                 continue
             row = {
-                'pc_ms':  pc_ms,
-                'acc_x':  dps[DP_ACC_X]  / 1_000_000.0,
-                'acc_y':  dps[DP_ACC_Y]  / 1_000_000.0,
-                'acc_z':  dps[DP_ACC_Z]  / 1_000_000.0,
-                'gyro_x': dps[DP_GYRO_X] / 1_000_000.0,
-                'gyro_y': dps[DP_GYRO_Y] / 1_000_000.0,
-                'gyro_z': dps[DP_GYRO_Z] / 1_000_000.0,
+                'pc_ms':   pc_ms,
+                'chip_ms': dps.get(DP_TIMESTAMP, 0),
+                'acc_x':   dps[DP_ACC_X]  / 1_000_000.0,
+                'acc_y':   dps[DP_ACC_Y]  / 1_000_000.0,
+                'acc_z':   dps[DP_ACC_Z]  / 1_000_000.0,
+                'gyro_x':  dps[DP_GYRO_X] / 1_000_000.0,
+                'gyro_y':  dps[DP_GYRO_Y] / 1_000_000.0,
+                'gyro_z':  dps[DP_GYRO_Z] / 1_000_000.0,
             }
             try:
                 imu_queue.put_nowait(row)
@@ -319,8 +322,16 @@ def run_camera(args):
             ts_list.pop(0)
         return float(len(ts_list))
 
-    # IMU 按目标频率降采样：每 1/target_fps 秒最多输出一帧
-    imu_next_emit = start_time
+    def imu_ts_str(r: dict, device: str) -> str:
+        """返回毫秒精度时间戳字符串，优先使用芯片时间。"""
+        if device == 'wit' and r.get('chip_time') is not None:
+            ct = r['chip_time']
+            return ct.strftime('%Y-%m-%d %H:%M:%S.') + f'{ct.microsecond // 1000:03d}'
+        elif device == 'hicc' and r.get('chip_ms', 0):
+            return (datetime.utcfromtimestamp(r['chip_ms'] / 1000.0)
+                    .strftime('%Y-%m-%d %H:%M:%S.%f')[:-3])
+        else:
+            return datetime.fromtimestamp(r['pc_ms'] / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
     try:
         while not stop_event.is_set():
@@ -341,29 +352,27 @@ def run_camera(args):
             elapsed = cam_ts - start_time
             cam_ts_window.append(cam_ts)
 
-            # 排空 IMU 队列，记录所有帧时间戳（用于实际 Hz 统计）
-            # CSV/显示只取最新一帧（与当前视频帧对齐）
-            latest_imu: dict | None = None
+            # 排空 IMU 队列，收集本帧期间所有到达的 IMU 数据
+            pending_imu: list[dict] = []
             while True:
                 try:
                     r = imu_queue.get_nowait()
                     imu_ts_window.append(r['pc_ms'] / 1000.0)
-                    latest_imu = r
+                    pending_imu.append(r)
                 except queue.Empty:
                     break
-            if latest_imu is not None:
-                last_imu = latest_imu
+            if pending_imu:
+                last_imu = pending_imu[-1]
 
-            # CSV：每帧写一条 IMU（与视频帧 1:1），目标频率控制
-            if imu_csv_writer and last_imu and cam_ts >= imu_next_emit:
-                r = last_imu
-                ts_str = datetime.fromtimestamp(r['pc_ms'] / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                imu_csv_writer.writerow([
-                    ts_str,
-                    f"{r['acc_x']:.6f}", f"{r['acc_y']:.6f}", f"{r['acc_z']:.6f}",
-                    f"{r['gyro_x']:.6f}", f"{r['gyro_y']:.6f}", f"{r['gyro_z']:.6f}",
-                ])
-                imu_next_emit += frame_interval
+            # CSV：写入本帧期间所有 IMU 帧（原生采样率，不降采样）
+            if imu_csv_writer and pending_imu:
+                for r in pending_imu:
+                    ts_str = imu_ts_str(r, args.device)
+                    imu_csv_writer.writerow([
+                        ts_str,
+                        f"{r['acc_x']:.6f}", f"{r['acc_y']:.6f}", f"{r['acc_z']:.6f}",
+                        f"{r['gyro_x']:.6f}", f"{r['gyro_y']:.6f}", f"{r['gyro_z']:.6f}",
+                    ])
 
             cam_fps = fps_from_window(cam_ts_window, cam_ts)
             imu_fps = fps_from_window(imu_ts_window, cam_ts)
