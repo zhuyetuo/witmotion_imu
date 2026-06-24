@@ -21,8 +21,27 @@ IMU 数据采集与解析工具集，目前包含两套设备的支持：
 ## 环境准备
 
 ```bash
-pip install bleak          # 仅 wit_ble_live.py 需要，parse_wit.py 无第三方依赖
+# 核心依赖（BLE 通信，所有实时脚本都需要）
+pip install bleak
+
+# 漂移分析图表（wit_drift_analysis.py / hicc_drift_analysis.py）
+pip install matplotlib
+
+# IMU + 摄像头同步采集（imu_camera_sync.py）
+pip install opencv-python
+
+# 一次性全装
+pip install bleak matplotlib opencv-python
 ```
+
+| 脚本 | 依赖 |
+|---|---|
+| `parse_wit.py` | 无第三方依赖 |
+| `wit_ble_live.py` | `bleak` |
+| `wit_drift_analysis.py` | `bleak` + `matplotlib` |
+| `hicc_ble_debug.py` | `bleak` |
+| `hicc_drift_analysis.py` | `bleak` + `matplotlib` |
+| `imu_camera_sync.py` | `bleak` + `opencv-python` |
 
 `bleak` 是跨平台 BLE 库，Windows 上基于系统自带的 WinRT 蓝牙 API，**不需要先在 Windows 蓝牙设置里手动配对**，代码直接扫描/连接即可。
 
