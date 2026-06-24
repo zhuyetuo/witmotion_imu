@@ -368,21 +368,31 @@ def run_camera(args):
             cam_fps = fps_from_window(cam_ts_window, cam_ts)
             imu_fps = fps_from_window(imu_ts_window, cam_ts)
 
+            if video_writer:
+                video_writer.write(frame)   # 保存原始帧（无叠加）
+
             frame = draw_imu_overlay(frame, last_imu, frame_idx, elapsed,
                                      recording=(record_mode and args.output is not None),
                                      cam_fps=cam_fps, imu_fps=imu_fps,
                                      target_fps=target_fps)
 
-            if video_writer:
-                video_writer.write(frame)
-
-            cv2.imshow('IMU + Camera Sync', frame)
+            try:
+                cv2.imshow('IMU + Camera Sync', frame)
+            except cv2.error:
+                # opencv-python-headless 不支持 imshow，仅录制模式可继续运行
+                if not record_mode:
+                    print('cv2.imshow 不支持（可能安装的是 headless 版本）。')
+                    print('请执行: pip uninstall opencv-python-headless -y && pip install opencv-python')
+                    break
 
             if record_mode and elapsed >= args.duration:
                 print(f'\n已达到录制时长 {args.duration}s，停止。')
                 break
 
-            key = cv2.waitKey(1) & 0xFF
+            try:
+                key = cv2.waitKey(1) & 0xFF
+            except cv2.error:
+                key = 0xFF
             if key in (ord('q'), ord('Q'), 27):
                 break
 
@@ -395,7 +405,10 @@ def run_camera(args):
             video_writer.release()
         if imu_csv_file:
             imu_csv_file.close()
-        cv2.destroyAllWindows()
+        try:
+            cv2.destroyAllWindows()
+        except cv2.error:
+            pass
         print(f'\n共采集 {frame_idx} 帧视频  {elapsed:.1f}s  目标 {target_fps} fps')
         if args.output and record_mode:
             print(f'已保存: {base}.mp4  {base}.csv')
