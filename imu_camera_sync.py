@@ -368,13 +368,13 @@ def run_camera(args):
             cam_fps = fps_from_window(cam_ts_window, cam_ts)
             imu_fps = fps_from_window(imu_ts_window, cam_ts)
 
+            if video_writer:
+                video_writer.write(frame)   # 保存原始帧（无叠加）
+
             frame = draw_imu_overlay(frame, last_imu, frame_idx, elapsed,
                                      recording=(record_mode and args.output is not None),
                                      cam_fps=cam_fps, imu_fps=imu_fps,
                                      target_fps=target_fps)
-
-            if video_writer:
-                video_writer.write(frame)
 
             try:
                 cv2.imshow('IMU + Camera Sync', frame)
