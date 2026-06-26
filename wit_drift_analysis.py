@@ -41,16 +41,14 @@ from datetime import datetime, timedelta
 
 from bleak import BleakClient, BleakScanner
 
-from parse_wit import (
+from wit_parse import (
     ACC_RANGE, GYRO_RANGE,
     fmt_chip_time_dotms,
-)
-from wit_ble_live import (
     StreamingByteBuffer,
     parse_one_packet,
     DEFAULT_NOTIFY_CANDIDATES,
-    find_device,
 )
+from ble_utils import find_device
 
 # ── 线性回归（不依赖 numpy）──────────────────────────────────────────────────
 
@@ -138,7 +136,7 @@ async def collect(args) -> list[dict]:
             except Exception as e:
                 print(f'  尝试订阅 {uuid} 失败: {e}')
         if subscribed is None:
-            print('订阅失败，请用 wit_ble_live.py --list-services 核实 UUID。')
+            print('订阅失败，请用 --list-services 核实 UUID。')
             return []
         print(f'已订阅 {subscribed}，采集 {args.duration:.0f} 秒...\n')
         try:

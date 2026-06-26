@@ -32,7 +32,7 @@ from datetime import datetime, timezone, timedelta
 
 from bleak import BleakClient, BleakScanner
 
-from hicc_ble_debug import (
+from hicc_parse import (
     FrameBuffer,
     parse_dp_sequence,
     build_timesync_frame,

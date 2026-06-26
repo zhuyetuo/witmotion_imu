@@ -53,92 +53,24 @@ WitMotion BLE 模组的 GATT UUID（经典款 WT901BLECL 已验证，WT901SDCL-B
 
 import argparse
 import asyncio
-import struct
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from bleak import BleakClient, BleakScanner
+from bleak import BleakClient
 
-# 复用 parse_wit.py 里的协议解析/格式化逻辑，保证实时流和离线文件解析出来的
-# 数值、时间格式完全一致。
-from parse_wit import (
+from ble_utils import HzCounter, scan_devices, find_device, list_services
+from wit_parse import (
     ACC_RANGE,
     ANGLE_RANGE,
     GYRO_RANGE,
     LABELSTUDIO_HEADER,
+    DEFAULT_NOTIFY_CANDIDATES,
+    StreamingByteBuffer,
+    parse_one_packet,
     fmt_chip_time_dotms,
     fmt_num,
 )
-
-PACKET_LEN = 28
-HEADER = 0x55
-TYPE_61 = 0x61
-
-# 常见的 WitMotion BLE 特征值 UUID（小写，bleak 返回的 UUID 也是小写）。
-# 实测 WT901BLECL 系列用 FFE5 做读写、FFE4 做 notify 推送数据；不同固件/
-# 批次可能有差异，所以提供 --list-services 方便现场核对。
-DEFAULT_NOTIFY_CANDIDATES = [
-    '0000ffe4-0000-1000-8000-00805f9a34fb',
-    '0000ffe1-0000-1000-8000-00805f9a34fb',
-    '0000ffe5-0000-1000-8000-00805f9a34fb',
-]
-
-
-def parse_one_packet(pkt: bytes):
-    """解析单个28字节 0x55 0x61 数据包，返回字典（结构与 parse_wit.parse_packets 一致）。"""
-    if len(pkt) != PACKET_LEN or pkt[0] != HEADER or pkt[1] != TYPE_61:
-        return None
-    vals = struct.unpack('<9h', pkt[2:20])
-    acc = [v / 32768.0 * ACC_RANGE for v in vals[0:3]]
-    gyro = [v / 32768.0 * GYRO_RANGE for v in vals[3:6]]
-    angle = [v / 32768.0 * ANGLE_RANGE for v in vals[6:9]]
-    yy, mm, dd, hh, mi, ss = pkt[20:26]
-    ms = struct.unpack('<H', pkt[26:28])[0]
-    try:
-        chip_time = datetime(2000 + yy, mm, dd, hh, mi, ss) + timedelta(milliseconds=ms)
-    except ValueError:
-        chip_time = None
-    return {
-        'acc': acc,
-        'gyro': gyro,
-        'angle': angle,
-        'year': 2000 + yy,
-        'month': mm,
-        'day': dd,
-        'hour': hh,
-        'minute': mi,
-        'second': ss,
-        'ms': ms,
-        'chip_time': chip_time,
-    }
-
-
-class StreamingByteBuffer:
-    """
-    BLE notify 推送的数据不一定每次都恰好是28字节一个完整包，可能会被
-    底层分片成更小的片段，也可能一次回调里带了好几个包。这里维护一个
-    累积缓冲区，按 0x55 0x61 同步头切出完整的28字节包。
-    """
-
-    def __init__(self):
-        self.buf = bytearray()
-
-    def feed(self, data: bytes):
-        """喂入新收到的字节，返回这次能切出的所有完整数据包（可能为空列表）。"""
-        self.buf.extend(data)
-        packets = []
-        i = 0
-        n = len(self.buf)
-        while i + PACKET_LEN <= n:
-            if self.buf[i] == HEADER and self.buf[i + 1] == TYPE_61:
-                packets.append(bytes(self.buf[i:i + PACKET_LEN]))
-                i += PACKET_LEN
-            else:
-                i += 1
-        # 保留缓冲区里还不够拼成一个完整包的尾部字节，等下次 feed 时续上
-        del self.buf[:i]
-        return packets
 
 
 class LiveCsvWriter:
@@ -191,62 +123,6 @@ class LiveCsvWriter:
     def close(self):
         self._f.close()
 
-
-async def scan_devices(timeout=6.0):
-    print(f'扫描 BLE 设备中（{timeout:.0f} 秒）...')
-    devices = await BleakScanner.discover(timeout=timeout)
-    if not devices:
-        print('未发现任何 BLE 设备。请确认: 1) 传感器已开机且未被其它程序占用连接；'
-              '2) Windows 蓝牙已打开；3) 电脑支持 BLE（蓝牙5.0或BLE适配器）。')
-        return
-    print(f'发现 {len(devices)} 个设备:')
-    for d in devices:
-        name = d.name or '(无名称)'
-        print(f'  - {name:<30s}  地址: {d.address}')
-
-
-async def list_services(client: BleakClient):
-    print('该设备的 GATT 服务/特征值列表:')
-    for service in client.services:
-        print(f'  服务 {service.uuid}')
-        for ch in service.characteristics:
-            props = ','.join(ch.properties)
-            print(f'      特征值 {ch.uuid}  属性=[{props}]  handle={ch.handle}')
-
-
-async def find_device(name_filter, address, timeout=8.0):
-    if address:
-        print(f'按地址查找设备: {address}')
-        dev = await BleakScanner.find_device_by_address(address, timeout=timeout)
-        if dev is None:
-            print(f'未找到地址为 {address} 的设备，请确认设备已开机、在范围内。')
-        return dev
-
-    print(f'扫描中，查找名称包含 "{name_filter}" 的设备（最多等待 {timeout:.0f} 秒）...')
-    found = {}
-
-    def _detection_callback(device, adv_data):
-        found[device.address] = device
-
-    scanner = BleakScanner(detection_callback=_detection_callback)
-    await scanner.start()
-    deadline = time.time() + timeout
-    target = None
-    while time.time() < deadline:
-        await asyncio.sleep(0.3)
-        for addr, dev in found.items():
-            if dev.name and name_filter.lower() in dev.name.lower():
-                target = dev
-                break
-        if target:
-            break
-    await scanner.stop()
-
-    if target is None:
-        print(f'未找到名称包含 "{name_filter}" 的设备。已发现的设备:')
-        for addr, dev in found.items():
-            print(f'  - {dev.name or "(无名称)"}  地址: {addr}')
-    return target
 
 
 async def run_calibrate(args):
@@ -379,15 +255,7 @@ async def run(args):
     print_count = [0]
     last_good_time_print = [None]
     dropped_count_print = [0]
-    hz_window: list[float] = []   # 滑动1秒窗口，用于计算实际采样率
-
-    def calc_hz() -> float:
-        now = time.time()
-        cutoff = now - 1.0
-        while hz_window and hz_window[0] < cutoff:
-            hz_window.pop(0)
-        hz_window.append(now)
-        return float(len(hz_window))
+    hz = HzCounter()
 
     def notification_handler(sender, data: bytearray):
         packets = buffer.feed(bytes(data))
@@ -396,7 +264,7 @@ async def run(args):
             if p is None:
                 continue
 
-            hz = calc_hz()
+            current_hz = hz.tick()
 
             if print_only:
                 t = p['chip_time']
@@ -416,14 +284,14 @@ async def run(args):
                 print(f'[{print_count[0]:>6d}] PC={pc_ts}  片上={chip_ts}  '
                       f'acc=({acc[0]:+.3f},{acc[1]:+.3f},{acc[2]:+.3f})g  '
                       f'gyro=({gyro[0]:+7.3f},{gyro[1]:+7.3f},{gyro[2]:+7.3f})°/s  '
-                      f'{hz:.1f}Hz')
+                      f'{current_hz:.1f}Hz')
             else:
                 writer.write_packet(p)
                 if writer.count_written % 50 == 0:
                     acc = p['acc']
                     print(f'  已接收 {writer.count_written} 帧  最新加速度: '
                           f'X={acc[0]:.3f} Y={acc[1]:.3f} Z={acc[2]:.3f} g  '
-                          f'{hz:.1f}Hz')
+                          f'{current_hz:.1f}Hz')
 
     async with BleakClient(device) as client:
         print('已连接。')

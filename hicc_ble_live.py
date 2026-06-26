@@ -41,240 +41,31 @@ BLE GATT UUID:
 
 import argparse
 import asyncio
-import struct
 import sys
 import time
 import csv
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
-from bleak import BleakClient, BleakScanner
+from bleak import BleakClient
 
-# ── GATT UUID ──────────────────────────────────────────────────────────────
-SERVICE_UUID  = 'a6ed0201-d344-460a-8075-b9e8ec90d71b'
-TX_UUID       = 'a6ed0202-d344-460a-8075-b9e8ec90d71b'  # Notify，设备→App
-RX_UUID       = 'a6ed0203-d344-460a-8075-b9e8ec90d71b'  # Write，App→设备
-
-DEVICE_NAME   = 'HICC_PetCollar'
-
-# 设备把北京时间当 UTC 算 Unix ms，PC 时间需加此偏移才能对齐芯片时间基准
-TZ_OFFSET_MS  = 8 * 3600 * 1000.0
-
-# ── 帧常量 ─────────────────────────────────────────────────────────────────
-FRAME_HEADER  = bytes([0x55, 0xAA])
-CMD_REPORT    = 0x05
-CMD_TIMESYNC  = 0x06
-
-# payload 字节数对应的帧类型 (v1.1)
-PAYLOAD_6AXIS = 0x3C   # 60 字节 -> 六轴帧，总长 67
-PAYLOAD_ENV   = 0x24   # 36 字节 -> 温湿度帧，总长 43
-
-# DP id
-DP_TIMESTAMP  = 0x0A
-DP_GYRO_X     = 0x14
-DP_GYRO_Y     = 0x15
-DP_GYRO_Z     = 0x16
-DP_ACC_X      = 0x17
-DP_ACC_Y      = 0x18
-DP_ACC_Z      = 0x19
-DP_TEMP_IN    = 0x20   # 室内温度
-DP_HUM_IN     = 0x21   # 室内湿度
-DP_TEMP_BODY  = 0x22   # 设备体温
-DP_BATT_MV    = 0x0B   # 电池电压 mV
-
-# 东八区偏移（校时下发北京时间）
-TZ_CST = timezone(timedelta(hours=8))
-
-
-# ── 校验和 ─────────────────────────────────────────────────────────────────
-
-def calc_checksum(frame_without_cs: bytes) -> int:
-    return sum(frame_without_cs) & 0xFF
-
-
-def verify_frame(frame: bytes) -> bool:
-    """验证完整帧（含末尾校验字节）的校验和。"""
-    return calc_checksum(frame[:-1]) == frame[-1]
-
-
-# ── 构造校时帧 ──────────────────────────────────────────────────────────────
-
-def build_timesync_frame(dt: datetime | None = None) -> bytes:
-    """
-    构造向 RX 特征写入的校时帧。
-    dt: 北京时间（aware 或 naive 均可，naive 视为北京时间）。
-        默认使用当前系统时间。
-    """
-    if dt is None:
-        dt = datetime.now(TZ_CST)
-    year_offset = dt.year - 2000
-    payload = bytes([
-        0x01,           # 状态=成功
-        year_offset,
-        dt.month,
-        dt.day,
-        dt.hour,
-        dt.minute,
-        dt.second,
-    ])
-    header = bytes([0x55, 0xAA, 0x00, CMD_TIMESYNC, 0x00, len(payload)])
-    body = header + payload
-    cs = calc_checksum(body)
-    return body + bytes([cs])
-
-
-# ── DP 解析 ────────────────────────────────────────────────────────────────
-
-def parse_dp_sequence(payload: bytes) -> dict:
-    """
-    遍历 payload 中的 DP 单元序列，返回 {dpid: int_value} 字典。
-    DP 单元: dpid(1) + type(1) + len(2大端) + value(len字节，有符号大端)
-    """
-    result = {}
-    i = 0
-    n = len(payload)
-    while i + 4 <= n:
-        dpid = payload[i]
-        dp_type = payload[i + 1]
-        dp_len = struct.unpack('>H', payload[i + 2:i + 4])[0]
-        i += 4
-        if i + dp_len > n:
-            break
-        raw = payload[i:i + dp_len]
-        i += dp_len
-
-        if dp_type == 0x02:  # value: 有符号整型，大端
-            signed = int.from_bytes(raw, byteorder='big', signed=True)
-            result[dpid] = signed
-        elif dp_type == 0x04:  # enum: 单字节枚举
-            result[dpid] = raw[0]
-        # 其它 type 暂不解析，跳过
-    return result
-
-
-def decode_report(dp: dict, frame_type: str) -> dict:
-    """将原始 DP 整数值换算为物理量，返回便于打印/写文件的字典。"""
-    out = {'frame_type': frame_type}
-
-    # 时间戳
-    # 设备把我们下发的北京时间当作 UTC naive 计算 Unix ms，
-    # 所以解码时用 utcfromtimestamp 直接还原，不做时区转换。
-    if DP_TIMESTAMP in dp:
-        ts_ms = dp[DP_TIMESTAMP]   # v1.1: int64 毫秒
-        try:
-            dt = datetime.utcfromtimestamp(ts_ms / 1000.0)
-            out['timestamp_ms'] = ts_ms
-            out['timestamp_str'] = dt.strftime('%Y-%m-%d %H:%M:%S.') + f'{ts_ms % 1000:03d}'
-        except (OSError, OverflowError, ValueError):
-            out['timestamp_ms'] = ts_ms
-            out['timestamp_str'] = f'raw={ts_ms}'
-
-    if frame_type == '6axis':
-        out['gyro_x'] = dp.get(DP_GYRO_X, 0) / 1_000_000.0   # rad/s
-        out['gyro_y'] = dp.get(DP_GYRO_Y, 0) / 1_000_000.0
-        out['gyro_z'] = dp.get(DP_GYRO_Z, 0) / 1_000_000.0
-        out['acc_x']  = dp.get(DP_ACC_X,  0) / 1_000_000.0   # m/s²
-        out['acc_y']  = dp.get(DP_ACC_Y,  0) / 1_000_000.0
-        out['acc_z']  = dp.get(DP_ACC_Z,  0) / 1_000_000.0
-    else:  # env
-        out['temp_in']   = dp.get(DP_TEMP_IN,   0) / 10.0     # °C
-        out['hum_in']    = dp.get(DP_HUM_IN,    0) / 10.0     # %RH
-        out['temp_body'] = dp.get(DP_TEMP_BODY, 0) / 10.0     # °C
-        out['batt_mv']   = dp.get(DP_BATT_MV,   0)             # mV
-
-    return out
-
-
-# ── 流式缓冲区 ─────────────────────────────────────────────────────────────
-
-class FrameBuffer:
-    """
-    累积 BLE notify 的分片数据，按 0x55 0xAA 帧头 + 长度字段切出完整帧。
-    BLE MTU 不足时单帧会被分片，这里做重组。
-    """
-
-    def __init__(self):
-        self.buf = bytearray()
-
-    def feed(self, data: bytes) -> list[bytes]:
-        self.buf.extend(data)
-        frames = []
-        while True:
-            # 找帧头
-            idx = -1
-            for i in range(len(self.buf) - 1):
-                if self.buf[i] == 0x55 and self.buf[i + 1] == 0xAA:
-                    idx = i
-                    break
-            if idx == -1:
-                # 没有帧头，保留最后1字节（可能是0x55的前半）
-                self.buf = self.buf[-1:] if self.buf else bytearray()
-                break
-            if idx > 0:
-                self.buf = self.buf[idx:]  # 丢弃帧头前的垃圾字节
-
-            # 需要至少6字节才能读长度
-            if len(self.buf) < 6:
-                break
-
-            data_len = struct.unpack('>H', self.buf[4:6])[0]
-            total_len = 6 + data_len + 1  # header(6) + payload + checksum(1)
-
-            if len(self.buf) < total_len:
-                break  # 帧还没收全，等下次
-
-            frame = bytes(self.buf[:total_len])
-            self.buf = self.buf[total_len:]
-
-            if verify_frame(frame):
-                frames.append(frame)
-            else:
-                cs_got = frame[-1]
-                cs_exp = calc_checksum(frame[:-1])
-                print(f'  [校验失败] 丢弃帧  got=0x{cs_got:02X} expected=0x{cs_exp:02X}  '
-                      f'hex={frame.hex(" ")}')
-        return frames
-
-
-# ── 解析完整帧 ─────────────────────────────────────────────────────────────
-
-def parse_frame(frame: bytes) -> dict | None:
-    """
-    解析一帧，返回解码后的字典。
-    返回 None 表示不认识的帧（非 cmd=0x05/0x06）。
-    """
-    cmd = frame[3]
-    data_len = struct.unpack('>H', frame[4:6])[0]
-    payload = frame[6:6 + data_len]
-
-    if cmd == CMD_TIMESYNC:
-        # 设备发来的校时请求 55 AA 00 06 00 00 CS
-        return {'frame_type': 'timesync_request', 'raw': frame.hex(' ')}
-
-    if cmd != CMD_REPORT:
-        return {'frame_type': f'unknown_cmd_0x{cmd:02X}', 'raw': frame.hex(' ')}
-
-    dp = parse_dp_sequence(payload)
-
-    # 按 payload 长度区分六轴帧 / 温湿度帧
-    has_env = (DP_TEMP_IN in dp or DP_HUM_IN in dp or
-               DP_TEMP_BODY in dp or DP_BATT_MV in dp)
-
-    frame_type = 'env' if has_env else '6axis'
-    return decode_report(dp, frame_type)
-
+from ble_utils import HzCounter, scan_devices, list_services
+from hicc_parse import (
+    SERVICE_UUID, TX_UUID, RX_UUID, DEVICE_NAME,
+    TZ_OFFSET_MS, TZ_CST,
+    FRAME_HEADER, CMD_REPORT, CMD_TIMESYNC, PAYLOAD_6AXIS, PAYLOAD_ENV,
+    DP_TIMESTAMP, DP_GYRO_X, DP_GYRO_Y, DP_GYRO_Z,
+    DP_ACC_X, DP_ACC_Y, DP_ACC_Z,
+    DP_TEMP_IN, DP_HUM_IN, DP_TEMP_BODY, DP_BATT_MV,
+    CSV_HEADER_6AXIS, CSV_HEADER_ENV,
+    calc_checksum, verify_frame, build_timesync_frame,
+    parse_dp_sequence, decode_report, FrameBuffer, parse_frame,
+    find_rx_uuid, find_tx_uuid, send_timesync,
+)
 
 # ── 打印 ───────────────────────────────────────────────────────────────────
 
 _frame_count = 0
-_hz_window: list[float] = []   # 滑动1秒窗口，用于计算实际采样率
-
-def _calc_hz() -> float:
-    now = time.time()
-    cutoff = now - 1.0
-    while _hz_window and _hz_window[0] < cutoff:
-        _hz_window.pop(0)
-    _hz_window.append(now)
-    return float(len(_hz_window))
+_hz = HzCounter()
 
 def print_decoded(d: dict):
     global _frame_count
@@ -285,7 +76,7 @@ def print_decoded(d: dict):
     pc_ts = now_cst.strftime('%H:%M:%S.') + f'{now_cst.microsecond // 1000:03d}'
 
     if ft == '6axis':
-        hz = _calc_hz()
+        hz = _hz.tick()
         ax, ay, az = d.get('acc_x', 0), d.get('acc_y', 0), d.get('acc_z', 0)
         gx, gy, gz = d.get('gyro_x', 0), d.get('gyro_y', 0), d.get('gyro_z', 0)
         print(f'[{_frame_count:>5d}][6轴] PC={pc_ts}  片上={chip_ts}  '
@@ -307,10 +98,6 @@ def print_decoded(d: dict):
 
 
 # ── CSV 写入 ───────────────────────────────────────────────────────────────
-
-CSV_HEADER_6AXIS = ['timestamp', 'acc_x', 'acc_y', 'acc_z',
-                    'gyro_x', 'gyro_y', 'gyro_z']
-CSV_HEADER_ENV   = ['timestamp', 'temp_in_c', 'hum_in_pct', 'temp_body_c', 'batt_mv']
 
 
 class CsvWriter:
@@ -342,69 +129,6 @@ class CsvWriter:
     def close(self):
         self._f6.close()
         self._fe.close()
-
-
-# ── BLE 操作 ───────────────────────────────────────────────────────────────
-
-async def scan_devices(timeout: float = 6.0):
-    print(f'扫描 BLE 设备中（{timeout:.0f} 秒）...')
-    devices = await BleakScanner.discover(timeout=timeout)
-    if not devices:
-        print('未发现任何 BLE 设备。请确认设备已开机、蓝牙已打开。')
-        return
-    print(f'发现 {len(devices)} 个设备:')
-    for d in sorted(devices, key=lambda x: x.name or ''):
-        name = d.name or '(无名称)'
-        print(f'  {name:<30s}  {d.address}')
-
-
-async def list_services(client: BleakClient):
-    print('GATT 服务/特征值:')
-    for svc in client.services:
-        marker = '  *** GUS ***' if svc.uuid.lower() == SERVICE_UUID else ''
-        print(f'  服务  {svc.uuid}{marker}')
-        for ch in svc.characteristics:
-            props = ','.join(ch.properties)
-            tx = ' ← TX(Notify)' if ch.uuid.lower() == TX_UUID else ''
-            rx = ' ← RX(Write)'  if ch.uuid.lower() == RX_UUID  else ''
-            print(f'    特征 {ch.uuid}  [{props}]{tx}{rx}')
-
-
-async def send_timesync(client: BleakClient, rx_uuid: str):
-    now_cst = datetime.now(TZ_CST)
-    frame = build_timesync_frame(now_cst)
-    print(f'  发送校时帧 ({now_cst.strftime("%Y-%m-%d %H:%M:%S")} CST): '
-          f'{frame.hex(" ")}')
-    await client.write_gatt_char(rx_uuid, frame, response=False)
-
-
-async def find_rx_uuid(client: BleakClient) -> str | None:
-    """在连接的设备上找 RX 特征（Write 属性）的 UUID。优先用已知 UUID，否则自动搜索。"""
-    for svc in client.services:
-        for ch in svc.characteristics:
-            if ch.uuid.lower() == RX_UUID:
-                return ch.uuid
-    # 备用：找任何有 write/write-without-response 属性的特征
-    for svc in client.services:
-        for ch in svc.characteristics:
-            if 'write' in ch.properties or 'write-without-response' in ch.properties:
-                print(f'  提示: 未找到标准 RX UUID，使用备用写特征: {ch.uuid}')
-                return ch.uuid
-    return None
-
-
-async def find_tx_uuid(client: BleakClient) -> str | None:
-    """找 TX 特征（Notify 属性）的 UUID。"""
-    for svc in client.services:
-        for ch in svc.characteristics:
-            if ch.uuid.lower() == TX_UUID:
-                return ch.uuid
-    for svc in client.services:
-        for ch in svc.characteristics:
-            if 'notify' in ch.properties:
-                print(f'  提示: 未找到标准 TX UUID，使用备用 Notify 特征: {ch.uuid}')
-                return ch.uuid
-    return None
 
 
 # ── 时间校准 ───────────────────────────────────────────────────────────────
