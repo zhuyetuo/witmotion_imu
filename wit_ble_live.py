@@ -403,12 +403,14 @@ async def run(args):
                 if t is not None:
                     last_good_time_print[0] = t
                 print_count[0] += 1
-                ts = fmt_chip_time_dotms(p)
+                chip_ts = fmt_chip_time_dotms(p)
+                now = datetime.now()
+                pc_ts = now.strftime('%H:%M:%S.') + f'{now.microsecond // 1000:03d}'
                 acc = p['acc']
                 gyro = p['gyro']
-                print(f'[{print_count[0]:>6d}] {ts}  '
-                      f'acc=({acc[0]:+.3f}, {acc[1]:+.3f}, {acc[2]:+.3f})g  '
-                      f'gyro=({gyro[0]:+7.3f}, {gyro[1]:+7.3f}, {gyro[2]:+7.3f})°/s  '
+                print(f'[{print_count[0]:>6d}] PC={pc_ts}  片上={chip_ts}  '
+                      f'acc=({acc[0]:+.3f},{acc[1]:+.3f},{acc[2]:+.3f})g  '
+                      f'gyro=({gyro[0]:+7.3f},{gyro[1]:+7.3f},{gyro[2]:+7.3f})°/s  '
                       f'{hz:.1f}Hz')
             else:
                 writer.write_packet(p)
