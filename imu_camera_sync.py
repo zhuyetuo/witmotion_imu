@@ -138,7 +138,7 @@ async def _run_wit(args):
 
 def _setup_hicc():
     try:
-        from hicc_ble_debug import (
+        from hicc_ble_live import (
             FrameBuffer, parse_dp_sequence,
             find_tx_uuid, find_rx_uuid, send_timesync,
             DP_ACC_X, DP_ACC_Y, DP_ACC_Z,
@@ -147,7 +147,7 @@ def _setup_hicc():
             CMD_REPORT,
         )
     except ImportError as e:
-        print(f'导入 hicc_ble_debug 失败: {e}')
+        print(f'导入 hicc_ble_live 失败: {e}')
         sys.exit(1)
     return (FrameBuffer, parse_dp_sequence, find_tx_uuid, find_rx_uuid,
             send_timesync, DP_ACC_X, DP_ACC_Y, DP_ACC_Z,

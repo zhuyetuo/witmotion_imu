@@ -24,19 +24,19 @@ BLE GATT UUID:
 
 用法:
     # 扫描附近所有 BLE 设备
-    python hicc_ble_debug.py --scan
+    python hicc_ble_live.py --scan
 
     # 连接指定 MAC，自动校时，终端打印数据
-    python hicc_ble_debug.py --address EA:CB:3E:CF:00:1B
+    python hicc_ble_live.py --address EA:CB:3E:CF:00:1B
 
     # 连接并同时写入 CSV 文件
-    python hicc_ble_debug.py --address EA:CB:3E:CF:00:1B -o hicc_imu.csv
+    python hicc_ble_live.py --address EA:CB:3E:CF:00:1B -o hicc_imu.csv
 
     # 连接后只列出服务/特征值，不接收数据（用于核对 UUID）
-    python hicc_ble_debug.py --address EA:CB:3E:CF:00:1B --list-services
+    python hicc_ble_live.py --address EA:CB:3E:CF:00:1B --list-services
 
     # 不自动校时（设备时钟已经准确时使用）
-    python hicc_ble_debug.py --address EA:CB:3E:CF:00:1B --no-timesync
+    python hicc_ble_live.py --address EA:CB:3E:CF:00:1B --no-timesync
 """
 
 import argparse
