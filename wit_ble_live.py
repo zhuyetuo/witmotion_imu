@@ -374,6 +374,15 @@ async def run(args):
     print_count = [0]
     last_good_time_print = [None]
     dropped_count_print = [0]
+    hz_window: list[float] = []   # 滑动1秒窗口，用于计算实际采样率
+
+    def calc_hz() -> float:
+        now = time.time()
+        cutoff = now - 1.0
+        while hz_window and hz_window[0] < cutoff:
+            hz_window.pop(0)
+        hz_window.append(now)
+        return float(len(hz_window))
 
     def notification_handler(sender, data: bytearray):
         packets = buffer.feed(bytes(data))
@@ -381,6 +390,8 @@ async def run(args):
             p = parse_one_packet(pkt)
             if p is None:
                 continue
+
+            hz = calc_hz()
 
             if print_only:
                 t = p['chip_time']
@@ -397,13 +408,15 @@ async def run(args):
                 gyro = p['gyro']
                 print(f'[{print_count[0]:>6d}] {ts}  '
                       f'acc=({acc[0]:+.3f}, {acc[1]:+.3f}, {acc[2]:+.3f})g  '
-                      f'gyro=({gyro[0]:+7.3f}, {gyro[1]:+7.3f}, {gyro[2]:+7.3f})°/s')
+                      f'gyro=({gyro[0]:+7.3f}, {gyro[1]:+7.3f}, {gyro[2]:+7.3f})°/s  '
+                      f'{hz:.1f}Hz')
             else:
                 writer.write_packet(p)
                 if writer.count_written % 50 == 0:
                     acc = p['acc']
                     print(f'  已接收 {writer.count_written} 帧  最新加速度: '
-                          f'X={acc[0]:.3f} Y={acc[1]:.3f} Z={acc[2]:.3f} g')
+                          f'X={acc[0]:.3f} Y={acc[1]:.3f} Z={acc[2]:.3f} g  '
+                          f'{hz:.1f}Hz')
 
     async with BleakClient(device) as client:
         print('已连接。')

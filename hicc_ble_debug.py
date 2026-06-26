@@ -266,22 +266,32 @@ def parse_frame(frame: bytes) -> dict | None:
 # ── 打印 ───────────────────────────────────────────────────────────────────
 
 _frame_count = 0
+_hz_window: list[float] = []   # 滑动1秒窗口，用于计算实际采样率
+
+def _calc_hz() -> float:
+    now = time.time()
+    cutoff = now - 1.0
+    while _hz_window and _hz_window[0] < cutoff:
+        _hz_window.pop(0)
+    _hz_window.append(now)
+    return float(len(_hz_window))
 
 def print_decoded(d: dict):
     global _frame_count
     _frame_count += 1
     chip_ts = d.get('timestamp_str', '?')
     ft = d.get('frame_type', '?')
-    # 电脑系统时间（北京时间）
-    pc_ts = datetime.now(TZ_CST).strftime('%H:%M:%S.') + \
-            f'{datetime.now(TZ_CST).microsecond // 1000:03d}'
+    now_cst = datetime.now(TZ_CST)
+    pc_ts = now_cst.strftime('%H:%M:%S.') + f'{now_cst.microsecond // 1000:03d}'
 
     if ft == '6axis':
+        hz = _calc_hz()
         ax, ay, az = d.get('acc_x', 0), d.get('acc_y', 0), d.get('acc_z', 0)
         gx, gy, gz = d.get('gyro_x', 0), d.get('gyro_y', 0), d.get('gyro_z', 0)
         print(f'[{_frame_count:>5d}][6轴] PC={pc_ts}  片上={chip_ts}  '
               f'acc=({ax:+.4f},{ay:+.4f},{az:+.4f})m/s²  '
-              f'gyro=({gx:+.6f},{gy:+.6f},{gz:+.6f})rad/s')
+              f'gyro=({gx:+.6f},{gy:+.6f},{gz:+.6f})rad/s  '
+              f'{hz:.1f}Hz')
     elif ft == 'env':
         t_in   = d.get('temp_in',   0)
         h_in   = d.get('hum_in',    0)
