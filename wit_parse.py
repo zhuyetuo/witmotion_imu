@@ -507,3 +507,56 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+
+# ── BLE 实时采集相关 ────────────────────────────────────────────────────────
+
+# 常见的 WitMotion BLE 特征值 UUID（小写）
+DEFAULT_NOTIFY_CANDIDATES = [
+    '0000ffe4-0000-1000-8000-00805f9a34fb',
+    '0000ffe1-0000-1000-8000-00805f9a34fb',
+    '0000ffe5-0000-1000-8000-00805f9a34fb',
+]
+
+
+class StreamingByteBuffer:
+    """累积 BLE notify 推送的字节，按 0x55 0x61 同步头切出完整28字节包。"""
+
+    def __init__(self):
+        self.buf = bytearray()
+
+    def feed(self, data: bytes):
+        self.buf.extend(data)
+        packets = []
+        i = 0
+        n = len(self.buf)
+        while i + PACKET_LEN <= n:
+            if self.buf[i] == HEADER and self.buf[i + 1] == TYPE_61:
+                packets.append(bytes(self.buf[i:i + PACKET_LEN]))
+                i += PACKET_LEN
+            else:
+                i += 1
+        del self.buf[:i]
+        return packets
+
+
+def parse_one_packet(pkt: bytes):
+    """解析单个28字节 0x55 0x61 数据包，返回字典（结构与 parse_packets 一致）。"""
+    if len(pkt) != PACKET_LEN or pkt[0] != HEADER or pkt[1] != TYPE_61:
+        return None
+    vals = struct.unpack('<9h', pkt[2:20])
+    acc = [v / 32768.0 * ACC_RANGE for v in vals[0:3]]
+    gyro = [v / 32768.0 * GYRO_RANGE for v in vals[3:6]]
+    angle = [v / 32768.0 * ANGLE_RANGE for v in vals[6:9]]
+    yy, mm, dd, hh, mi, ss = pkt[20:26]
+    ms = struct.unpack('<H', pkt[26:28])[0]
+    try:
+        chip_time = datetime(2000 + yy, mm, dd, hh, mi, ss) + timedelta(milliseconds=ms)
+    except ValueError:
+        chip_time = None
+    return {
+        'acc': acc, 'gyro': gyro, 'angle': angle,
+        'year': 2000 + yy, 'month': mm, 'day': dd,
+        'hour': hh, 'minute': mi, 'second': ss,
+        'ms': ms, 'chip_time': chip_time,
+    }
