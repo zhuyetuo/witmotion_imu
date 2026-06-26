@@ -367,6 +367,8 @@ def run_camera(args):
             # CSV：写入本帧期间所有 IMU 帧（原生采样率，不降采样）
             if imu_csv_writer and pending_imu:
                 for r in pending_imu:
+                    if r['pc_ms'] < start_time * 1000.0:
+                        continue   # 跳过录制开始前积压的旧帧
                     ts_str = imu_ts_str(r, args.device)
                     imu_csv_writer.writerow([
                         ts_str,
