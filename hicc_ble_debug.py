@@ -524,9 +524,10 @@ async def run(args):
     buf = FrameBuffer()
     csv_writer = None
     if args.output:
+        mac_tag = args.address.replace(':', '').lower()
         ts_tag = datetime.now(TZ_CST).strftime('%Y%m%d_%H%M%S')
-        path_6axis = f'data/hicc_{ts_tag}_6axis.csv'
-        path_env   = f'data/hicc_{ts_tag}_env.csv'
+        path_6axis = f'data/hicc_{mac_tag}_{ts_tag}_6axis.csv'
+        path_env   = f'data/hicc_{mac_tag}_{ts_tag}_env.csv'
         csv_writer = CsvWriter(path_6axis, path_env)
         print(f'六轴数据 -> {path_6axis}')
         print(f'环境数据 -> {path_env}')
