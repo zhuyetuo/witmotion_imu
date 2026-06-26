@@ -173,7 +173,9 @@ class LiveCsvWriter:
                 self.count_dropped += 1
                 print(f'  [丢弃坏帧] 时间戳非单调递增: {fmt_chip_time_dotms(p)}')
                 return False
-        ts = fmt_chip_time_dotms(p)
+        # 使用 PC 系统时间作为 CSV 时间戳
+        now = datetime.now()
+        ts = now.strftime('%Y-%m-%d %H:%M:%S.') + f'{now.microsecond // 1000:03d}'
         row = [
             ts,
             fmt_num(p['acc'][0]), fmt_num(p['acc'][1]), fmt_num(p['acc'][2]),
@@ -367,8 +369,10 @@ async def run(args):
     elif print_only:
         print('打印模式: 不创建/写入任何文件，仅在终端实时显示数据。')
     else:
-        writer = LiveCsvWriter(args.output, keep_bad_frames=args.keep_bad_frames)
-        print(f'实时数据将写入: {args.output}')
+        ts_tag = datetime.now().strftime('%Y%m%d_%H%M%S')
+        output_path = f'wit_{ts_tag}.csv'
+        writer = LiveCsvWriter(output_path, keep_bad_frames=args.keep_bad_frames)
+        print(f'实时数据将写入: {output_path}')
         print('提示: 在 Label Studio 的 Time Series 标注配置里，timeFormat 请填: %Y-%m-%d %H:%M:%S.%L')
 
     print_count = [0]
@@ -464,7 +468,7 @@ async def run(args):
             if writer is not None:
                 writer.close()
                 print(f'\n采集结束。共写入 {writer.count_written} 帧，丢弃坏帧 {writer.count_dropped} 个。'
-                      f'\n文件已保存: {args.output}')
+                      f'\n文件已保存: {output_path}')
             elif print_only:
                 print(f'\n采集结束。共打印 {print_count[0]} 帧，丢弃坏帧 {dropped_count_print[0]} 个。'
                       f'\n（打印模式未写入任何文件。）')
