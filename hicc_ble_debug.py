@@ -589,12 +589,19 @@ async def run(args):
 
         await client.start_notify(tx_uuid, notification_handler)
         print(f'已订阅 TX: {tx_uuid}')
-        print('开始接收数据... (按 Ctrl+C 停止)')
+        duration = args.duration
+        if duration and duration > 0:
+            print(f'开始接收数据... (采集 {duration:.0f} 秒后自动停止)')
+        else:
+            print('开始接收数据... (按 Ctrl+C 停止)')
         print()
 
         try:
-            while True:
-                await asyncio.sleep(1)
+            if duration and duration > 0:
+                await asyncio.sleep(duration)
+            else:
+                while True:
+                    await asyncio.sleep(1)
         except (KeyboardInterrupt, asyncio.CancelledError):
             pass
         finally:
@@ -635,6 +642,8 @@ def main():
                          '最后统计平均偏移和漂移率（ms/min）')
     ap.add_argument('--cal-duration', type=float, default=30.0,
                     help='校准采集时长（秒），默认 30 秒')
+    ap.add_argument('--duration', type=float, default=0,
+                    help='采集时长（秒），到时自动停止；不填或填 0 则手动 Ctrl+C 停止')
     args = ap.parse_args()
 
     try:
