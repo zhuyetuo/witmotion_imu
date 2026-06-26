@@ -285,7 +285,7 @@ def run_camera(args):
     record_mode = args.duration and args.duration > 0
     ts_tag  = datetime.now().strftime('%Y%m%d_%H%M%S')
     dev_tag = args.device                                   # 'wit' or 'hicc'
-    base    = f'{args.output}_{dev_tag}_{ts_tag}' if args.output else f'rec_{dev_tag}_{ts_tag}'
+    base    = f'data/{args.output}_{dev_tag}_{ts_tag}' if args.output else f'data/rec_{dev_tag}_{ts_tag}'
 
     video_writer = None
     imu_csv_file = None
