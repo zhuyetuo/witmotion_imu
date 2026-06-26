@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# 采集数据（不提交到 git，只保留目录结构）
+data/*.csv
+data/*.mp4
+data/test/*.csv
+data/test/*.mp4

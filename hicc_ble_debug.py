@@ -525,8 +525,8 @@ async def run(args):
     csv_writer = None
     if args.output:
         ts_tag = datetime.now(TZ_CST).strftime('%Y%m%d_%H%M%S')
-        path_6axis = f'hicc_{ts_tag}_6axis.csv'
-        path_env   = f'hicc_{ts_tag}_env.csv'
+        path_6axis = f'data/hicc_{ts_tag}_6axis.csv'
+        path_env   = f'data/hicc_{ts_tag}_env.csv'
         csv_writer = CsvWriter(path_6axis, path_env)
         print(f'六轴数据 -> {path_6axis}')
         print(f'环境数据 -> {path_env}')
