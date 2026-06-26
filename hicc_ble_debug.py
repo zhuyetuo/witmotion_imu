@@ -27,16 +27,16 @@ BLE GATT UUID:
     python hicc_ble_debug.py --scan
 
     # 连接指定 MAC，自动校时，终端打印数据
-    python hicc_ble_debug.py --address EA:CB:3E:CF:00:1A
+    python hicc_ble_debug.py --address EA:CB:3E:CF:00:1B
 
     # 连接并同时写入 CSV 文件
-    python hicc_ble_debug.py --address EA:CB:3E:CF:00:1A -o hicc_imu.csv
+    python hicc_ble_debug.py --address EA:CB:3E:CF:00:1B -o hicc_imu.csv
 
     # 连接后只列出服务/特征值，不接收数据（用于核对 UUID）
-    python hicc_ble_debug.py --address EA:CB:3E:CF:00:1A --list-services
+    python hicc_ble_debug.py --address EA:CB:3E:CF:00:1B --list-services
 
     # 不自动校时（设备时钟已经准确时使用）
-    python hicc_ble_debug.py --address EA:CB:3E:CF:00:1A --no-timesync
+    python hicc_ble_debug.py --address EA:CB:3E:CF:00:1B --no-timesync
 """
 
 import argparse
@@ -516,7 +516,7 @@ async def run(args):
 
     if not args.address:
         print('请用 --address 指定设备 MAC 地址，或用 --scan 先扫描。')
-        print(f'已知 MAC: EA:CB:3E:CF:00:1A  EA:CB:3E:CF:00:1B  EA:CB:3E:CF:00:1D')
+        print(f'已知 MAC: EA:CB:3E:CF:00:1B  EA:CB:3E:CF:00:1D')
         sys.exit(1)
 
     print(f'连接中: {args.address} ...')
@@ -524,9 +524,9 @@ async def run(args):
     buf = FrameBuffer()
     csv_writer = None
     if args.output:
-        base = args.output.rsplit('.', 1)[0] if '.' in args.output else args.output
-        path_6axis = base + '_6axis.csv'
-        path_env   = base + '_env.csv'
+        ts_tag = datetime.now(TZ_CST).strftime('%Y%m%d_%H%M%S')
+        path_6axis = f'hicc_{ts_tag}_6axis.csv'
+        path_env   = f'hicc_{ts_tag}_env.csv'
         csv_writer = CsvWriter(path_6axis, path_env)
         print(f'六轴数据 -> {path_6axis}')
         print(f'环境数据 -> {path_env}')
@@ -618,7 +618,7 @@ def main():
     ap.add_argument('--scan', action='store_true',
                     help='扫描附近所有 BLE 设备并列出，不连接')
     ap.add_argument('--address', default=None,
-                    help='设备 MAC 地址，例如 EA:CB:3E:CF:00:1A')
+                    help='设备 MAC 地址，例如 EA:CB:3E:CF:00:1B')
     ap.add_argument('--scan-timeout', type=float, default=8.0,
                     help='扫描超时（秒），默认 8')
     ap.add_argument('-o', '--output', default=None,
