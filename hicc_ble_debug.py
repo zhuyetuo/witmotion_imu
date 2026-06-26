@@ -308,8 +308,8 @@ def print_decoded(d: dict):
 
 # ── CSV 写入 ───────────────────────────────────────────────────────────────
 
-CSV_HEADER_6AXIS = ['timestamp', 'acc_x_ms2', 'acc_y_ms2', 'acc_z_ms2',
-                    'gyro_x_rads', 'gyro_y_rads', 'gyro_z_rads']
+CSV_HEADER_6AXIS = ['timestamp', 'acc_x', 'acc_y', 'acc_z',
+                    'gyro_x', 'gyro_y', 'gyro_z']
 CSV_HEADER_ENV   = ['timestamp', 'temp_in_c', 'hum_in_pct', 'temp_body_c', 'batt_mv']
 
 
