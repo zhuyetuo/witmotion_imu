@@ -20,12 +20,16 @@ IMU + 摄像头同步采集脚本
 
 {base}_meta.csv（对齐质量/调试信息）:
     frame_idx      视频帧序号（从1开始）
-    cam_timestamp  视频帧采集时刻
-    imu_timestamp  匹配到的 IMU 样本的芯片时间
+    cam_timestamp  视频帧采集时刻（PC系统时间）
+    imu_timestamp  匹配到的 IMU 样本到达时刻（PC系统时间，非芯片时间，芯片时间可能未校准）
     imu_lag_ms     IMU样本与视频帧的时间差（ms），越小对齐越好
     imu_missing    1=此帧未找到有效 IMU 数据
     cam_fps        此时刻摄像头帧率（滑动1秒窗口）
     imu_hz         此时刻 IMU 采样率（滑动1秒窗口）
+
+同步模式:
+    默认事件驱动（等待新 IMU 样本到达再抓帧），摄像头与 IMU 天然对齐，
+    避免同一 IMU 样本被多帧复用；--no-imu-sync 可切回固定定时器模式。
 
 依赖:
     pip install bleak opencv-python
@@ -65,7 +69,7 @@ except ImportError:
 # ── 共享状态 ────────────────────────────────────────────────────────────────
 
 # IMU 环形缓冲，保留最近 10 秒的样本（25Hz × 10s = 250 条）
-# 每个元素: {'pc_ms': float, 'imu_ts': str, 'acc_x': ..., ...}
+# 每个元素: {'pc_ms': float, 'seq': int, 'acc_x': ..., ...}
 _imu_buffer: deque = deque(maxlen=500)
 _imu_lock   = threading.Lock()
 
@@ -76,14 +80,22 @@ ble_mac: list[str] = ['unknown']
 _imu_ts_window: list[float] = []
 _imu_hz_lock   = threading.Lock()
 
+# 新样本到达事件：用于摄像头“等待 IMU 新样本”事件驱动模式
+_imu_new_event = threading.Event()
+_imu_seq_counter = 0
+
 
 def _push_imu(row: dict):
-    """BLE 线程调用：把一条 IMU 数据推入缓冲，同时更新 Hz 窗口。"""
+    """BLE 线程调用：把一条 IMU 数据推入缓冲，同时更新 Hz 窗口并触发新样本事件。"""
+    global _imu_seq_counter
     now = time.time()
     with _imu_lock:
+        _imu_seq_counter += 1
+        row['seq'] = _imu_seq_counter
         _imu_buffer.append(row)
     with _imu_hz_lock:
         _imu_ts_window.append(now)
+    _imu_new_event.set()
 
 
 def _current_imu_hz() -> float:
@@ -144,11 +156,8 @@ async def _run_wit(args):
             p = parse_one_packet(pkt)
             if p is None or p['chip_time'] is None:
                 continue
-            ct = p['chip_time']
-            imu_ts = ct.strftime('%Y-%m-%d %H:%M:%S.') + f'{ct.microsecond // 1000:03d}'
             _push_imu({
                 'pc_ms':  pc_ms,
-                'imu_ts': imu_ts,
                 'acc_x':  p['acc'][0],
                 'acc_y':  p['acc'][1],
                 'acc_z':  p['acc'][2],
@@ -225,15 +234,8 @@ async def _run_hicc(args):
             dps = parse_dp_sequence(frame[6:-1])
             if DP_ACC_X not in dps or DP_GYRO_X not in dps:
                 continue
-            chip_ms = dps.get(DP_TIMESTAMP, 0)
-            try:
-                imu_ts = (datetime.utcfromtimestamp(chip_ms / 1000.0)
-                          .strftime('%Y-%m-%d %H:%M:%S.') + f'{chip_ms % 1000:03d}')
-            except (OSError, OverflowError, ValueError):
-                imu_ts = ''
             _push_imu({
                 'pc_ms':  pc_ms,
-                'imu_ts': imu_ts,
                 'acc_x':  dps[DP_ACC_X]  / 1_000_000.0,
                 'acc_y':  dps[DP_ACC_Y]  / 1_000_000.0,
                 'acc_z':  dps[DP_ACC_Z]  / 1_000_000.0,
@@ -412,14 +414,27 @@ def run_camera(args):
     # IMU 最大允许延迟：3个 IMU 周期（BLE 偶尔批量推送，给一点宽容）
     max_lag_ms = 3 * (1000.0 / target_fps)
 
+    imu_sync = not args.no_imu_sync
+
     try:
         while not stop_event.is_set():
-            # 精确限速
-            now = time.time()
-            sleep_s = next_tick - now
-            if sleep_s > 0:
-                time.sleep(sleep_s)
-            next_tick += frame_interval
+            if imu_sync:
+                # 事件驱动：等待新 IMU 样本到达再抓帧，让摄像头与 IMU 天然对齐，
+                # 而不是各走各的固定定时器（消除同一 IMU 样本被多帧复用的问题）。
+                # 超时兜底：等不到新样本时仍按 frame_interval 抓帧并标记 imu_missing。
+                _imu_new_event.wait(timeout=frame_interval * 3)
+                _imu_new_event.clear()
+                now = time.time()
+                if now < next_tick:
+                    time.sleep(next_tick - now)
+                next_tick = time.time() + frame_interval
+            else:
+                # 旧的固定定时器限速模式
+                now = time.time()
+                sleep_s = next_tick - now
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+                next_tick += frame_interval
 
             ret, frame = cap.read()
             if not ret:
@@ -454,7 +469,7 @@ def run_camera(args):
                 acc  = [f"{imu_row['acc_x']:.6f}",  f"{imu_row['acc_y']:.6f}",  f"{imu_row['acc_z']:.6f}"]
                 gyro = [f"{imu_row['gyro_x']:.6f}", f"{imu_row['gyro_y']:.6f}", f"{imu_row['gyro_z']:.6f}"]
                 lag_str = f'{lag_ms:.1f}'
-                imu_ts_str = imu_row.get('imu_ts', '')
+                imu_ts_str = datetime.fromtimestamp(imu_row['pc_ms'] / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
                 missing_flag = 0
 
             if imu_csv_writer:
@@ -540,6 +555,8 @@ def main():
                     help='录制时长（秒），0=实时模式不保存')
     ap.add_argument('--no-save-overlay', action='store_true',
                     help='保存干净视频（不含叠加信息）；默认保存带叠加信息的视频，便于标注时参考')
+    ap.add_argument('--no-imu-sync', action='store_true',
+                    help='关闭事件驱动同步，改用固定定时器抓帧（不等待新 IMU 样本，可能出现重复复用同一 IMU 样本）')
     args = ap.parse_args()
 
     if args.device == 'wit' and not args.name and not args.address:
