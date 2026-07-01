@@ -124,7 +124,12 @@ python imu_camera_sync.py --device wit --name WTSDCL --fps 20
 
 # 指定摄像头编号（默认 0）
 python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --camera 1
+
+# 保存不带叠加信息的原始视频（默认叠加 IMU/帧率/延迟信息，方便数据标注）
+python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --no-save-overlay
 ```
+
+视频默认叠加 IMU 数值、帧率、imu_lag 等信息（标注时可直观判断数据质量）。输出 CSV 每帧对应一行，字段含 `imu_missing`（1=该帧无 IMU 数据）和 `imu_lag_ms`（IMU 时间戳与视频帧时间戳的差值）。
 
 ### 时间漂移分析
 
