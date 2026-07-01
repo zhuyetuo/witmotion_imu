@@ -130,6 +130,9 @@ python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --no-save-ov
 
 # 关闭事件驱动同步，改用固定定时器抓帧（不推荐，仅调试用）
 python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --no-imu-sync
+
+# 常用：WitMotion 设备，指定摄像头1，录制180秒
+python imu_camera_sync.py --device wit --name WTSDCL --fps 20 --duration 180 --camera 1
 ```
 
 视频默认叠加 IMU 数值、帧率、imu_lag 等信息（标注时可直观判断数据质量）。
