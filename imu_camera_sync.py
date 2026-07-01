@@ -11,14 +11,19 @@ IMU + 摄像头同步采集脚本
     录制模式（--duration N）  采集 N 秒后自动停止，保存视频 + IMU CSV
     实时模式（不加 --duration 或 --duration 0）  显示实时画面+IMU数值，Ctrl+C 停止
 
-CSV 格式（每视频帧一行，与视频严格1:1对齐）:
+输出两个 CSV（每视频帧一行，与视频严格1:1对齐）:
+
+{base}.csv（Label Studio 兼容格式）:
+    timestamp      视频帧采集时刻（%Y-%m-%d %H:%M:%S.%L）
+    acc_x/y/z      加速度（缺失帧写空）
+    gyro_x/y/z     角速度（缺失帧写空）
+
+{base}_meta.csv（对齐质量/调试信息）:
     frame_idx      视频帧序号（从1开始）
-    cam_timestamp  视频帧采集时刻（PC系统时间）
+    cam_timestamp  视频帧采集时刻
     imu_timestamp  匹配到的 IMU 样本的芯片时间
     imu_lag_ms     IMU样本与视频帧的时间差（ms），越小对齐越好
-    imu_missing    1=此帧未找到有效 IMU 数据，acc/gyro 为 NaN
-    acc_x/y/z      加速度 m/s²（或 g，取决于设备）
-    gyro_x/y/z     角速度 rad/s（或 °/s）
+    imu_missing    1=此帧未找到有效 IMU 数据
     cam_fps        此时刻摄像头帧率（滑动1秒窗口）
     imu_hz         此时刻 IMU 采样率（滑动1秒窗口）
 
@@ -274,7 +279,11 @@ def ble_thread_main(args):
 
 # ── 画面叠加信息 ─────────────────────────────────────────────────────────────
 
-CSV_HEADER = [
+# Label Studio 兼容格式（主 CSV）
+CSV_HEADER = ['timestamp', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z']
+
+# 对齐质量 / 调试信息（副 CSV，包含全部字段）
+META_HEADER = [
     'frame_idx', 'cam_timestamp', 'imu_timestamp',
     'imu_lag_ms', 'imu_missing',
     'acc_x', 'acc_y', 'acc_z',
@@ -361,20 +370,27 @@ def run_camera(args):
     mac_tag = ble_mac[0].replace(':', '').lower()
     base    = f'data/{dev_tag}_{mac_tag}_{ts_tag}'
 
-    video_writer   = None
-    imu_csv_file   = None
-    imu_csv_writer = None
+    video_writer    = None
+    imu_csv_file    = None
+    imu_csv_writer  = None
+    meta_csv_file   = None
+    meta_csv_writer = None
 
     if record_mode:
         video_path = f'{base}.mp4'
         imu_path   = f'{base}.csv'
+        meta_path  = f'{base}_meta.csv'
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        video_writer = cv2.VideoWriter(video_path, fourcc, float(target_fps), (actual_w, actual_h))
-        imu_csv_file   = open(imu_path, 'w', newline='', encoding='utf-8-sig')
+        video_writer   = cv2.VideoWriter(video_path, fourcc, float(target_fps), (actual_w, actual_h))
+        imu_csv_file   = open(imu_path,  'w', newline='', encoding='utf-8-sig')
         imu_csv_writer = csv.writer(imu_csv_file)
         imu_csv_writer.writerow(CSV_HEADER)
+        meta_csv_file   = open(meta_path, 'w', newline='', encoding='utf-8-sig')
+        meta_csv_writer = csv.writer(meta_csv_file)
+        meta_csv_writer.writerow(META_HEADER)
         overlay_note = '（含叠加信息）' if save_overlay else '（干净画面）'
-        print(f'录制模式: {args.duration}s  视频{overlay_note}→{video_path}  IMU→{imu_path}')
+        print(f'录制模式: {args.duration}s  视频{overlay_note}→{video_path}')
+        print(f'  IMU(Label Studio)→{imu_path}  对齐信息→{meta_path}')
     else:
         print('实时模式（按 Q 或 Ctrl+C 退出）。')
 
@@ -428,23 +444,31 @@ def run_camera(args):
             cam_ts_str = datetime.fromtimestamp(cam_ts).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
             # CSV：每视频帧写一行，与视频严格1:1
+            if missing or imu_row is None:
+                acc  = ['', '', '']
+                gyro = ['', '', '']
+                lag_str = f'{lag_ms:.1f}' if lag_ms != float('inf') else ''
+                imu_ts_str = ''
+                missing_flag = 1
+            else:
+                acc  = [f"{imu_row['acc_x']:.6f}",  f"{imu_row['acc_y']:.6f}",  f"{imu_row['acc_z']:.6f}"]
+                gyro = [f"{imu_row['gyro_x']:.6f}", f"{imu_row['gyro_y']:.6f}", f"{imu_row['gyro_z']:.6f}"]
+                lag_str = f'{lag_ms:.1f}'
+                imu_ts_str = imu_row.get('imu_ts', '')
+                missing_flag = 0
+
             if imu_csv_writer:
-                if missing or imu_row is None:
-                    imu_csv_writer.writerow([
-                        frame_idx, cam_ts_str, '',
-                        f'{lag_ms:.1f}' if lag_ms != float('inf') else '',
-                        1,
-                        'NaN', 'NaN', 'NaN', 'NaN', 'NaN', 'NaN',
-                        f'{cam_fps:.1f}', f'{imu_hz:.1f}',
-                    ])
-                else:
-                    imu_csv_writer.writerow([
-                        frame_idx, cam_ts_str, imu_row.get('imu_ts', ''),
-                        f'{lag_ms:.1f}', 0,
-                        f"{imu_row['acc_x']:.6f}", f"{imu_row['acc_y']:.6f}", f"{imu_row['acc_z']:.6f}",
-                        f"{imu_row['gyro_x']:.6f}", f"{imu_row['gyro_y']:.6f}", f"{imu_row['gyro_z']:.6f}",
-                        f'{cam_fps:.1f}', f'{imu_hz:.1f}',
-                    ])
+                # Label Studio 格式：timestamp + acc/gyro
+                imu_csv_writer.writerow([cam_ts_str] + acc + gyro)
+
+            if meta_csv_writer:
+                # 全量信息：对齐质量 + acc/gyro
+                meta_csv_writer.writerow([
+                    frame_idx, cam_ts_str, imu_ts_str,
+                    lag_str, missing_flag,
+                    *acc, *gyro,
+                    f'{cam_fps:.1f}', f'{imu_hz:.1f}',
+                ])
 
             # 生成叠加画面
             display = draw_imu_overlay(
@@ -484,13 +508,17 @@ def run_camera(args):
             video_writer.release()
         if imu_csv_file:
             imu_csv_file.close()
+        if meta_csv_file:
+            meta_csv_file.close()
         try:
             cv2.destroyAllWindows()
         except cv2.error:
             pass
         print(f'\n共采集 {frame_idx} 帧视频  {elapsed:.1f}s  目标 {target_fps} fps')
         if record_mode:
-            print(f'已保存: {base}.mp4  {base}.csv')
+            print(f'已保存: {base}.mp4')
+            print(f'       {base}.csv（Label Studio）')
+            print(f'       {base}_meta.csv（全量信息）')
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
