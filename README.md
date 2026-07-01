@@ -127,9 +127,24 @@ python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --camera 1
 
 # 保存不带叠加信息的原始视频（默认叠加 IMU/帧率/延迟信息，方便数据标注）
 python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --no-save-overlay
+
+# 关闭事件驱动同步，改用固定定时器抓帧（不推荐，仅调试用）
+python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --no-imu-sync
 ```
 
-视频默认叠加 IMU 数值、帧率、imu_lag 等信息（标注时可直观判断数据质量）。输出 CSV 每帧对应一行，字段含 `imu_missing`（1=该帧无 IMU 数据）和 `imu_lag_ms`（IMU 时间戳与视频帧时间戳的差值）。
+视频默认叠加 IMU 数值、帧率、imu_lag 等信息（标注时可直观判断数据质量）。
+
+**输出文件（每次录制生成 3 个文件）：**
+
+| 文件 | 内容 |
+|------|------|
+| `{base}.mp4` | 视频（默认带叠加信息） |
+| `{base}.csv` | Label Studio 兼容格式：`timestamp, acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z` |
+| `{base}_meta.csv` | 全量对齐信息：`frame_idx, cam_timestamp, imu_timestamp, imu_lag_ms, imu_missing, acc/gyro, cam_fps, imu_hz` |
+
+**同步模式**：默认摄像头会等待新的 IMU 样本到达后才抓帧（事件驱动），使两条独立时间线（摄像头定时器 vs BLE 到达时间）天然对齐，避免同一个 IMU 样本被多帧复用。`--no-imu-sync` 可切回旧的固定定时器模式（仅供调试对比）。
+
+**采样率建议**：最终设备用多少 Hz（如 16Hz），采集、训练、推理三端都应保持一致，避免因采样率不一致导致特征分布偏移。
 
 ### 时间漂移分析
 
