@@ -11,34 +11,39 @@ IMU + 摄像头同步采集脚本
     录制模式（--duration N）  采集 N 秒后自动停止，保存视频 + IMU CSV
     实时模式（不加 --duration 或 --duration 0）  显示实时画面+IMU数值，Ctrl+C 停止
 
-所有 IMU 时间戳均使用 PC 系统时间（time.time()），与摄像头帧时间戳对齐。
+CSV 格式（每视频帧一行，与视频严格1:1对齐）:
+    frame_idx      视频帧序号（从1开始）
+    cam_timestamp  视频帧采集时刻（PC系统时间）
+    imu_timestamp  匹配到的 IMU 样本的芯片时间
+    imu_lag_ms     IMU样本与视频帧的时间差（ms），越小对齐越好
+    imu_missing    1=此帧未找到有效 IMU 数据，acc/gyro 为 NaN
+    acc_x/y/z      加速度 m/s²（或 g，取决于设备）
+    gyro_x/y/z     角速度 rad/s（或 °/s）
+    cam_fps        此时刻摄像头帧率（滑动1秒窗口）
+    imu_hz         此时刻 IMU 采样率（滑动1秒窗口）
 
 依赖:
     pip install bleak opencv-python
 
 用法:
-    # WitMotion，按名称查找，录 10 秒（文件名自动含 MAC 地址和时间）
-    python imu_camera_sync.py --device wit --name WTSDCL --duration 10
+    # HICC，录 60 秒（默认保存带叠加信息的视频）
+    python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --duration 60
 
-    # HICC，按 MAC 地址，录 10 秒
-    python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --duration 10
+    # WitMotion，实时显示，不保存
+    python imu_camera_sync.py --device wit --name WTSDCL
 
-    # 实时显示（不保存文件）
-    python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B
-
-    # 指定摄像头编号（默认 0）
-    python imu_camera_sync.py --device wit --name WTSDCL --camera 1
+    # 保存干净视频（不含叠加信息）
+    python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --duration 60 --no-save-overlay
 """
 
 import argparse
 import asyncio
 import csv
-import queue
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime
-from pathlib import Path
 
 try:
     import cv2
@@ -47,16 +52,57 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from bleak import BleakClient, BleakScanner
+    from bleak import BleakClient
 except ImportError:
     print('缺少 bleak，请先安装: pip install bleak')
     sys.exit(1)
 
 # ── 共享状态 ────────────────────────────────────────────────────────────────
 
-imu_queue: queue.Queue = queue.Queue(maxsize=500)  # IMU帧缓冲，主线程消费
-stop_event = threading.Event()   # 通知所有线程退出
-ble_mac: list[str] = ['unknown']  # BLE线程连接成功后填入设备MAC地址
+# IMU 环形缓冲，保留最近 10 秒的样本（25Hz × 10s = 250 条）
+# 每个元素: {'pc_ms': float, 'imu_ts': str, 'acc_x': ..., ...}
+_imu_buffer: deque = deque(maxlen=500)
+_imu_lock   = threading.Lock()
+
+stop_event = threading.Event()
+ble_mac: list[str] = ['unknown']
+
+# IMU Hz 统计（BLE线程侧）
+_imu_ts_window: list[float] = []
+_imu_hz_lock   = threading.Lock()
+
+
+def _push_imu(row: dict):
+    """BLE 线程调用：把一条 IMU 数据推入缓冲，同时更新 Hz 窗口。"""
+    now = time.time()
+    with _imu_lock:
+        _imu_buffer.append(row)
+    with _imu_hz_lock:
+        _imu_ts_window.append(now)
+
+
+def _current_imu_hz() -> float:
+    """主线程调用：读取当前 IMU 实际采样率（滑动1秒窗口）。"""
+    now = time.time()
+    cutoff = now - 1.0
+    with _imu_hz_lock:
+        while _imu_ts_window and _imu_ts_window[0] < cutoff:
+            _imu_ts_window.pop(0)
+        return float(len(_imu_ts_window))
+
+
+def _find_nearest_imu(cam_ts_ms: float, max_lag_ms: float = 300.0):
+    """
+    在缓冲中找与 cam_ts_ms 时间最近的 IMU 样本。
+    返回 (row, lag_ms, is_missing)。
+    is_missing=True 表示最近样本时间差超过 max_lag_ms。
+    """
+    with _imu_lock:
+        if not _imu_buffer:
+            return None, float('inf'), True
+        best = min(_imu_buffer, key=lambda r: abs(r['pc_ms'] - cam_ts_ms))
+    lag = abs(best['pc_ms'] - cam_ts_ms)
+    return best, lag, lag > max_lag_ms
 
 
 # ── WitMotion 采集 ──────────────────────────────────────────────────────────
@@ -93,20 +139,18 @@ async def _run_wit(args):
             p = parse_one_packet(pkt)
             if p is None or p['chip_time'] is None:
                 continue
-            row = {
-                'pc_ms':     pc_ms,
-                'chip_time': p['chip_time'],   # datetime，用于 CSV 时间戳
+            ct = p['chip_time']
+            imu_ts = ct.strftime('%Y-%m-%d %H:%M:%S.') + f'{ct.microsecond // 1000:03d}'
+            _push_imu({
+                'pc_ms':  pc_ms,
+                'imu_ts': imu_ts,
                 'acc_x':  p['acc'][0],
                 'acc_y':  p['acc'][1],
                 'acc_z':  p['acc'][2],
                 'gyro_x': p['gyro'][0],
                 'gyro_y': p['gyro'][1],
                 'gyro_z': p['gyro'][2],
-            }
-            try:
-                imu_queue.put_nowait(row)
-            except queue.Full:
-                pass
+            })
 
     async with BleakClient(device) as client:
         subscribed = None
@@ -143,8 +187,7 @@ def _setup_hicc():
             find_tx_uuid, find_rx_uuid, send_timesync,
             DP_ACC_X, DP_ACC_Y, DP_ACC_Z,
             DP_GYRO_X, DP_GYRO_Y, DP_GYRO_Z,
-            DP_TIMESTAMP,
-            CMD_REPORT,
+            DP_TIMESTAMP, CMD_REPORT,
         )
     except ImportError as e:
         print(f'导入 hicc_parse 失败: {e}')
@@ -172,27 +215,27 @@ async def _run_hicc(args):
         pc_ms = time.time() * 1000.0
         frames = fb.feed(bytes(data))
         for frame in frames:
-            cmd = frame[3]
-            if cmd != CMD_REPORT:
+            if frame[3] != CMD_REPORT:
                 continue
-            payload = frame[6:-1]
-            dps = parse_dp_sequence(payload)
+            dps = parse_dp_sequence(frame[6:-1])
             if DP_ACC_X not in dps or DP_GYRO_X not in dps:
                 continue
-            row = {
-                'pc_ms':   pc_ms,
-                'chip_ms': dps.get(DP_TIMESTAMP, 0),
-                'acc_x':   dps[DP_ACC_X]  / 1_000_000.0,
-                'acc_y':   dps[DP_ACC_Y]  / 1_000_000.0,
-                'acc_z':   dps[DP_ACC_Z]  / 1_000_000.0,
-                'gyro_x':  dps[DP_GYRO_X] / 1_000_000.0,
-                'gyro_y':  dps[DP_GYRO_Y] / 1_000_000.0,
-                'gyro_z':  dps[DP_GYRO_Z] / 1_000_000.0,
-            }
+            chip_ms = dps.get(DP_TIMESTAMP, 0)
             try:
-                imu_queue.put_nowait(row)
-            except queue.Full:
-                pass
+                imu_ts = (datetime.utcfromtimestamp(chip_ms / 1000.0)
+                          .strftime('%Y-%m-%d %H:%M:%S.') + f'{chip_ms % 1000:03d}')
+            except (OSError, OverflowError, ValueError):
+                imu_ts = ''
+            _push_imu({
+                'pc_ms':  pc_ms,
+                'imu_ts': imu_ts,
+                'acc_x':  dps[DP_ACC_X]  / 1_000_000.0,
+                'acc_y':  dps[DP_ACC_Y]  / 1_000_000.0,
+                'acc_z':  dps[DP_ACC_Z]  / 1_000_000.0,
+                'gyro_x': dps[DP_GYRO_X] / 1_000_000.0,
+                'gyro_y': dps[DP_GYRO_Y] / 1_000_000.0,
+                'gyro_z': dps[DP_GYRO_Z] / 1_000_000.0,
+            })
 
     async with BleakClient(args.address) as client:
         tx_uuid = await find_tx_uuid(client)
@@ -201,16 +244,12 @@ async def _run_hicc(args):
             print('找不到 HICC TX 特征值，请确认设备和 UUID。')
             stop_event.set()
             return
-
         if rx_uuid:
             await send_timesync(client, rx_uuid)
-
         await client.start_notify(tx_uuid, on_data)
         print(f'已订阅 HICC TX: {tx_uuid}')
-
         while not stop_event.is_set():
             await asyncio.sleep(0.1)
-
         await client.stop_notify(tx_uuid)
 
     print('HICC BLE 已断开。')
@@ -229,48 +268,79 @@ def ble_thread_main(args):
     except Exception as e:
         print(f'BLE 线程异常: {e}')
     finally:
-        # BLE 退出（无论正常/异常/设备掉线）都通知摄像头循环结束
         stop_event.set()
         loop.close()
 
 
-# ── 主循环（摄像头 + 显示 + 录制） ─────────────────────────────────────────
+# ── 画面叠加信息 ─────────────────────────────────────────────────────────────
 
-def draw_imu_overlay(frame, imu: dict | None, frame_idx: int, elapsed: float,
-                     recording: bool, cam_fps: float, imu_fps: float, target_fps: int):
+CSV_HEADER = [
+    'frame_idx', 'cam_timestamp', 'imu_timestamp',
+    'imu_lag_ms', 'imu_missing',
+    'acc_x', 'acc_y', 'acc_z',
+    'gyro_x', 'gyro_y', 'gyro_z',
+    'cam_fps', 'imu_hz',
+]
+
+
+def draw_imu_overlay(frame, imu: dict | None, imu_lag_ms: float, imu_missing: bool,
+                     frame_idx: int, elapsed: float, recording: bool,
+                     cam_fps: float, imu_hz: float, target_fps: int):
     h, w = frame.shape[:2]
     overlay = frame.copy()
-
-    cv2.rectangle(overlay, (0, 0), (w, 185), (0, 0, 0), -1)
+    cv2.rectangle(overlay, (0, 0), (w, 210), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.45, frame, 0.55, 0, frame)
 
     def put(text, row, color=(200, 255, 200)):
         cv2.putText(frame, text, (12, 28 + row * 26),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 1, cv2.LINE_AA)
 
+    # 行0：时间 + 帧号 + 录制标记
     ts = datetime.now().strftime('%H:%M:%S.%f')[:12]
     rec_tag = '  [REC]' if recording else ''
-    put(f'{ts}  t={elapsed:.1f}s{rec_tag}', 0, (255, 255, 100))
+    put(f'{ts}  #{frame_idx}  t={elapsed:.1f}s{rec_tag}', 0, (255, 255, 100))
 
-    # 颜色：实际与目标相差 >20% 时变红提示
+    # 颜色：实际与目标相差 >20% 变红
     def rate_color(actual, target):
-        return (100, 100, 255) if abs(actual - target) / max(target, 1) > 0.2 else (255, 200, 100)
+        return (80, 80, 255) if abs(actual - target) / max(target, 1) > 0.2 else (255, 200, 100)
 
+    # 行1：摄像头帧率
     put(f'CAM {cam_fps:5.1f} fps  (target {target_fps} fps)', 1, rate_color(cam_fps, target_fps))
-    put(f'IMU {imu_fps:5.1f} Hz   (target {target_fps} Hz)', 2, rate_color(imu_fps, target_fps))
 
-    if imu:
-        put(f"Acc  X={imu['acc_x']:+7.3f}  Y={imu['acc_y']:+7.3f}  Z={imu['acc_z']:+7.3f}  m/s2", 3)
-        put(f"Gyro X={imu['gyro_x']:+7.4f}  Y={imu['gyro_y']:+7.4f}  Z={imu['gyro_z']:+7.4f}  rad/s", 4)
+    # 行2：IMU 采样率
+    put(f'IMU {imu_hz:5.1f} Hz   (target {target_fps} Hz)', 2, rate_color(imu_hz, target_fps))
+
+    # 行3：IMU 对齐延迟（颜色：<50ms 绿，50~150ms 黄，>150ms 红）
+    if imu_missing:
+        lag_color = (80, 80, 255)
+        lag_str = 'IMU MISSING'
+    elif imu_lag_ms < 50:
+        lag_color = (100, 255, 100)
+        lag_str = f'IMU lag {imu_lag_ms:.0f} ms'
+    elif imu_lag_ms < 150:
+        lag_color = (50, 200, 255)
+        lag_str = f'IMU lag {imu_lag_ms:.0f} ms'
     else:
-        put('Waiting for IMU...', 3, (100, 100, 255))
+        lag_color = (80, 80, 255)
+        lag_str = f'IMU lag {imu_lag_ms:.0f} ms  !'
+    put(lag_str, 3, lag_color)
+
+    # 行4/5：IMU 数值
+    if imu and not imu_missing:
+        put(f"Acc  X={imu['acc_x']:+7.3f}  Y={imu['acc_y']:+7.3f}  Z={imu['acc_z']:+7.3f}", 4)
+        put(f"Gyro X={imu['gyro_x']:+7.4f}  Y={imu['gyro_y']:+7.4f}  Z={imu['gyro_z']:+7.4f}", 5)
+    else:
+        put('Waiting for IMU...', 4, (80, 80, 255))
 
     return frame
 
 
+# ── 主循环（摄像头 + 显示 + 录制） ─────────────────────────────────────────
+
 def run_camera(args):
-    target_fps = args.fps
-    frame_interval = 1.0 / target_fps  # 目标帧间隔（秒）
+    target_fps    = args.fps
+    frame_interval = 1.0 / target_fps
+    save_overlay  = not args.no_save_overlay
 
     cap = cv2.VideoCapture(args.camera)
     if not cap.isOpened():
@@ -287,12 +357,12 @@ def run_camera(args):
 
     record_mode = args.duration and args.duration > 0
     ts_tag  = datetime.now().strftime('%Y%m%d_%H%M%S')
-    dev_tag = args.device                                   # 'wit' or 'hicc'
+    dev_tag = args.device
     mac_tag = ble_mac[0].replace(':', '').lower()
     base    = f'data/{dev_tag}_{mac_tag}_{ts_tag}'
 
-    video_writer = None
-    imu_csv_file = None
+    video_writer   = None
+    imu_csv_file   = None
     imu_csv_writer = None
 
     if record_mode:
@@ -302,42 +372,33 @@ def run_camera(args):
         video_writer = cv2.VideoWriter(video_path, fourcc, float(target_fps), (actual_w, actual_h))
         imu_csv_file   = open(imu_path, 'w', newline='', encoding='utf-8-sig')
         imu_csv_writer = csv.writer(imu_csv_file)
-        imu_csv_writer.writerow(['timestamp', 'acc_x', 'acc_y', 'acc_z',
-                                  'gyro_x', 'gyro_y', 'gyro_z'])
-        print(f'录制模式: {args.duration}s  视频→{video_path}  IMU→{imu_path}')
+        imu_csv_writer.writerow(CSV_HEADER)
+        overlay_note = '（含叠加信息）' if save_overlay else '（干净画面）'
+        print(f'录制模式: {args.duration}s  视频{overlay_note}→{video_path}  IMU→{imu_path}')
     else:
         print('实时模式（按 Q 或 Ctrl+C 退出）。')
 
-    start_time   = time.time()
-    next_tick    = start_time      # 下一帧的目标时刻（用于精确限速）
-    frame_idx    = 0
-    last_imu: dict | None = None
-    elapsed      = 0.0
+    start_time = time.time()
+    next_tick  = start_time
+    frame_idx  = 0
+    elapsed    = 0.0
 
-    # FPS 统计：滑动 1 秒窗口
+    # 摄像头 fps 滑动窗口
     cam_ts_window: list[float] = []
-    imu_ts_window: list[float] = []
 
-    def fps_from_window(ts_list: list[float], now: float) -> float:
+    def cam_fps_tick(now: float) -> float:
         cutoff = now - 1.0
-        while ts_list and ts_list[0] < cutoff:
-            ts_list.pop(0)
-        return float(len(ts_list))
+        while cam_ts_window and cam_ts_window[0] < cutoff:
+            cam_ts_window.pop(0)
+        cam_ts_window.append(now)
+        return float(len(cam_ts_window))
 
-    def imu_ts_str(r: dict, device: str) -> str:
-        """返回毫秒精度时间戳字符串，优先使用芯片时间。"""
-        if device == 'wit' and r.get('chip_time') is not None:
-            ct = r['chip_time']
-            return ct.strftime('%Y-%m-%d %H:%M:%S.') + f'{ct.microsecond // 1000:03d}'
-        elif device == 'hicc' and r.get('chip_ms', 0):
-            return (datetime.utcfromtimestamp(r['chip_ms'] / 1000.0)
-                    .strftime('%Y-%m-%d %H:%M:%S.%f')[:-3])
-        else:
-            return datetime.fromtimestamp(r['pc_ms'] / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+    # IMU 最大允许延迟：3个 IMU 周期（BLE 偶尔批量推送，给一点宽容）
+    max_lag_ms = 3 * (1000.0 / target_fps)
 
     try:
         while not stop_event.is_set():
-            # ── 精确限速：等到 next_tick 再读帧 ──
+            # 精确限速
             now = time.time()
             sleep_s = next_tick - now
             if sleep_s > 0:
@@ -349,53 +410,58 @@ def run_camera(args):
                 print('摄像头读取失败，退出。')
                 break
 
-            cam_ts = time.time()
+            cam_ts    = time.time()
+            cam_ts_ms = cam_ts * 1000.0
             frame_idx += 1
-            elapsed = cam_ts - start_time
-            cam_ts_window.append(cam_ts)
+            elapsed   = cam_ts - start_time
 
-            # 排空 IMU 队列，收集本帧期间所有到达的 IMU 数据
-            pending_imu: list[dict] = []
-            while True:
-                try:
-                    r = imu_queue.get_nowait()
-                    imu_ts_window.append(r['pc_ms'] / 1000.0)
-                    pending_imu.append(r)
-                except queue.Empty:
-                    break
-            if pending_imu:
-                last_imu = pending_imu[-1]
+            # 跳过录制开始前的帧（BLE 启动期间积压）
+            if cam_ts < start_time:
+                continue
 
-            # CSV：写入本帧期间所有 IMU 帧（原生采样率，不降采样）
-            if imu_csv_writer and pending_imu:
-                for r in pending_imu:
-                    if r['pc_ms'] < start_time * 1000.0:
-                        continue   # 跳过录制开始前积压的旧帧
-                    ts_str = imu_ts_str(r, args.device)
+            cam_fps = cam_fps_tick(cam_ts)
+            imu_hz  = _current_imu_hz()
+
+            # 找时间戳最近的 IMU 样本
+            imu_row, lag_ms, missing = _find_nearest_imu(cam_ts_ms, max_lag_ms)
+
+            cam_ts_str = datetime.fromtimestamp(cam_ts).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+
+            # CSV：每视频帧写一行，与视频严格1:1
+            if imu_csv_writer:
+                if missing or imu_row is None:
                     imu_csv_writer.writerow([
-                        ts_str,
-                        f"{r['acc_x']:.6f}", f"{r['acc_y']:.6f}", f"{r['acc_z']:.6f}",
-                        f"{r['gyro_x']:.6f}", f"{r['gyro_y']:.6f}", f"{r['gyro_z']:.6f}",
+                        frame_idx, cam_ts_str, '',
+                        f'{lag_ms:.1f}' if lag_ms != float('inf') else '',
+                        1,
+                        'NaN', 'NaN', 'NaN', 'NaN', 'NaN', 'NaN',
+                        f'{cam_fps:.1f}', f'{imu_hz:.1f}',
+                    ])
+                else:
+                    imu_csv_writer.writerow([
+                        frame_idx, cam_ts_str, imu_row.get('imu_ts', ''),
+                        f'{lag_ms:.1f}', 0,
+                        f"{imu_row['acc_x']:.6f}", f"{imu_row['acc_y']:.6f}", f"{imu_row['acc_z']:.6f}",
+                        f"{imu_row['gyro_x']:.6f}", f"{imu_row['gyro_y']:.6f}", f"{imu_row['gyro_z']:.6f}",
+                        f'{cam_fps:.1f}', f'{imu_hz:.1f}',
                     ])
 
-            cam_fps = fps_from_window(cam_ts_window, cam_ts)
-            imu_fps = fps_from_window(imu_ts_window, cam_ts)
+            # 生成叠加画面
+            display = draw_imu_overlay(
+                frame.copy(), imu_row, lag_ms if not missing else lag_ms,
+                missing, frame_idx, elapsed, recording=record_mode,
+                cam_fps=cam_fps, imu_hz=imu_hz, target_fps=target_fps,
+            )
 
+            # 保存视频（可选带叠加信息）
             if video_writer:
-                video_writer.write(frame)   # 保存原始帧（无叠加）
-
-            frame = draw_imu_overlay(frame, last_imu, frame_idx, elapsed,
-                                     recording=record_mode,
-                                     cam_fps=cam_fps, imu_fps=imu_fps,
-                                     target_fps=target_fps)
+                video_writer.write(display if save_overlay else frame)
 
             try:
-                cv2.imshow('IMU + Camera Sync', frame)
+                cv2.imshow('IMU + Camera Sync', display)
             except cv2.error:
-                # opencv-python-headless 不支持 imshow，仅录制模式可继续运行
                 if not record_mode:
-                    print('cv2.imshow 不支持（可能安装的是 headless 版本）。')
-                    print('请执行: pip uninstall opencv-python-headless -y && pip install opencv-python')
+                    print('cv2.imshow 不支持（可能是 headless 版本）。')
                     break
 
             if record_mode and elapsed >= args.duration:
@@ -432,29 +498,30 @@ def run_camera(args):
 def main():
     ap = argparse.ArgumentParser(description='IMU + 摄像头同步采集')
     ap.add_argument('--device', choices=['wit', 'hicc'], required=True,
-                    help='IMU 设备类型: wit=WitMotion(20Hz)  hicc=HICC_PetCollar(25Hz)')
+                    help='IMU 设备类型: wit=WitMotion  hicc=HICC_PetCollar')
     ap.add_argument('--name',    help='BLE 设备名称关键字（WitMotion 用）')
     ap.add_argument('--address', help='BLE MAC 地址（HICC 必须，WitMotion 可选）')
     ap.add_argument('--notify-uuid', dest='notify_uuid', default=None,
-                    help='手动指定 WitMotion Notify UUID（找不到数据时用）')
+                    help='手动指定 WitMotion Notify UUID')
     ap.add_argument('--camera', type=int, default=0,
                     help='摄像头编号，默认 0')
     ap.add_argument('--fps', type=int, default=20,
                     choices=range(1, 31), metavar='N',
-                    help='目标帧率/采样率（1-30，默认 20），视频和 IMU 输出同步到此频率')
+                    help='目标帧率（1-30，默认 20）')
     ap.add_argument('--duration', type=float, default=0,
-                    help='录制时长（秒），0 或不填=实时模式，不自动停止；有时长则自动保存文件')
+                    help='录制时长（秒），0=实时模式不保存')
+    ap.add_argument('--no-save-overlay', action='store_true',
+                    help='保存干净视频（不含叠加信息）；默认保存带叠加信息的视频，便于标注时参考')
     args = ap.parse_args()
 
     if args.device == 'wit' and not args.name and not args.address:
         ap.error('WitMotion 设备请指定 --name 或 --address')
 
-    # BLE 在后台线程跑 asyncio，摄像头在主线程（OpenCV 要求）
     t = threading.Thread(target=ble_thread_main, args=(args,), daemon=True)
     t.start()
 
     print('等待 BLE 连接中...')
-    time.sleep(2.0)  # 给 BLE 一点启动时间再开摄像头
+    time.sleep(2.0)
 
     run_camera(args)
 
