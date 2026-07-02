@@ -48,6 +48,9 @@ IMU + 摄像头同步采集脚本
 import argparse
 import asyncio
 import csv
+import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -346,6 +349,30 @@ def draw_imu_overlay(frame, imu: dict | None, imu_lag_ms: float, imu_missing: bo
     return frame
 
 
+def _fix_video_fps(video_path: str, actual_fps: float):
+    """
+    用真实平均帧率重新封装视频容器（仅改 fps 元数据，不重新编码），
+    让播放时长与录制时实际经过的时间一致。帧序列本身不受影响
+    （帧与 meta.csv 的 frame_idx 对应关系由写入顺序保证，与此无关）。
+    需要系统装有 ffmpeg，没有则跳过并提示。
+    """
+    if shutil.which('ffmpeg') is None:
+        print('未找到 ffmpeg，跳过视频 fps 元数据修正（video_writer 使用的固定 fps 与实际帧率不完全一致）。')
+        return
+    tmp_path = video_path + '.tmp.mp4'
+    try:
+        subprocess.run(
+            ['ffmpeg', '-y', '-i', video_path, '-r', f'{actual_fps:.4f}', '-c', 'copy', tmp_path],
+            check=True, capture_output=True,
+        )
+        os.replace(tmp_path, video_path)
+        print(f'已修正视频 fps 元数据: {actual_fps:.2f} fps（与实际录制时长一致）')
+    except subprocess.CalledProcessError as e:
+        print(f'ffmpeg 修正 fps 失败，保留原视频: {e}')
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
 # ── 主循环（摄像头 + 显示 + 录制） ─────────────────────────────────────────
 
 def run_camera(args):
@@ -531,6 +558,8 @@ def run_camera(args):
             pass
         print(f'\n共采集 {frame_idx} 帧视频  {elapsed:.1f}s  目标 {target_fps} fps')
         if record_mode:
+            if frame_idx > 0 and elapsed > 0:
+                _fix_video_fps(f'{base}.mp4', frame_idx / elapsed)
             print(f'已保存: {base}.mp4')
             print(f'       {base}.csv（Label Studio）')
             print(f'       {base}_meta.csv（全量信息）')
