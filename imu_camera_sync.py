@@ -324,7 +324,8 @@ def draw_imu_overlay(frame, imu: dict | None, imu_lag_ms: float, imu_missing: bo
 
     # 颜色：实际与目标相差 >20% 变红
     def rate_color(actual, target):
-        return (80, 80, 255) if abs(actual - target) / max(target, 1) > 0.2 else (255, 200, 100)
+        # 只有低于目标才是问题（丢帧/采样跟不上）；高于目标是好事，不标红。
+        return (80, 80, 255) if actual < target * 0.8 else (255, 200, 100)
 
     # 行1：摄像头帧率
     put(f'CAM {cam_fps:5.1f} fps  (target {target_fps} fps)', 1, rate_color(cam_fps, target_fps))
