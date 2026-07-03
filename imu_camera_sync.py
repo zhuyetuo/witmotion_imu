@@ -44,6 +44,9 @@ IMU + 摄像头同步采集脚本
     ffmpeg（用于精确对齐的视频写入，未安装会自动退化并提示）
 
 用法:
+    # 先探测硬件能力：摄像头最大分辨率/实测fps + IMU当前实际输出频率
+    python imu_camera_sync.py --device wit --name WTSDCL --probe
+
     # HICC，录 60 秒（默认保存带叠加信息的视频）
     python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --duration 60
 
@@ -419,6 +422,98 @@ class _Cv2CfrSink:
         self.writer.release()
 
 
+# ── 硬件能力探测（--probe） ───────────────────────────────────────────────
+
+def _measure_actual_fps(cap, warmup=5, sample=30) -> float:
+    """连续读若干帧，用真实经过时间算出摄像头实际能跑多快（而不是驱动声称的 fps）。"""
+    for _ in range(warmup):
+        cap.read()
+    t0 = time.time()
+    got = 0
+    for _ in range(sample):
+        ret, _ = cap.read()
+        if not ret:
+            break
+        got += 1
+    dt = time.time() - t0
+    return got / dt if dt > 0 else 0.0
+
+
+def probe_camera(camera_idx: int):
+    """探测摄像头支持的最大分辨率，以及在该分辨率下驱动声称的 fps 与实测能跑的真实 fps。"""
+    print(f'── 摄像头 {camera_idx} 能力探测 ──')
+    candidate_resolutions = [(3840, 2160), (1920, 1080), (1280, 720), (640, 480)]
+    best_res = None
+    for w, h in candidate_resolutions:
+        cap = cv2.VideoCapture(camera_idx)
+        if not cap.isOpened():
+            print(f'无法打开摄像头 {camera_idx}')
+            return None
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        print(f'  请求 {w}x{h}  →  实际 {actual_w}x{actual_h}')
+        if best_res is None and actual_w > 0 and actual_h > 0:
+            best_res = (actual_w, actual_h)
+
+    if best_res is None:
+        print('未能探测到有效分辨率。')
+        return None
+
+    print(f'  最大可用分辨率（约）: {best_res[0]}x{best_res[1]}')
+
+    cap = cv2.VideoCapture(camera_idx)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  best_res[0])
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, best_res[1])
+    for target in [60, 30, 25, 20, 16, 15, 10]:
+        cap.set(cv2.CAP_PROP_FPS, target)
+        declared = cap.get(cv2.CAP_PROP_FPS)
+        actual = _measure_actual_fps(cap)
+        print(f'  请求 {target:3d}fps  →  驱动声称 {declared:5.1f}fps  实测真实 {actual:5.1f}fps')
+    cap.release()
+    print()
+    return best_res
+
+
+async def probe_imu(args, seconds: float = 5.0):
+    """短暂连接 BLE 设备，测量当前设备实际配置的 IMU 输出频率（滑动1秒窗口平均）。"""
+    print(f'── IMU 设备能力探测（连接 {seconds:.0f} 秒测量实际频率）──')
+    if args.device == 'wit':
+        task = asyncio.ensure_future(_run_wit(args))
+    else:
+        task = asyncio.ensure_future(_run_hicc(args))
+
+    await asyncio.sleep(seconds)
+    stop_event.set()
+    try:
+        await asyncio.wait_for(task, timeout=5.0)
+    except asyncio.TimeoutError:
+        pass
+
+    hz = _current_imu_hz()
+    print(f'  当前设备实际输出频率: 约 {hz:.1f} Hz')
+    print('  （这是设备当前配置的频率，不是"最大支持频率"；WitMotion 设备的具体可选档位'
+          '需要在官方上位机软件里查看/修改，一般为 0.2/0.5/1/2/5/10/20/50/100/125/200Hz 等离散值，'
+          '不一定支持任意频率如 16Hz。）')
+    print()
+
+
+def run_probe(args):
+    probe_camera(args.camera)
+    if args.name or args.address:
+        stop_event.clear()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(probe_imu(args))
+        finally:
+            loop.close()
+    else:
+        print('未指定 --name/--address，跳过 IMU 探测（只测了摄像头）。')
+
+
 # ── 主循环（摄像头 + 显示 + 录制） ─────────────────────────────────────────
 
 def run_camera(args):
@@ -644,7 +739,13 @@ def main():
                     help='保存干净视频（不含叠加信息）；默认保存带叠加信息的视频，便于标注时参考')
     ap.add_argument('--no-imu-sync', action='store_true',
                     help='关闭事件驱动同步，改用固定定时器抓帧（不等待新 IMU 样本，可能出现重复复用同一 IMU 样本）')
+    ap.add_argument('--probe', action='store_true',
+                    help='只探测硬件能力（摄像头最大分辨率/实测fps，IMU当前实际输出频率），不录制，探测完直接退出')
     args = ap.parse_args()
+
+    if args.probe:
+        run_probe(args)
+        return
 
     if args.device == 'wit' and not args.name and not args.address:
         ap.error('WitMotion 设备请指定 --name 或 --address')
