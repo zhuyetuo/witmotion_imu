@@ -178,7 +178,7 @@ python imu_camera_sync.py --device wit --name WTSDCL --cam-fps 20 --duration 180
 
 **`--cam-fps`（旧名 `--fps`，仍兼容）只控制摄像头的目标帧率，与 IMU 采样率无关**：IMU 实际采样率完全由设备自身配置决定（比如 WitMotion 上位机设成 100Hz，这里就是 100Hz），跟摄像头帧率是两个独立的东西。采集阶段可以让 IMU 跑得比摄像头快（比如摄像头 20fps + IMU 100Hz），有利于更精确对齐；训练模型前再把 IMU 数据统一降采样到最终产品的实际频率（比如 16Hz）。
 
-**输出文件（每次录制生成 5 个文件）：**
+**输出文件（每次录制生成 6 个文件）：**
 
 | 文件 | 内容 |
 |------|------|
@@ -186,7 +186,10 @@ python imu_camera_sync.py --device wit --name WTSDCL --cam-fps 20 --duration 180
 | `{base}.csv` | Label Studio 兼容格式，**按视频帧对齐**：`timestamp, acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z`（行数=视频帧数） |
 | `{base}_meta.csv` | 全量对齐信息：`frame_idx, cam_timestamp, imu_timestamp, imu_lag_ms, imu_missing, acc/gyro, cam_fps, imu_hz` |
 | `{base}_raw.csv` | **原始 IMU 全量流水**，不受摄像头帧率影响，每条真实到达的样本都记录：`pc_ms, acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z` |
-| `{base}_resampled{HZ}hz.csv` | 用 `--resample-hz` 指定的目标频率对 `_raw.csv` 降采样后的结果，Label Studio 兼容格式，**与摄像头帧率无关** |
+| `{base}_resampled{HZ}hz.csv` | 用 `--resample-hz` 指定的目标频率对 `_raw.csv` 降采样后的结果，Label Studio 兼容格式，**与摄像头帧率无关**，起止时间已裁到与视频一致 |
+| `{base}_resampled{HZ}hz.mp4` | `{base}.mp4` 的原样复制，**文件名（去掉扩展名）与上面的 resampled CSV 完全一致**——Label Studio 靠同名文件配对视频和时间序列，这样才能把这一对文件传上去标注 |
+
+**如果要用降采样版本标注**（标完直接对应训练要用的数据，不用再等 `{base}.csv` 转换）：把 `{base}_resampled{HZ}hz.mp4` 和 `{base}_resampled{HZ}hz.csv` 一起传到 Label Studio，两者时间轴严格对齐（首尾时刻完全一致，中间每个时刻的插值也来自同一台电脑同一个时钟源，不会有画面和数据错位的问题）。
 
 **降采样模式（`--resample-hz`，默认 25Hz）**：录制结束后自动对 `{base}_raw.csv`（IMU 真实到达的完整数据流）做低通滤波 + 线性插值，生成任意目标频率的等间隔 CSV，跟摄像头帧率完全独立。输出会裁到视频第一帧/最后一帧的真实时刻范围内，所以 `{base}_resampled{HZ}hz.csv` 的起止时间、总时长与 `{base}.mp4` 是严格对齐的（`_raw.csv` 本身因为 BLE 数据流启停时刻跟视频帧采集不完全同步，会比视频略宽一点，但裁剪后输出不会带出这部分多余的头尾）。比如这次想要 20Hz 数据、下次想要 15Hz，只需要改这一个参数：
 

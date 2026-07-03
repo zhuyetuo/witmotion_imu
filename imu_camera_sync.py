@@ -815,10 +815,19 @@ def run_camera(args):
             print(f'       {base}.csv（Label Studio）')
             print(f'       {base}_meta.csv（全量信息）')
             print(f'       {base}_raw.csv（原始IMU全量流水）')
+            resampled_base = f'{base}_resampled{args.resample_hz:g}hz'
             resample_raw_imu(
-                f'{base}_raw.csv', f'{base}_resampled{args.resample_hz:g}hz.csv', args.resample_hz,
+                f'{base}_raw.csv', f'{resampled_base}.csv', args.resample_hz,
                 t_start_ms=first_cam_ts_ms, t_end_ms=last_cam_ts_ms,
             )
+            print(f'       {resampled_base}.csv（降采样，起止时间已对齐视频）')
+            # Label Studio 靠"文件名（去掉扩展名）一致"配对视频和时间序列 CSV，
+            # 复制一份同名视频，方便直接把这一对文件传上去标注。
+            try:
+                shutil.copyfile(f'{base}.mp4', f'{resampled_base}.mp4')
+                print(f'       {resampled_base}.mp4（复制，供 Label Studio 与 resampled CSV 配对）')
+            except OSError as e:
+                print(f'复制配对视频失败: {e}')
             print()
             print('── 自动对齐校验 ──')
             try:
