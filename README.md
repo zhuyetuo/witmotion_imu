@@ -188,7 +188,7 @@ python imu_camera_sync.py --device wit --name WTSDCL --cam-fps 20 --duration 180
 | `{base}_raw.csv` | **原始 IMU 全量流水**，不受摄像头帧率影响，每条真实到达的样本都记录：`pc_ms, acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z` |
 | `{base}_resampled{HZ}hz.csv` | 用 `--resample-hz` 指定的目标频率对 `_raw.csv` 降采样后的结果，Label Studio 兼容格式，**与摄像头帧率无关** |
 
-**降采样模式（`--resample-hz`，默认 25Hz）**：录制结束后自动对 `{base}_raw.csv`（IMU 真实到达的完整数据流）做低通滤波 + 线性插值，生成任意目标频率的等间隔 CSV，跟摄像头帧率完全独立。比如这次想要 20Hz 数据、下次想要 15Hz，只需要改这一个参数：
+**降采样模式（`--resample-hz`，默认 25Hz）**：录制结束后自动对 `{base}_raw.csv`（IMU 真实到达的完整数据流）做低通滤波 + 线性插值，生成任意目标频率的等间隔 CSV，跟摄像头帧率完全独立。输出会裁到视频第一帧/最后一帧的真实时刻范围内，所以 `{base}_resampled{HZ}hz.csv` 的起止时间、总时长与 `{base}.mp4` 是严格对齐的（`_raw.csv` 本身因为 BLE 数据流启停时刻跟视频帧采集不完全同步，会比视频略宽一点，但裁剪后输出不会带出这部分多余的头尾）。比如这次想要 20Hz 数据、下次想要 15Hz，只需要改这一个参数：
 
 ```bash
 python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --resample-hz 16

@@ -338,11 +338,17 @@ META_HEADER = [
 _TS_FMT = '%Y-%m-%d %H:%M:%S.%f'
 
 
-def resample_raw_imu(raw_path: str, out_path: str, target_hz: float):
+def resample_raw_imu(raw_path: str, out_path: str, target_hz: float,
+                      t_start_ms: float = None, t_end_ms: float = None):
     """
     独立于摄像头帧率，把 {base}_raw.csv 里的完整原始 IMU 流降采样到 target_hz。
     降采样前先做一次简单的滑动平均低通滤波（窗口按原始/目标采样率之比估算），
     减少直接抽稀带来的走样（aliasing），再用线性插值取到目标频率的等间隔时刻点。
+
+    t_start_ms/t_end_ms: 若提供，输出的时间范围裁到 [t_start_ms, t_end_ms]
+    （通常传视频第一帧/最后一帧的真实 cam_timestamp），保证降采样结果与视频
+    的起止时间、时长严格对齐；不提供则退化为用 raw.csv 自身的首尾时间
+    （可能比视频略宽，因为 BLE 数据流启停时刻与视频帧采集不完全同步）。
     """
     try:
         import numpy as np
@@ -370,7 +376,13 @@ def resample_raw_imu(raw_path: str, out_path: str, target_hz: float):
         for name in cols:
             cols[name] = np.convolve(cols[name], kernel, mode='same')
 
-    new_t = np.arange(t[0], t[-1], step_ms)
+    range_start = t_start_ms if t_start_ms is not None else t[0]
+    range_end   = t_end_ms   if t_end_ms   is not None else t[-1]
+    # 裁到 raw 数据实际覆盖的范围内，避免对视频起止范围之外的区间做外推
+    range_start = max(range_start, t[0])
+    range_end   = min(range_end, t[-1])
+
+    new_t = np.arange(range_start, range_end, step_ms)
     with open(out_path, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
         writer.writerow(CSV_HEADER)
@@ -659,6 +671,8 @@ def run_camera(args):
     next_tick  = start_time
     frame_idx  = 0
     elapsed    = 0.0
+    first_cam_ts_ms = None
+    last_cam_ts_ms  = None
 
     # 摄像头 fps 滑动窗口
     cam_ts_window: list[float] = []
@@ -708,6 +722,10 @@ def run_camera(args):
             # 跳过录制开始前的帧（BLE 启动期间积压）
             if cam_ts < start_time:
                 continue
+
+            if first_cam_ts_ms is None:
+                first_cam_ts_ms = cam_ts_ms
+            last_cam_ts_ms = cam_ts_ms
 
             cam_fps = cam_fps_tick(cam_ts)
             imu_hz  = _current_imu_hz()
@@ -797,7 +815,10 @@ def run_camera(args):
             print(f'       {base}.csv（Label Studio）')
             print(f'       {base}_meta.csv（全量信息）')
             print(f'       {base}_raw.csv（原始IMU全量流水）')
-            resample_raw_imu(f'{base}_raw.csv', f'{base}_resampled{args.resample_hz:g}hz.csv', args.resample_hz)
+            resample_raw_imu(
+                f'{base}_raw.csv', f'{base}_resampled{args.resample_hz:g}hz.csv', args.resample_hz,
+                t_start_ms=first_cam_ts_ms, t_end_ms=last_cam_ts_ms,
+            )
             print()
             print('── 自动对齐校验 ──')
             try:
