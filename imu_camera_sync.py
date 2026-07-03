@@ -423,7 +423,7 @@ def draw_imu_overlay(frame, imu: dict | None, imu_lag_ms: float, imu_missing: bo
     # 行2：IMU 采样率（这里的 target_fps 只是"要跟上摄像头帧率"的参考阈值，
     # 不是设备最终部署要用的 IMU 频率；IMU 实际频率由设备自身配置决定，
     # 高于这个参考值完全没问题，不代表跟最终产品的采样率有关联）
-    put(f'IMU {imu_hz:5.1f} Hz   (>= {target_fps} Hz 可跟上摄像头)', 2, rate_color(imu_hz, target_fps))
+    put(f'IMU {imu_hz:5.1f} Hz   (keep up >= {target_fps} Hz)', 2, rate_color(imu_hz, target_fps))
 
     # 行3：IMU 对齐延迟（颜色：<50ms 绿，50~150ms 黄，>150ms 红）
     if imu_missing:
