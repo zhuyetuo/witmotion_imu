@@ -361,8 +361,11 @@ def _fix_video_fps(video_path: str, actual_fps: float):
         return
     tmp_path = video_path + '.tmp.mp4'
     try:
+        # -r 必须放在 -i 之前（作为输入选项）才能真正重新计算帧间隔；
+        # 放在输出端配合 -c copy 时只会改容器头部声明的 fps，不会改变实际
+        # 已编码的帧间隔，导致时长依旧按原始 fps 计算，对不上真实录制时长。
         subprocess.run(
-            ['ffmpeg', '-y', '-i', video_path, '-r', f'{actual_fps:.4f}', '-c', 'copy', tmp_path],
+            ['ffmpeg', '-y', '-r', f'{actual_fps:.4f}', '-i', video_path, '-c', 'copy', tmp_path],
             check=True, capture_output=True,
         )
         os.replace(tmp_path, video_path)
