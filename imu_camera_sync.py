@@ -33,8 +33,15 @@ IMU + 摄像头同步采集脚本
 
 录制模式结束后会自动调用 check_alignment.py 打印视频/CSV 对齐校验结果。
 
+视频写入:
+    默认通过 ffmpeg 管道以可变帧率(VFR)写入，每帧 PTS 直接取写入时刻的真实
+    系统时间（-use_wallclock_as_timestamps），因此视频时长天然等于真实录制
+    时长，与 CSV 时间戳精确对应，无需（也无法）事后修正 fps。未安装 ffmpeg
+    时退化为固定 fps 写入，时长可能有 0.1s 级别误差。
+
 依赖:
     pip install bleak opencv-python
+    ffmpeg（用于精确对齐的视频写入，未安装会自动退化并提示）
 
 用法:
     # HICC，录 60 秒（默认保存带叠加信息的视频）
@@ -50,7 +57,6 @@ IMU + 摄像头同步采集脚本
 import argparse
 import asyncio
 import csv
-import os
 import shutil
 import subprocess
 import sys
@@ -351,31 +357,53 @@ def draw_imu_overlay(frame, imu: dict | None, imu_lag_ms: float, imu_missing: bo
     return frame
 
 
-def _fix_video_fps(video_path: str, actual_fps: float):
+class _FfmpegVfrSink:
     """
-    用真实平均帧率重新封装视频容器（仅改 fps 元数据，不重新编码），
-    让播放时长与录制时实际经过的时间一致。帧序列本身不受影响
-    （帧与 meta.csv 的 frame_idx 对应关系由写入顺序保证，与此无关）。
-    需要系统装有 ffmpeg，没有则跳过并提示。
+    通过管道把每一帧实时喂给 ffmpeg，用 -use_wallclock_as_timestamps 1 让
+    ffmpeg 把每帧的 PTS 直接记录为写入那一刻的真实系统时间（可变帧率 VFR）。
+    这样视频文件里第 N 帧的时刻天然等于抓帧那一刻的 cam_timestamp，不需要
+    事后按固定 fps 猜测/修正时长——mp4 容器一旦写入 PTS，ffmpeg 之后不会再
+    按外部指定的 fps 重新计算已有时间戳，所以必须从写入源头就用真实时间。
     """
-    if shutil.which('ffmpeg') is None:
-        print('未找到 ffmpeg，跳过视频 fps 元数据修正（video_writer 使用的固定 fps 与实际帧率不完全一致）。')
-        return
-    tmp_path = video_path + '.tmp.mp4'
-    try:
-        # -r 必须放在 -i 之前（作为输入选项）才能真正重新计算帧间隔；
-        # 放在输出端配合 -c copy 时只会改容器头部声明的 fps，不会改变实际
-        # 已编码的帧间隔，导致时长依旧按原始 fps 计算，对不上真实录制时长。
-        subprocess.run(
-            ['ffmpeg', '-y', '-r', f'{actual_fps:.4f}', '-i', video_path, '-c', 'copy', tmp_path],
-            check=True, capture_output=True,
+
+    def __init__(self, path: str, width: int, height: int):
+        self.proc = subprocess.Popen(
+            [
+                'ffmpeg', '-y', '-loglevel', 'error',
+                '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-s', f'{width}x{height}',
+                '-use_wallclock_as_timestamps', '1',
+                '-i', '-',
+                '-c:v', 'mp4v', '-pix_fmt', 'yuv420p', '-vsync', 'vfr',
+                path,
+            ],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-        os.replace(tmp_path, video_path)
-        print(f'已修正视频 fps 元数据: {actual_fps:.2f} fps（与实际录制时长一致）')
-    except subprocess.CalledProcessError as e:
-        print(f'ffmpeg 修正 fps 失败，保留原视频: {e}')
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+
+    def write(self, frame):
+        try:
+            self.proc.stdin.write(frame.tobytes())
+        except (BrokenPipeError, OSError):
+            pass
+
+    def close(self):
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+        self.proc.wait(timeout=10)
+
+
+class _Cv2CfrSink:
+    """ffmpeg 不可用时的兜底方案：固定帧率写入，时长精度较低（仅供保留兼容）。"""
+
+    def __init__(self, path: str, fourcc, fps: float, width: int, height: int):
+        self.writer = cv2.VideoWriter(path, fourcc, fps, (width, height))
+
+    def write(self, frame):
+        self.writer.write(frame)
+
+    def close(self):
+        self.writer.release()
 
 
 # ── 主循环（摄像头 + 显示 + 录制） ─────────────────────────────────────────
@@ -414,8 +442,14 @@ def run_camera(args):
         video_path = f'{base}.mp4'
         imu_path   = f'{base}.csv'
         meta_path  = f'{base}_meta.csv'
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        video_writer   = cv2.VideoWriter(video_path, fourcc, float(target_fps), (actual_w, actual_h))
+        use_ffmpeg = shutil.which('ffmpeg') is not None
+        if use_ffmpeg:
+            video_writer = _FfmpegVfrSink(video_path, actual_w, actual_h)
+        else:
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            video_writer = _Cv2CfrSink(video_path, fourcc, float(target_fps), actual_w, actual_h)
+            print('警告: 未找到 ffmpeg，退化为固定 fps 写入视频，播放时长与真实录制时长可能有 0.1s 级别误差。'
+                  '建议安装 ffmpeg 以获得精确到毫秒的视频/IMU 对齐。')
         imu_csv_file   = open(imu_path,  'w', newline='', encoding='utf-8-sig')
         imu_csv_writer = csv.writer(imu_csv_file)
         imu_csv_writer.writerow(CSV_HEADER)
@@ -552,7 +586,7 @@ def run_camera(args):
         stop_event.set()
         cap.release()
         if video_writer:
-            video_writer.release()
+            video_writer.close()
         if imu_csv_file:
             imu_csv_file.close()
         if meta_csv_file:
@@ -563,8 +597,6 @@ def run_camera(args):
             pass
         print(f'\n共采集 {frame_idx} 帧视频  {elapsed:.1f}s  目标 {target_fps} fps')
         if record_mode:
-            if frame_idx > 0 and elapsed > 0:
-                _fix_video_fps(f'{base}.mp4', frame_idx / elapsed)
             print(f'已保存: {base}.mp4')
             print(f'       {base}.csv（Label Studio）')
             print(f'       {base}_meta.csv（全量信息）')
