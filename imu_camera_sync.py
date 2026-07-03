@@ -367,16 +367,20 @@ class _FfmpegVfrSink:
     """
 
     def __init__(self, path: str, width: int, height: int):
+        self.path = path
+        # 注意：ffmpeg 的编码器名是 mpeg4（写出的 fourcc 才是 mp4v），
+        # 不存在名为 "mp4v" 的编码器，写错会导致 ffmpeg 直接报错退出、
+        # 输出文件为空/损坏，且之前 stderr=DEVNULL 会把报错吞掉不可见。
         self.proc = subprocess.Popen(
             [
                 'ffmpeg', '-y', '-loglevel', 'error',
                 '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-s', f'{width}x{height}',
                 '-use_wallclock_as_timestamps', '1',
                 '-i', '-',
-                '-c:v', 'mp4v', '-pix_fmt', 'yuv420p', '-vsync', 'vfr',
+                '-c:v', 'mpeg4', '-pix_fmt', 'yuv420p', '-vsync', 'vfr', '-q:v', '3',
                 path,
             ],
-            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         )
 
     def write(self, frame):
@@ -390,7 +394,13 @@ class _FfmpegVfrSink:
             self.proc.stdin.close()
         except OSError:
             pass
-        self.proc.wait(timeout=10)
+        try:
+            _, stderr = self.proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            _, stderr = self.proc.communicate()
+        if self.proc.returncode != 0:
+            print(f'ffmpeg 写入视频失败 (exit {self.proc.returncode}): {stderr.decode(errors="replace").strip()}')
 
 
 class _Cv2CfrSink:
