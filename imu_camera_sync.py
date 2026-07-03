@@ -31,6 +31,8 @@ IMU + 摄像头同步采集脚本
     默认事件驱动（等待新 IMU 样本到达再抓帧），摄像头与 IMU 天然对齐，
     避免同一 IMU 样本被多帧复用；--no-imu-sync 可切回固定定时器模式。
 
+录制模式结束后会自动调用 check_alignment.py 打印视频/CSV 对齐校验结果。
+
 依赖:
     pip install bleak opencv-python
 
@@ -566,6 +568,13 @@ def run_camera(args):
             print(f'已保存: {base}.mp4')
             print(f'       {base}.csv（Label Studio）')
             print(f'       {base}_meta.csv（全量信息）')
+            print()
+            print('── 自动对齐校验 ──')
+            try:
+                import check_alignment
+                check_alignment.run_check(base)
+            except Exception as e:
+                print(f'对齐校验运行失败: {e}（可手动运行 python check_alignment.py {base}）')
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
