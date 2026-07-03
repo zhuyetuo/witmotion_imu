@@ -330,8 +330,10 @@ def draw_imu_overlay(frame, imu: dict | None, imu_lag_ms: float, imu_missing: bo
     # 行1：摄像头帧率
     put(f'CAM {cam_fps:5.1f} fps  (target {target_fps} fps)', 1, rate_color(cam_fps, target_fps))
 
-    # 行2：IMU 采样率
-    put(f'IMU {imu_hz:5.1f} Hz   (target {target_fps} Hz)', 2, rate_color(imu_hz, target_fps))
+    # 行2：IMU 采样率（这里的 target_fps 只是"要跟上摄像头帧率"的参考阈值，
+    # 不是设备最终部署要用的 IMU 频率；IMU 实际频率由设备自身配置决定，
+    # 高于这个参考值完全没问题，不代表跟最终产品的采样率有关联）
+    put(f'IMU {imu_hz:5.1f} Hz   (>= {target_fps} Hz 可跟上摄像头)', 2, rate_color(imu_hz, target_fps))
 
     # 行3：IMU 对齐延迟（颜色：<50ms 绿，50~150ms 黄，>150ms 红）
     if imu_missing:
@@ -435,7 +437,7 @@ def run_camera(args):
     cap.set(cv2.CAP_PROP_FPS, target_fps)
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    print(f'摄像头分辨率: {actual_w}x{actual_h}  目标帧率: {target_fps} fps')
+    print(f'摄像头分辨率: {actual_w}x{actual_h}  摄像头目标帧率: {target_fps} fps（不影响 IMU 采样率，IMU 由设备自身配置）')
 
     record_mode = args.duration and args.duration > 0
     ts_tag  = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -632,9 +634,10 @@ def main():
                     help='手动指定 WitMotion Notify UUID')
     ap.add_argument('--camera', type=int, default=0,
                     help='摄像头编号，默认 0')
-    ap.add_argument('--fps', type=int, default=20,
-                    choices=range(1, 31), metavar='N',
-                    help='目标帧率（1-30，默认 20）')
+    ap.add_argument('--cam-fps', '--fps', dest='fps', type=int, default=20,
+                    choices=range(1, 61), metavar='N',
+                    help='摄像头目标帧率（1-60，默认 20）。IMU 采样率由设备自身配置决定，与此参数无关。'
+                         '（--fps 为旧名，保留兼容，等价于 --cam-fps）')
     ap.add_argument('--duration', type=float, default=0,
                     help='录制时长（秒），0=实时模式不保存')
     ap.add_argument('--no-save-overlay', action='store_true',
