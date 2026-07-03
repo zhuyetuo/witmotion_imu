@@ -829,12 +829,19 @@ def run_camera(args):
             except OSError as e:
                 print(f'复制配对视频失败: {e}')
             print()
-            print('── 自动对齐校验 ──')
+            print('── 自动对齐校验（按帧对齐版）──')
             try:
                 import check_alignment
                 check_alignment.run_check(base)
             except Exception as e:
                 print(f'对齐校验运行失败: {e}（可手动运行 python check_alignment.py {base}）')
+            print()
+            print('── 自动对齐校验（降采样版）──')
+            try:
+                import check_alignment
+                check_alignment.run_check(resampled_base, meta_base=base, strict_frame_match=False)
+            except Exception as e:
+                print(f'对齐校验运行失败: {e}（可手动运行 python check_alignment.py {resampled_base}）')
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────

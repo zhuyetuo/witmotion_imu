@@ -69,16 +69,20 @@ def check_video_frames(video_path: str):
     return {'frame_count': frame_count, 'fps': fps, 'duration': duration}
 
 
-def resolve_video_start_end(base: str, video_duration: float):
+def resolve_video_start_end(base: str, video_duration: float, meta_base: str = None):
     """
     返回 (start, end, source)。优先用 _meta.csv 的真实 cam_timestamp，
     没有的话退化为文件名时间戳 + 视频时长估算。
+
+    meta_base: 若指定，用这个 base 去找 _meta.csv（用于校验 resampled 版本时，
+    其真实的逐帧时间戳记录在原始录制的 {base}_meta.csv 里，而不是
+    resampled_base 自己名下）。
     """
-    meta_path = f'{base}_meta.csv'
+    meta_path = f'{meta_base or base}_meta.csv'
     if os.path.exists(meta_path):
         cam_ts = _read_csv_timestamps(meta_path, 'cam_timestamp')
         if cam_ts:
-            return cam_ts[0], cam_ts[-1], 'meta.csv (逐帧真实时间戳)'
+            return cam_ts[0], cam_ts[-1], f'{os.path.basename(meta_path)} (逐帧真实时间戳)'
 
     m = FNAME_TS_RE.search(base)
     if m:
@@ -89,8 +93,15 @@ def resolve_video_start_end(base: str, video_duration: float):
     return None, None, None
 
 
-def run_check(base: str) -> bool:
-    """执行校验并打印结果，返回 True 表示帧数/时长/起止时间都通过。"""
+def run_check(base: str, meta_base: str = None, strict_frame_match: bool = True) -> bool:
+    """
+    执行校验并打印结果，返回 True 表示各项检查都通过。
+
+    strict_frame_match: 按视频帧对齐的 {base}.csv 应设 True（帧数必须等于行数）；
+    降采样后的 {base}_resampled{HZ}hz.csv 行数由目标频率决定，跟视频帧数无关，
+    应设 False（只检查时长/起止时间，不检查帧数=行数）。
+    meta_base: 校验 resampled 版本时，传原始录制的 base，用于定位真实的 _meta.csv。
+    """
     video_path = f'{base}.mp4'
     csv_path   = f'{base}.csv'
 
@@ -105,7 +116,7 @@ def run_check(base: str) -> bool:
     csv_duration = (csv_end - csv_start).total_seconds()
     csv_row_count = len(csv_ts)
 
-    video_start, video_end, source = resolve_video_start_end(base, video_info['duration'])
+    video_start, video_end, source = resolve_video_start_end(base, video_info['duration'], meta_base=meta_base)
 
     print(f'【视频】{video_path}')
     print(f'  帧数:   {video_info["frame_count"]}')
@@ -126,16 +137,19 @@ def run_check(base: str) -> bool:
     print(f'  时长:   {csv_duration:.2f}s')
     print()
 
-    frame_diff = video_info['frame_count'] - csv_row_count
     duration_diff = abs(video_info['duration'] - csv_duration)
     ok = True
 
     print('── 对齐结果 ──')
-    if frame_diff == 0:
-        print(f'✔ 帧数与 CSV 行数一致: {video_info["frame_count"]}')
+    if strict_frame_match:
+        frame_diff = video_info['frame_count'] - csv_row_count
+        if frame_diff == 0:
+            print(f'✔ 帧数与 CSV 行数一致: {video_info["frame_count"]}')
+        else:
+            ok = False
+            print(f'✘ 帧数与 CSV 行数不一致: 视频 {video_info["frame_count"]} 帧, CSV {csv_row_count} 行 (差 {frame_diff})')
     else:
-        ok = False
-        print(f'✘ 帧数与 CSV 行数不一致: 视频 {video_info["frame_count"]} 帧, CSV {csv_row_count} 行 (差 {frame_diff})')
+        print(f'ℹ 降采样模式：行数由目标频率决定，不要求等于视频帧数（视频 {video_info["frame_count"]} 帧, CSV {csv_row_count} 行）')
 
     if duration_diff <= 0.5:
         print(f'✔ 时长基本一致: 视频 {video_info["duration"]:.2f}s vs CSV {csv_duration:.2f}s (差 {duration_diff:.3f}s)')
@@ -162,7 +176,9 @@ def main():
         print('用法: python check_alignment.py <base 或 .mp4 或 .csv 路径>')
         sys.exit(1)
     base = _resolve_base(sys.argv[1])
-    ok = run_check(base)
+    strict = '_resampled' not in os.path.basename(base)
+    meta_base = re.sub(r'_resampled[\d.]+hz$', '', base) if not strict else None
+    ok = run_check(base, meta_base=meta_base, strict_frame_match=strict)
     sys.exit(0 if ok else 1)
 
 

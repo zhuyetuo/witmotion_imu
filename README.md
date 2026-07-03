@@ -210,10 +210,15 @@ python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --resample-hz
 
 ### 校验视频与 CSV 是否对齐
 
-`imu_camera_sync.py` 每次录制（`--duration`）结束都会自动调用 `check_alignment.py` 打印对齐结果，无需手动运行。也可以事后单独对某次录制手动复查：
+`imu_camera_sync.py` 每次录制（`--duration`）结束都会自动跑两遍校验并打印结果，无需手动运行：
+1. **按帧对齐版**（`{base}.mp4` + `{base}.csv`）：要求帧数与 CSV 行数严格相等
+2. **降采样版**（`{resampled_base}.mp4` + `{resampled_base}.csv`）：行数由 `--resample-hz` 决定，不要求等于帧数，只检查时长和起止时间
+
+也可以事后单独对某次录制手动复查（脚本会自动识别文件名里是否含 `_resampled`，选用对应的校验标准）：
 
 ```bash
 python check_alignment.py data/wit_d534e2b96f32_20260703_105514
+python check_alignment.py data/wit_d534e2b96f32_20260703_105514_resampled25hz
 # 或直接传 .mp4 / .csv 路径，会自动推导 base
 python check_alignment.py data/wit_d534e2b96f32_20260703_105514.mp4
 ```
