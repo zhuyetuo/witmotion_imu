@@ -27,6 +27,14 @@ IMU + 摄像头同步采集脚本
     cam_fps        此时刻摄像头帧率（滑动1秒窗口）
     imu_hz         此时刻 IMU 采样率（滑动1秒窗口）
 
+{base}_raw.csv（原始 IMU 全量流水，不受摄像头帧率影响）:
+    pc_ms, acc_x/y/z, gyro_x/y/z    每条真实到达的 IMU 样本原样记录
+
+{base}_resampled{HZ}hz.csv（降采样结果，Label Studio 兼容格式）:
+    录制结束后自动用 --resample-hz 指定的目标频率对 {base}_raw.csv 做低通+
+    线性插值降采样生成，与视频帧率/对齐无关，方便按需生成 20/16/15Hz 等
+    目标训练频率的数据，不用等到训练脚本里再处理。
+
 同步模式:
     默认事件驱动（等待新 IMU 样本到达再抓帧），摄像头与 IMU 天然对齐，
     避免同一 IMU 样本被多帧复用；--no-imu-sync 可切回固定定时器模式。
@@ -55,6 +63,9 @@ IMU + 摄像头同步采集脚本
 
     # 保存干净视频（不含叠加信息）
     python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --duration 60 --no-save-overlay
+
+    # 降采样目标频率改成 16Hz（默认 25Hz）
+    python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --resample-hz 16
 """
 
 import argparse
@@ -98,6 +109,17 @@ _imu_hz_lock   = threading.Lock()
 _imu_new_event = threading.Event()
 _imu_seq_counter = 0
 
+# 原始 IMU 全量流水日志（不受摄像头帧率影响，用于事后独立降采样）
+_raw_csv_writer = None
+RAW_CSV_HEADER = ['pc_ms', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z']
+
+
+def _set_raw_csv_writer(writer):
+    """线程安全地设置/清空原始 IMU 日志的 writer，避免文件已关闭后 BLE 线程仍尝试写入。"""
+    global _raw_csv_writer
+    with _imu_lock:
+        _raw_csv_writer = writer
+
 
 def _push_imu(row: dict):
     """BLE 线程调用：把一条 IMU 数据推入缓冲，同时更新 Hz 窗口并触发新样本事件。"""
@@ -107,6 +129,12 @@ def _push_imu(row: dict):
         _imu_seq_counter += 1
         row['seq'] = _imu_seq_counter
         _imu_buffer.append(row)
+        if _raw_csv_writer is not None:
+            _raw_csv_writer.writerow([
+                f"{row['pc_ms']:.3f}",
+                f"{row['acc_x']:.6f}", f"{row['acc_y']:.6f}", f"{row['acc_z']:.6f}",
+                f"{row['gyro_x']:.6f}", f"{row['gyro_y']:.6f}", f"{row['gyro_z']:.6f}",
+            ])
     with _imu_hz_lock:
         _imu_ts_window.append(now)
     _imu_new_event.set()
@@ -306,6 +334,53 @@ META_HEADER = [
     'gyro_x', 'gyro_y', 'gyro_z',
     'cam_fps', 'imu_hz',
 ]
+
+_TS_FMT = '%Y-%m-%d %H:%M:%S.%f'
+
+
+def resample_raw_imu(raw_path: str, out_path: str, target_hz: float):
+    """
+    独立于摄像头帧率，把 {base}_raw.csv 里的完整原始 IMU 流降采样到 target_hz。
+    降采样前先做一次简单的滑动平均低通滤波（窗口按原始/目标采样率之比估算），
+    减少直接抽稀带来的走样（aliasing），再用线性插值取到目标频率的等间隔时刻点。
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        print('缺少 numpy（opencv-python 一般会带），跳过降采样输出。')
+        return
+
+    rows = []
+    with open(raw_path, newline='', encoding='utf-8-sig') as f:
+        for r in csv.DictReader(f):
+            rows.append(r)
+    if len(rows) < 2:
+        print(f'原始 IMU 样本太少，跳过降采样: {raw_path}')
+        return
+
+    t = np.array([float(r['pc_ms']) for r in rows])
+    cols = {name: np.array([float(r[name]) for r in rows])
+            for name in ('acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z')}
+
+    step_ms = 1000.0 / target_hz
+    avg_dt_ms = float(np.mean(np.diff(t))) if len(t) > 1 else step_ms
+    window = max(1, int(round(step_ms / avg_dt_ms))) if avg_dt_ms > 0 else 1
+    if window > 1:
+        kernel = np.ones(window) / window
+        for name in cols:
+            cols[name] = np.convolve(cols[name], kernel, mode='same')
+
+    new_t = np.arange(t[0], t[-1], step_ms)
+    with open(out_path, 'w', newline='', encoding='utf-8-sig') as f:
+        writer = csv.writer(f)
+        writer.writerow(CSV_HEADER)
+        for ts_ms in new_t:
+            ts_str = datetime.fromtimestamp(ts_ms / 1000.0).strftime(_TS_FMT)[:-3]
+            values = [f'{np.interp(ts_ms, t, cols[name]):.6f}'
+                      for name in ('acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z')]
+            writer.writerow([ts_str] + values)
+
+    print(f'已生成降采样 IMU CSV: {out_path}（{target_hz:.1f}Hz，{len(new_t)} 行，低通窗口={window}）')
 
 
 def draw_imu_overlay(frame, imu: dict | None, imu_lag_ms: float, imu_missing: bool,
@@ -545,11 +620,13 @@ def run_camera(args):
     imu_csv_writer  = None
     meta_csv_file   = None
     meta_csv_writer = None
+    raw_csv_file    = None
 
     if record_mode:
         video_path = f'{base}.mp4'
         imu_path   = f'{base}.csv'
         meta_path  = f'{base}_meta.csv'
+        raw_path   = f'{base}_raw.csv'
         use_ffmpeg = shutil.which('ffmpeg') is not None
         if use_ffmpeg:
             video_writer = _FfmpegVfrSink(video_path, actual_w, actual_h)
@@ -564,9 +641,17 @@ def run_camera(args):
         meta_csv_file   = open(meta_path, 'w', newline='', encoding='utf-8-sig')
         meta_csv_writer = csv.writer(meta_csv_file)
         meta_csv_writer.writerow(META_HEADER)
+
+        # 原始 IMU 全量流水日志：每条真实到达的样本都记录，不受摄像头帧率影响，
+        # 用于录制结束后独立降采样到 --resample-hz（与视频帧对齐的 {base}.csv 互不影响）。
+        raw_csv_file = open(raw_path, 'w', newline='', encoding='utf-8-sig')
+        raw_writer = csv.writer(raw_csv_file)
+        raw_writer.writerow(RAW_CSV_HEADER)
+        _set_raw_csv_writer(raw_writer)
+
         overlay_note = '（含叠加信息）' if save_overlay else '（干净画面）'
         print(f'录制模式: {args.duration}s  视频{overlay_note}→{video_path}')
-        print(f'  IMU(Label Studio)→{imu_path}  对齐信息→{meta_path}')
+        print(f'  IMU(Label Studio)→{imu_path}  对齐信息→{meta_path}  原始IMU流水→{raw_path}')
     else:
         print('实时模式（按 Q 或 Ctrl+C 退出）。')
 
@@ -699,6 +784,9 @@ def run_camera(args):
             imu_csv_file.close()
         if meta_csv_file:
             meta_csv_file.close()
+        if raw_csv_file:
+            _set_raw_csv_writer(None)  # 先切断 BLE 线程的写入引用，再关闭文件，避免竞态
+            raw_csv_file.close()
         try:
             cv2.destroyAllWindows()
         except cv2.error:
@@ -708,6 +796,8 @@ def run_camera(args):
             print(f'已保存: {base}.mp4')
             print(f'       {base}.csv（Label Studio）')
             print(f'       {base}_meta.csv（全量信息）')
+            print(f'       {base}_raw.csv（原始IMU全量流水）')
+            resample_raw_imu(f'{base}_raw.csv', f'{base}_resampled{args.resample_hz:g}hz.csv', args.resample_hz)
             print()
             print('── 自动对齐校验 ──')
             try:
@@ -741,6 +831,10 @@ def main():
                     help='关闭事件驱动同步，改用固定定时器抓帧（不等待新 IMU 样本，可能出现重复复用同一 IMU 样本）')
     ap.add_argument('--probe', action='store_true',
                     help='只探测硬件能力（摄像头最大分辨率/实测fps，IMU当前实际输出频率），不录制，探测完直接退出')
+    ap.add_argument('--resample-hz', type=float, default=25.0,
+                    help='录制结束后把原始 IMU 全量流水（{base}_raw.csv）降采样到该频率，'
+                         '生成 {base}_resampled{HZ}hz.csv（Label Studio 格式），默认 25Hz。'
+                         '与摄像头帧率、按帧对齐的 {base}.csv 无关，方便按需调整成 20/16/15Hz 等目标频率。')
     args = ap.parse_args()
 
     if args.probe:
