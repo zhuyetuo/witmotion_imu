@@ -14,6 +14,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `wit_drift_analysis.py` | WitMotion 时间漂移分析与线性补偿验证 |
 | `hicc_drift_analysis.py` | HICC 时间漂移分析与线性补偿验证 |
 | `imu_camera_sync.py` | IMU + 摄像头同步采集（BLE 后台线程 + 主线程 OpenCV） |
+| `check_alignment.py` | 校验录制的视频与 CSV 是否严格对齐（帧数/时长/起止时间） |
 | `data/` | 采集输出文件目录（CSV、MP4） |
 
 ### 模块依赖关系
@@ -152,6 +153,35 @@ python imu_camera_sync.py --device wit --name WTSDCL --fps 20 --duration 180 --c
 **关于重复复用 IMU 样本**：如果 IMU 采样率低于摄像头目标帧率，个别帧会拿到与上一帧相同的 IMU 值（不是对齐错误，是当时 IMU 数据确实没变）。想减少这种情况，可以把设备采样率调高于摄像头帧率（比如采集阶段用 50Hz），采集到的高频数据之后可以重采样降到最终部署速率；部署时训练和推理仍应使用统一的目标采样率。
 
 **采样率建议**：最终设备用多少 Hz（如 16Hz），采集、训练、推理三端都应保持一致，避免因采样率不一致导致特征分布偏移。
+
+### 校验视频与 CSV 是否对齐
+
+录制完成后，用 `check_alignment.py` 复查视频帧数与 Label Studio CSV（`{base}.csv`）行数、时长、起止时间是否一致：
+
+```bash
+python check_alignment.py data/wit_d534e2b96f32_20260703_105514
+# 或直接传 .mp4 / .csv 路径，会自动推导 base
+python check_alignment.py data/wit_d534e2b96f32_20260703_105514.mp4
+```
+
+输出示例：
+
+```
+视频: data/wit_d534e2b96f32_20260703_105514.mp4
+  帧数: 545   fps: 18.86   时长: 28.90s
+
+CSV: data/wit_d534e2b96f32_20260703_105514.csv
+  行数: 545
+  起始: 2026-07-03 10:55:14.123
+  结束: 2026-07-03 10:55:43.021
+  时长: 28.90s
+
+── 对齐结果 ──
+✔ 帧数与 CSV 行数一致: 545
+✔ 时长基本一致: 视频 28.90s vs CSV 28.90s (差 0.001s)
+```
+
+判定标准：**帧数与 CSV 行数必须严格相等**（一帧一行是硬性对齐条件）；时长允许有 ≤0.5s 的误差（如果没跑过 fps 元数据修正，纯粹是编码 fps 与真实帧率的差异，不代表帧错位）。
 
 ### 时间漂移分析
 
