@@ -89,12 +89,8 @@ def resolve_video_start_end(base: str, video_duration: float):
     return None, None, None
 
 
-def main():
-    if len(sys.argv) != 2:
-        print('用法: python check_alignment.py <base 或 .mp4 或 .csv 路径>')
-        sys.exit(1)
-
-    base = _resolve_base(sys.argv[1])
+def run_check(base: str) -> bool:
+    """执行校验并打印结果，返回 True 表示帧数/时长/起止时间都通过。"""
     video_path = f'{base}.mp4'
     csv_path   = f'{base}.csv'
 
@@ -103,7 +99,7 @@ def main():
 
     if video_info is None or not csv_ts:
         print('校验失败：视频或 CSV 无法读取，请检查路径。')
-        sys.exit(1)
+        return False
 
     csv_start, csv_end = csv_ts[0], csv_ts[-1]
     csv_duration = (csv_end - csv_start).total_seconds()
@@ -132,16 +128,19 @@ def main():
 
     frame_diff = video_info['frame_count'] - csv_row_count
     duration_diff = abs(video_info['duration'] - csv_duration)
+    ok = True
 
     print('── 对齐结果 ──')
     if frame_diff == 0:
         print(f'✔ 帧数与 CSV 行数一致: {video_info["frame_count"]}')
     else:
+        ok = False
         print(f'✘ 帧数与 CSV 行数不一致: 视频 {video_info["frame_count"]} 帧, CSV {csv_row_count} 行 (差 {frame_diff})')
 
     if duration_diff <= 0.5:
         print(f'✔ 时长基本一致: 视频 {video_info["duration"]:.2f}s vs CSV {csv_duration:.2f}s (差 {duration_diff:.3f}s)')
     else:
+        ok = False
         print(f'✘ 时长差异较大: 视频 {video_info["duration"]:.2f}s vs CSV {csv_duration:.2f}s (差 {duration_diff:.3f}s)')
         print('  （若未做 fps 元数据修正，视频用固定 fps 编码，播放时长可能与真实时长有出入，'
               '但只要帧数与 CSV 行数一致，帧对齐本身依然是准确的。）')
@@ -152,7 +151,19 @@ def main():
         if start_diff <= 0.5 and end_diff <= 0.5:
             print(f'✔ 起止时间基本一致（起始差 {start_diff:.3f}s，结束差 {end_diff:.3f}s）')
         else:
+            ok = False
             print(f'✘ 起止时间差异较大（起始差 {start_diff:.3f}s，结束差 {end_diff:.3f}s）')
+
+    return ok
+
+
+def main():
+    if len(sys.argv) != 2:
+        print('用法: python check_alignment.py <base 或 .mp4 或 .csv 路径>')
+        sys.exit(1)
+    base = _resolve_base(sys.argv[1])
+    ok = run_check(base)
+    sys.exit(0 if ok else 1)
 
 
 if __name__ == '__main__':

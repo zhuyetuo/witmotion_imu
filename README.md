@@ -14,7 +14,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `wit_drift_analysis.py` | WitMotion 时间漂移分析与线性补偿验证 |
 | `hicc_drift_analysis.py` | HICC 时间漂移分析与线性补偿验证 |
 | `imu_camera_sync.py` | IMU + 摄像头同步采集（BLE 后台线程 + 主线程 OpenCV） |
-| `check_alignment.py` | 校验录制的视频与 CSV 是否严格对齐（帧数/时长/起止时间） |
+| `check_alignment.py` | 校验录制的视频与 CSV 是否严格对齐（帧数/时长/起止时间）；`imu_camera_sync.py` 录制结束会自动调用 |
 | `data/` | 采集输出文件目录（CSV、MP4） |
 
 ### 模块依赖关系
@@ -156,7 +156,7 @@ python imu_camera_sync.py --device wit --name WTSDCL --fps 20 --duration 180 --c
 
 ### 校验视频与 CSV 是否对齐
 
-录制完成后，用 `check_alignment.py` 复查视频帧数与 Label Studio CSV（`{base}.csv`）行数、时长、起止时间是否一致：
+`imu_camera_sync.py` 每次录制（`--duration`）结束都会自动调用 `check_alignment.py` 打印对齐结果，无需手动运行。也可以事后单独对某次录制手动复查：
 
 ```bash
 python check_alignment.py data/wit_d534e2b96f32_20260703_105514
