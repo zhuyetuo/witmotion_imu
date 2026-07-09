@@ -173,8 +173,20 @@ python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --no-imu-syn
 # 常用：WitMotion 设备，指定摄像头1，录制180秒
 python imu_camera_sync.py --device wit --name WTSDCL --cam-fps 20 --duration 180 --camera 1
 
-# 预热时间改成 8 秒（默认 5 秒），设 0 关闭预热
+# 默认预热5秒
+python imu_camera_sync.py --device wit --name WTSDCL --duration 60
+
+# 改成8秒
 python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --warmup-sec 8
+
+# 关闭预热
+python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --warmup-sec 0
+
+# WitMotion 设备，降采样到16Hz，指定摄像头0
+python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --resample-hz 16 --camera 0
+
+# HICC 设备，降采样到16Hz，指定摄像头0
+python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1A --duration 60 --resample-hz 16 --camera 0
 ```
 
 视频默认叠加 IMU 数值、帧率、imu_lag 等信息（标注时可直观判断数据质量）。
