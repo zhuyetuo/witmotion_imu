@@ -39,6 +39,11 @@ IMU + 摄像头同步采集脚本
     默认事件驱动（等待新 IMU 样本到达再抓帧），摄像头与 IMU 天然对齐，
     避免同一 IMU 样本被多帧复用；--no-imu-sync 可切回固定定时器模式。
 
+预热:
+    录制模式默认先预热 5 秒（--warmup-sec 调整，设 0 关闭），期间持续抓帧
+    丢弃、不写入任何文件，等摄像头自动曝光/帧率、IMU 连接都稳定后再正式
+    开始计时录制，避免刚开始那几秒帧率/数据不稳定混进正式数据里。
+
 录制模式结束后会自动调用 check_alignment.py 打印视频/CSV 对齐校验结果。
 
 视频写入:
@@ -66,6 +71,9 @@ IMU + 摄像头同步采集脚本
 
     # 降采样目标频率改成 16Hz（默认 25Hz）
     python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --resample-hz 16
+
+    # 预热时间改成 8 秒（默认 5 秒），关闭预热用 --warmup-sec 0
+    python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --warmup-sec 8
 """
 
 import argparse
@@ -622,6 +630,18 @@ def run_camera(args):
     print(f'摄像头分辨率: {actual_w}x{actual_h}  摄像头目标帧率: {target_fps} fps（不影响 IMU 采样率，IMU 由设备自身配置）')
 
     record_mode = args.duration and args.duration > 0
+
+    # 预热：摄像头刚打开时自动曝光/白平衡还没收敛，帧率往往不稳定；IMU 刚连接
+    # 也可能有积压/抖动。预热期间持续抓帧丢弃、不写入任何文件，等稳定后再
+    # 正式开始计时录制，文件名时间戳也用预热结束后的真实时刻。
+    if record_mode and args.warmup_sec > 0:
+        print(f'预热 {args.warmup_sec:.1f}s（摄像头/IMU 稳定中，不写入数据）...')
+        warmup_until = time.time() + args.warmup_sec
+        while time.time() < warmup_until and not stop_event.is_set():
+            cap.read()
+            time.sleep(max(0.0, 1.0 / target_fps))
+        print(f'预热结束: CAM {_measure_actual_fps(cap, warmup=0, sample=10):.1f}fps  IMU {_current_imu_hz():.1f}Hz')
+
     ts_tag  = datetime.now().strftime('%Y%m%d_%H%M%S')
     dev_tag = args.device
     mac_tag = ble_mac[0].replace(':', '').lower()
@@ -872,6 +892,10 @@ def main():
                     help='录制结束后把原始 IMU 全量流水（{base}_raw.csv）降采样到该频率，'
                          '生成 {base}_resampled{HZ}hz.csv（Label Studio 格式），默认 25Hz。'
                          '与摄像头帧率、按帧对齐的 {base}.csv 无关，方便按需调整成 20/16/15Hz 等目标频率。')
+    ap.add_argument('--warmup-sec', type=float, default=5.0,
+                    help='正式录制前的预热时长（秒），默认 5s。预热期间持续抓帧丢弃、不写入任何'
+                         '文件，等摄像头自动曝光/帧率、IMU 连接都稳定后再正式开始计时录制'
+                         '（文件名时间戳也是预热结束后的真实时刻）。设为 0 关闭预热。')
     args = ap.parse_args()
 
     if args.probe:

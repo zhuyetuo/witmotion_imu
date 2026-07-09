@@ -172,11 +172,16 @@ python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --no-imu-syn
 
 # 常用：WitMotion 设备，指定摄像头1，录制180秒
 python imu_camera_sync.py --device wit --name WTSDCL --cam-fps 20 --duration 180 --camera 1
+
+# 预热时间改成 8 秒（默认 5 秒），设 0 关闭预热
+python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --warmup-sec 8
 ```
 
 视频默认叠加 IMU 数值、帧率、imu_lag 等信息（标注时可直观判断数据质量）。
 
 **`--cam-fps`（旧名 `--fps`，仍兼容）只控制摄像头的目标帧率，与 IMU 采样率无关**：IMU 实际采样率完全由设备自身配置决定（比如 WitMotion 上位机设成 100Hz，这里就是 100Hz），跟摄像头帧率是两个独立的东西。采集阶段可以让 IMU 跑得比摄像头快（比如摄像头 20fps + IMU 100Hz），有利于更精确对齐；训练模型前再把 IMU 数据统一降采样到最终产品的实际频率（比如 16Hz）。
+
+**`--warmup-sec`（默认 5 秒）**：摄像头刚打开时自动曝光/白平衡还没收敛，帧率容易不稳定；IMU 刚连接也可能有积压或抖动。录制模式下会先预热这么多秒（持续抓帧丢弃、不写入任何文件），确认摄像头/IMU 都稳定后再正式开始计时，文件名时间戳也是预热结束后的真实时刻。想关闭预热设 `--warmup-sec 0`。
 
 **输出文件（每次录制生成 6 个文件）：**
 
