@@ -77,22 +77,48 @@ def parse_hicc_offline_csv(path: str):
     return rows
 
 
+_MIDNIGHT_WRAP_THRESHOLD = timedelta(hours=12)
+
+
 def build_labelstudio_rows(rows, base_date: date):
-    """把 HH:MM:SS.MS + 日期 拼成完整 timestamp，处理跨午夜（时间倒退则日期+1）。"""
+    """
+    把 HH:MM:SS.MS + 日期 拼成完整 timestamp。
+
+    时间戳倒退时区分两种情况：
+      1. 真正跨午夜（倒退幅度接近一整天，比如 23:59 -> 00:00）：日期 +1。
+      2. 设备日志自身的小毛刺（倒退幅度很小，比如同一分钟内秒数从 59 突然
+         跳回 01，分钟数没变——这是 HICC 部分离线日志里实际出现过的设备端
+         记录异常，不代表真的跨天了）：不改日期，直接丢弃这一行（Label
+         Studio 要求 timestamp 严格递增，混进倒退的行会导致标注工具报错），
+         并统计丢弃数量提示用户。
+    """
     out = []
     prev_dt = None
     day_offset = 0
+    dropped = 0
     for r in rows:
         h, m, rest = r['time_str'].split(':')
         s, ms = rest.split('.')
         t = datetime(base_date.year, base_date.month, base_date.day,
                       int(h), int(m), int(s), int(ms) * 1000) + timedelta(days=day_offset)
+
         if prev_dt is not None and t < prev_dt:
-            day_offset += 1
-            t += timedelta(days=1)
+            backward = prev_dt - t
+            if backward >= _MIDNIGHT_WRAP_THRESHOLD:
+                day_offset += 1
+                t += timedelta(days=1)
+            else:
+                dropped += 1
+                continue
+
         prev_dt = t
         ts_str = t.strftime('%Y-%m-%d %H:%M:%S.') + f'{t.microsecond // 1000:03d}'
         out.append([ts_str, r['acc_x'], r['acc_y'], r['acc_z'], r['gyro_x'], r['gyro_y'], r['gyro_z']])
+
+    if dropped:
+        print(f'警告: 发现 {dropped} 行时间戳小幅倒退（设备日志自身的记录异常，不是跨午夜），'
+              f'已丢弃这些行以保证 timestamp 严格递增（Label Studio 要求）。')
+
     return out
 
 
