@@ -9,6 +9,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `ble_utils.py` | 共享 BLE 工具：`HzCounter`、`scan_devices`、`find_device`、`list_services` |
 | `wit_parse.py` | WitMotion 协议解析（离线 + BLE）：`parse_packets`、`StreamingByteBuffer`、`parse_one_packet`、`DEFAULT_NOTIFY_CANDIDATES`、`fmt_chip_time_dotms` 等 |
 | `hicc_parse.py` | HICC_PetCollar 协议解析：GATT UUID、帧常量、DP 解析、`FrameBuffer`、校时帧构造、`find_tx_uuid`/`find_rx_uuid`/`send_timesync` |
+| `hicc_offline_to_labelstudio.py` | HICC 离线日志（`HH:MM:SS.MS,AX,AY,AZ,GX,GY,GZ`）转 Label Studio 格式 CSV |
 | `wit_ble_live.py` | WitMotion BLE 实时采集主程序，导入 `ble_utils` + `wit_parse` |
 | `hicc_ble_live.py` | HICC BLE 实时采集主程序，导入 `ble_utils` + `hicc_parse` |
 | `wit_drift_analysis.py` | WitMotion 时间漂移分析与线性补偿验证 |
@@ -119,6 +120,24 @@ python wit_parse.py data/test/WIT16.TXT -o labelstudio.csv
 %Y-%m-%d %H:%M:%S.%L
 ```
 （D3 不支持 `%f` 微秒格式，必须用 `%L` 三位毫秒，分隔符须与数据中的 `.` 一致。）
+
+### 离线文件解析（HICC_PetCollar）
+
+HICC 设备导出的离线日志是逗号分隔文本，只有"时:分:秒.毫秒"没有日期（例如 `26060314.TXT`）：
+```
+HH:MM:SS.MS,AX,AY,AZ,GX,GY,GZ
+14:23:48.000,1.124950,-7.168772,4.831635,0.092175,0.862847,0.139626
+```
+
+```bash
+# 输出文件默认跟输入同名同目录，只把扩展名换成 .csv（26060314.TXT -> 26060314.csv）
+python hicc_offline_to_labelstudio.py data/26060314.TXT
+
+# 文件名无法自动识别日期时，用 --date 显式指定
+python hicc_offline_to_labelstudio.py data/26060314.TXT --date 2026-06-03
+```
+
+日期识别规则：文件名形如 `YYMMDDHH`（8位数字，末两位是小时，会跟数据第一行的小时数交叉验证，比如 `26060314.TXT` → 2026-06-03，`14` 与第一行 `14:23:48` 对上）；识别不到就用今天日期并打印警告（相对时间顺序依然正确，只是绝对日期可能不对）。跨越午夜的数据会自动在日期上 +1。
 
 ### IMU + 摄像头同步采集
 
