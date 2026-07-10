@@ -119,7 +119,38 @@ def build_labelstudio_rows(rows, base_date: date):
         print(f'警告: 发现 {dropped} 行时间戳小幅倒退（设备日志自身的记录异常，不是跨午夜），'
               f'已丢弃这些行以保证 timestamp 严格递增（Label Studio 要求）。')
 
+    report_time_gaps(out)
     return out
+
+
+def report_time_gaps(out_rows, gap_ratio: float = 5.0):
+    """
+    检测输出结果里是否存在真实的时间缺口（设备本身没记录到数据，不是脚本丢弃造成的）。
+    用中位数采样间隔估算正常节奏，超过 gap_ratio 倍中位间隔的地方视为一次缺口并打印，
+    方便区分"设备真的没录到" vs "脚本因为倒退异常主动丢弃的行"。
+    """
+    if len(out_rows) < 3:
+        return
+    ts_list = [datetime.strptime(row[0], '%Y-%m-%d %H:%M:%S.%f') for row in out_rows]
+    diffs_ms = [(ts_list[i] - ts_list[i - 1]).total_seconds() * 1000 for i in range(1, len(ts_list))]
+    diffs_ms.sort()
+    median_ms = diffs_ms[len(diffs_ms) // 2]
+    if median_ms <= 0:
+        return
+
+    threshold_ms = median_ms * gap_ratio
+    gaps = []
+    for i in range(1, len(ts_list)):
+        gap_ms = (ts_list[i] - ts_list[i - 1]).total_seconds() * 1000
+        if gap_ms > threshold_ms:
+            gaps.append((out_rows[i - 1][0], out_rows[i][0], gap_ms))
+
+    if gaps:
+        print(f'提示: 发现 {len(gaps)} 处真实数据缺口（设备本身没有记录到这段时间的数据，不是脚本丢弃的）：')
+        for before, after, gap_ms in gaps[:20]:
+            print(f'  {before}  →  {after}  （缺口约 {gap_ms:.0f} ms）')
+        if len(gaps) > 20:
+            print(f'  ...（其余 {len(gaps) - 20} 处从略）')
 
 
 def main():
