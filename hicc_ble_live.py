@@ -37,10 +37,19 @@ BLE GATT UUID:
 
     # 不自动校时（设备时钟已经准确时使用）
     python hicc_ble_live.py --address EA:CB:3E:CF:00:1B --no-timesync
+
+    # 长期采集模式：每到整点自动切换新CSV文件，文件名 YYYYMMDDHH_6axis.csv / _env.csv
+    python hicc_ble_live.py --address EA:CB:3E:CF:00:1B --hourly
+
+    # 长期采集，指定输出目录、调整状态打印间隔、或完全静默
+    python hicc_ble_live.py --address EA:CB:3E:CF:00:1B --hourly --hourly-dir data/hicc_hourly
+    python hicc_ble_live.py --address EA:CB:3E:CF:00:1B --hourly --status-interval 300
+    python hicc_ble_live.py --address EA:CB:3E:CF:00:1B --hourly --quiet
 """
 
 import argparse
 import asyncio
+import os
 import sys
 import time
 import csv
@@ -101,17 +110,59 @@ def print_decoded(d: dict):
 
 
 class CsvWriter:
-    def __init__(self, path_6axis: str, path_env: str):
+    """
+    hourly=True 时开启长期采集模式：每到整点（PC 系统时间）自动关闭当前的
+    六轴/环境两个文件、新开一对文件，文件名 YYYYMMDDHH_6axis.csv /
+    YYYYMMDDHH_env.csv，保存在 out_dir 目录下。与 wit_ble_live.py 的
+    --hourly 是同样的设计，方便长期挂机不会因单文件过大或程序意外中断
+    丢失全部数据。
+    """
+
+    def __init__(self, path_6axis: str = None, path_env: str = None,
+                 hourly: bool = False, out_dir: str = 'data'):
+        self.hourly = hourly
+        self.out_dir = out_dir
+        self.count_6axis = 0
+        self.count_env = 0
+        self._f6 = self._fe = self._w6 = self._we = None
+        self.path_6axis = self.path_env = None
+        self._current_hour_tag = None
+
+        if hourly:
+            self._rotate_if_needed(force=True)
+        else:
+            self._open(path_6axis, path_env)
+
+    def _open(self, path_6axis, path_env):
+        self.path_6axis = path_6axis
+        self.path_env = path_env
         self._f6 = open(path_6axis, 'w', encoding='utf-8', newline='')
         self._fe = open(path_env,   'w', encoding='utf-8', newline='')
         self._w6 = csv.writer(self._f6)
         self._we = csv.writer(self._fe)
         self._w6.writerow(CSV_HEADER_6AXIS)
         self._we.writerow(CSV_HEADER_ENV)
-        self.count_6axis = 0
-        self.count_env   = 0
+
+    def _rotate_if_needed(self, force=False):
+        now = datetime.now(TZ_CST)
+        hour_tag = now.strftime('%Y%m%d%H')
+        if not force and hour_tag == self._current_hour_tag:
+            return
+        if self._f6 is not None:
+            print(f'  [整点切换] 已保存: {self.path_6axis}  {self.path_env}')
+            self._f6.close()
+            self._fe.close()
+        os.makedirs(self.out_dir, exist_ok=True)
+        self._current_hour_tag = hour_tag
+        new_6axis = os.path.join(self.out_dir, f'{hour_tag}_6axis.csv')
+        new_env   = os.path.join(self.out_dir, f'{hour_tag}_env.csv')
+        self._open(new_6axis, new_env)
+        print(f'  新文件: {new_6axis}  {new_env}')
 
     def write(self, d: dict):
+        if self.hourly:
+            self._rotate_if_needed()
+
         ts = d.get('timestamp_str', '')
         if d.get('frame_type') == '6axis':
             self._w6.writerow([ts,
@@ -247,7 +298,11 @@ async def run(args):
 
     buf = FrameBuffer()
     csv_writer = None
-    if args.output:
+    if args.hourly:
+        csv_writer = CsvWriter(hourly=True, out_dir=args.hourly_dir)
+        print(f'长期采集模式: 每到整点自动切换新文件，保存目录 {args.hourly_dir}/，'
+              f'文件名 YYYYMMDDHH_6axis.csv / _env.csv（当前: {csv_writer.path_6axis}  {csv_writer.path_env}）')
+    elif args.output:
         mac_tag = args.address.replace(':', '').lower()
         ts_tag = datetime.now(TZ_CST).strftime('%Y%m%d_%H%M%S')
         path_6axis = f'data/hicc_{mac_tag}_{ts_tag}_6axis.csv'
@@ -257,6 +312,8 @@ async def run(args):
         print(f'环境数据 -> {path_env}')
 
     timesync_sent = [False]
+    last_status_print = [0.0]
+    last_hz = [0.0]
 
     def notification_handler(sender, data: bytearray):
         frames = buf.feed(bytes(data))
@@ -276,9 +333,25 @@ async def run(args):
             d = parse_frame(frame)
             if d is None:
                 return
-            print_decoded(d)
+
             if csv_writer:
                 csv_writer.write(d)
+                # 写文件模式下不再逐帧打印（25Hz 会刷屏太快），改成按时间间隔打印状态摘要
+                if d.get('frame_type') == '6axis':
+                    last_hz[0] = _hz.tick()
+                if not args.quiet:
+                    now_mono = time.monotonic()
+                    if now_mono - last_status_print[0] >= args.status_interval:
+                        last_status_print[0] = now_mono
+                        now_str = datetime.now(TZ_CST).strftime('%Y-%m-%d %H:%M:%S')
+                        acc_str = ''
+                        if d.get('frame_type') == '6axis':
+                            acc_str = (f"  最新加速度: X={d.get('acc_x', 0):+.4f} "
+                                       f"Y={d.get('acc_y', 0):+.4f} Z={d.get('acc_z', 0):+.4f} m/s²")
+                        print(f'  [{now_str}] 六轴 {csv_writer.count_6axis} 帧  环境 {csv_writer.count_env} 帧'
+                              f'{acc_str}  {last_hz[0]:.1f}Hz')
+            else:
+                print_decoded(d)
 
     _current_client: list[BleakClient | None] = [None]
     _rx_uuid: list[str | None] = [None]
@@ -369,6 +442,18 @@ def main():
                     help='校准采集时长（秒），默认 30 秒')
     ap.add_argument('--duration', type=float, default=0,
                     help='采集时长（秒），到时自动停止；不填或填 0 则手动 Ctrl+C 停止')
+    ap.add_argument('--hourly', action='store_true',
+                    help='长期采集模式：每到整点（PC系统时间）自动切换新的CSV文件对，'
+                         '文件名 YYYYMMDDHH_6axis.csv / YYYYMMDDHH_env.csv，'
+                         '避免长时间挂机单个文件过大、或程序意外中断丢失全部数据。'
+                         '与 -o/--output 互斥，此模式下忽略 -o。')
+    ap.add_argument('--hourly-dir', default='data',
+                    help='--hourly 模式下的输出目录，默认 data/')
+    ap.add_argument('--status-interval', type=float, default=60.0,
+                    help='写文件模式下状态提示的打印间隔（秒），默认 60 秒打印一次'
+                         '（不再逐帧打印，25Hz 连续刷屏没有必要）')
+    ap.add_argument('--quiet', action='store_true',
+                    help='写文件模式下完全不打印状态提示（仍会打印连接/校时/整点切换等关键信息）')
     args = ap.parse_args()
 
     try:
