@@ -84,7 +84,7 @@ python wit_ble_live.py --name WTSDCL --calibrate
 # 查看设备 GATT 服务/特征值（用于核实 UUID）
 python wit_ble_live.py --name WTSDCL --list-services
 
-# 长期采集模式：每到整点自动切换新CSV文件，文件名 YYYYMMDDHH.csv（如 2026071309.csv）
+# 长期采集模式：每到整点自动切换新CSV文件，文件名 YYYYMMDDHH_设备名.csv（如 2026071309_WT901BLE68.csv）
 python wit_ble_live.py --name WTSDCL --hourly
 
 # 长期采集，指定输出目录（默认 data/）
@@ -97,7 +97,7 @@ python wit_ble_live.py --name WTSDCL --hourly --status-interval 300
 python wit_ble_live.py --name WTSDCL --hourly --quiet
 ```
 
-**长期采集模式（`--hourly`）**：适合挂机长时间采集。每到整点（PC 系统时间）自动关闭当前文件、新开一个文件，文件名 `YYYYMMDDHH.csv`（比如 `2026071309.csv` 表示 2026-07-13 09点这一小时的数据），避免单个文件过大，也避免程序意外中断导致这一整段时间的数据全部丢失（顶多丢当前这一小时还没切换的部分）。此模式下 `-o/--output` 不生效。
+**长期采集模式（`--hourly`）**：适合挂机长时间采集。每到整点（PC 系统时间）自动关闭当前文件、新开一个文件，文件名 `YYYYMMDDHH_设备名.csv`（比如 `2026071309_WT901BLE68.csv` 表示 2026-07-13 09点这一小时、设备名为 WT901BLE68 的数据；设备名后缀方便同时挂多台设备采集时文件不冲突），避免单个文件过大，也避免程序意外中断导致这一整段时间的数据全部丢失（顶多丢当前这一小时还没切换的部分）。此模式下 `-o/--output` 不生效。
 
 **状态提示打印**：默认每 60 秒打印一次"已接收 N 帧"状态（`--status-interval` 可调整间隔）；采样率高（比如 100Hz）时按帧数打印会刷屏太快，改成按时间间隔打印。完全不想看到这类提示可以加 `--quiet`（连接、丢帧、整点切换等关键信息仍会打印）。
 
