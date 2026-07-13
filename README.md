@@ -11,7 +11,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `hicc_parse.py` | HICC_PetCollar 协议解析：GATT UUID、帧常量、DP 解析、`FrameBuffer`、校时帧构造、`find_tx_uuid`/`find_rx_uuid`/`send_timesync` |
 | `hicc_offline_to_labelstudio.py` | HICC 离线日志（`HH:MM:SS.MS,AX,AY,AZ,GX,GY,GZ`）转 Label Studio 格式 CSV |
 | `csv_time_slice.py` | 按时间范围截取 Label Studio 格式 CSV 的一段数据 |
-| `wit_ble_live.py` | WitMotion BLE 实时采集主程序，导入 `ble_utils` + `wit_parse` |
+| `wit_ble_live.py` | WitMotion BLE 实时采集主程序，导入 `ble_utils` + `wit_parse`；支持 `--hourly` 长期采集（整点自动切换CSV文件） |
 | `hicc_ble_live.py` | HICC BLE 实时采集主程序，导入 `ble_utils` + `hicc_parse` |
 | `wit_drift_analysis.py` | WitMotion 时间漂移分析与线性补偿验证 |
 | `hicc_drift_analysis.py` | HICC 时间漂移分析与线性补偿验证 |
@@ -82,7 +82,15 @@ python wit_ble_live.py --name WTSDCL --calibrate
 
 # 查看设备 GATT 服务/特征值（用于核实 UUID）
 python wit_ble_live.py --name WTSDCL --list-services
+
+# 长期采集模式：每到整点自动切换新CSV文件，文件名 YYYYMMDDHH.csv（如 2026071309.csv）
+python wit_ble_live.py --name WTSDCL --hourly
+
+# 长期采集，指定输出目录（默认 data/）
+python wit_ble_live.py --name WTSDCL --hourly --hourly-dir data/wit_hourly
 ```
+
+**长期采集模式（`--hourly`）**：适合挂机长时间采集。每到整点（PC 系统时间）自动关闭当前文件、新开一个文件，文件名 `YYYYMMDDHH.csv`（比如 `2026071309.csv` 表示 2026-07-13 09点这一小时的数据），避免单个文件过大，也避免程序意外中断导致这一整段时间的数据全部丢失（顶多丢当前这一小时还没切换的部分）。此模式下 `-o/--output` 不生效。
 
 ### HICC_PetCollar
 
