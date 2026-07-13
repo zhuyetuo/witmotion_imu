@@ -647,11 +647,14 @@ def run_camera(args):
         stop_event.set()
         return
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  args.width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
     cap.set(cv2.CAP_PROP_FPS, target_fps)
     actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if (actual_w, actual_h) != (args.width, args.height):
+        print(f'警告: 请求分辨率 {args.width}x{args.height}，摄像头驱动实际给出 {actual_w}x{actual_h}'
+              '（驱动不支持请求的分辨率，自动退化到最接近的档位）。')
     print(f'摄像头分辨率: {actual_w}x{actual_h}  摄像头目标帧率: {target_fps} fps（不影响 IMU 采样率，IMU 由设备自身配置）')
 
     record_mode = args.duration and args.duration > 0
@@ -901,6 +904,8 @@ def main():
                     help='手动指定 WitMotion Notify UUID')
     ap.add_argument('--camera', type=int, default=0,
                     help='摄像头编号，默认 0')
+    ap.add_argument('--width', type=int, default=1280, help='摄像头请求分辨率宽，默认 1280（720p）')
+    ap.add_argument('--height', type=int, default=720, help='摄像头请求分辨率高，默认 720（720p）')
     ap.add_argument('--cam-fps', '--fps', dest='fps', type=int, default=20,
                     choices=range(1, 61), metavar='N',
                     help='摄像头目标帧率（1-60，默认 20）。IMU 采样率由设备自身配置决定，与此参数无关。'

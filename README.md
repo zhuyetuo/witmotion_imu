@@ -198,6 +198,10 @@ python imu_camera_sync.py --device wit --name WTSDCL --cam-fps 20
 # 指定摄像头编号（默认 0）
 python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --camera 1
 
+# 指定分辨率（默认就是 720p: 1280x720，驱动不支持时会自动退化并打印警告）
+python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --width 1280 --height 720
+python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --width 1920 --height 1080
+
 # 保存不带叠加信息的原始视频（默认叠加 IMU/帧率/延迟信息，方便数据标注）
 python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --no-save-overlay
 
