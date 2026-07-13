@@ -343,7 +343,8 @@ async def run(args):
                 if not args.quiet and now_mono - last_status_print[0] >= args.status_interval:
                     last_status_print[0] = now_mono
                     acc = p['acc']
-                    print(f'  已接收 {writer.count_written} 帧  最新加速度: '
+                    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    print(f'  [{now_str}] 已接收 {writer.count_written} 帧  最新加速度: '
                           f'X={acc[0]:.3f} Y={acc[1]:.3f} Z={acc[2]:.3f} g  '
                           f'{current_hz:.1f}Hz')
 
