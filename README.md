@@ -12,7 +12,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `hicc_offline_to_labelstudio.py` | HICC 离线日志（`HH:MM:SS.MS,AX,AY,AZ,GX,GY,GZ`）转 Label Studio 格式 CSV |
 | `csv_time_slice.py` | 按时间范围截取 Label Studio 格式 CSV 的一段数据 |
 | `wit_ble_live.py` | WitMotion BLE 实时采集主程序，导入 `ble_utils` + `wit_parse`；支持 `--hourly` 长期采集（整点自动切换CSV文件） |
-| `hicc_ble_live.py` | HICC BLE 实时采集主程序，导入 `ble_utils` + `hicc_parse` |
+| `hicc_ble_live.py` | HICC BLE 实时采集主程序，导入 `ble_utils` + `hicc_parse`；支持 `--hourly` 长期采集（整点自动切换CSV文件） |
 | `wit_drift_analysis.py` | WitMotion 时间漂移分析与线性补偿验证 |
 | `hicc_drift_analysis.py` | HICC 时间漂移分析与线性补偿验证 |
 | `imu_camera_sync.py` | IMU + 摄像头同步采集（BLE 后台线程 + 主线程 OpenCV） |
@@ -120,7 +120,17 @@ python hicc_ble_live.py --address EA:CB:3E:CF:00:1B --calibrate
 
 # 查看 GATT 服务/特征值
 python hicc_ble_live.py --address EA:CB:3E:CF:00:1B --list-services
+
+# 长期采集模式：每到整点自动切换新文件对，文件名 YYYYMMDDHH_6axis.csv / _env.csv
+python hicc_ble_live.py --address EA:CB:3E:CF:00:1B --hourly
+
+# 长期采集，指定输出目录、调整状态打印间隔、或完全静默
+python hicc_ble_live.py --address EA:CB:3E:CF:00:1B --hourly --hourly-dir data/hicc_hourly
+python hicc_ble_live.py --address EA:CB:3E:CF:00:1B --hourly --status-interval 300
+python hicc_ble_live.py --address EA:CB:3E:CF:00:1B --hourly --quiet
 ```
+
+**长期采集模式（`--hourly`）**：跟 `wit_ble_live.py` 的 `--hourly` 设计一致。每到整点自动关闭当前的六轴/环境两个文件、新开一对文件（`YYYYMMDDHH_6axis.csv` / `YYYYMMDDHH_env.csv`），此模式下 `-o/--output` 不生效，且写文件时不再逐帧打印（HICC 六轴帧 25Hz，逐帧打印刷屏太快），改成按 `--status-interval`（默认60秒）打印一次状态摘要，`--quiet` 可完全关闭状态提示。不写文件的纯打印模式（不加 `-o`/`--hourly`）行为不变，仍然逐帧打印详情。
 
 ### 离线文件解析（WitMotion）
 
