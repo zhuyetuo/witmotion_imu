@@ -160,6 +160,16 @@ def main():
                      help='判定为缺口的阈值：中位采样间隔的倍数，默认 5')
     ap.add_argument('--max-print', type=int, default=20,
                      help='最多打印多少条缺口明细，默认 20')
+    ap.add_argument('--loss-excellent', type=float, default=1.0,
+                     help='丢包率(%%) 低于此值判定为"优秀"，默认 1%%')
+    ap.add_argument('--loss-warn', type=float, default=3.0,
+                     help='丢包率(%%) 低于此值判定为"合格"，默认 3%%（介于 warn 和 fail 之间为"有条件通过"）')
+    ap.add_argument('--loss-fail', type=float, default=5.0,
+                     help='丢包率(%%) 达到或超过此值判定验收不通过，默认 5%%')
+    ap.add_argument('--periodic-cv-threshold', type=float, default=0.15,
+                     help='稳健变异系数低于此值判定为"强周期性"，默认 0.15。'
+                          '检测到强周期性缺口时，无论丢包率多低，验收结论都直接判定不通过'
+                          '（说明是固件/硬件系统性问题，不是偶发噪声）')
     args = ap.parse_args()
 
     try:
@@ -189,14 +199,19 @@ def main():
     print(f'正常采样间隔（中位数）: {median_ms:.1f} ms   判定阈值: {median_ms * args.gap_ratio:.1f} ms')
     print()
 
+    total_span_ms = total_span_s * 1000.0
+
     if not gaps:
         print('未发现明显缺口。')
+        print_acceptance_verdict(args, loss_pct=0.0, periodicity_stats=None)
         return
 
     gap_durations = [g[2] for g in gaps]
+    loss_pct = sum(gap_durations) / total_span_ms * 100.0 if total_span_ms > 0 else 0.0
     print(f'── 发现 {len(gaps)} 处缺口 ──')
     print(f'  缺口时长: min={min(gap_durations):.0f}ms  max={max(gap_durations):.0f}ms  '
           f'mean={statistics.mean(gap_durations):.0f}ms  median={statistics.median(gap_durations):.0f}ms')
+    print(f'  丢包率: {loss_pct:.2f}%  （缺口总时长 {sum(gap_durations)/1000:.1f}s / 总采集时长 {total_span_s:.1f}s）')
     print()
 
     for before, after, gap_ms in gaps[:args.max_print]:
@@ -210,12 +225,13 @@ def main():
     print('── 周期性分析 ──')
     if stats is None:
         print('缺口数量太少（<3），无法判断是否周期性出现。')
+        print_acceptance_verdict(args, loss_pct=loss_pct, periodicity_stats=None)
         return
 
     print(f'  缺口复发间隔: mean={stats["mean_s"]:.2f}s  median={stats["median_s"]:.2f}s  '
           f'stdev={stats["stdev_s"]:.2f}s  稳健变异系数={stats["robust_cv"]:.3f}  '
           f'（{stats["close_ratio"]*100:.0f}% 的复发间隔落在中位数 ±20% 以内）')
-    if stats['robust_cv'] < 0.15:
+    if stats['robust_cv'] < args.periodic_cv_threshold:
         print(f'  ✔ 强周期性：缺口大约每隔 {stats["median_s"]:.1f} 秒规律性出现一次，'
               f'建议反馈给硬件/固件排查采集端是否存在周期性卡顿。')
     elif stats['robust_cv'] < 0.35:
@@ -223,6 +239,56 @@ def main():
               f'倾向于周期性但不够严格规律（可能混有个别偶发的大缺口）。')
     else:
         print('  ✘ 未发现明显周期性，缺口出现时间点比较分散/随机，更像偶发丢包。')
+
+    print_acceptance_verdict(args, loss_pct=loss_pct, periodicity_stats=stats)
+
+
+def print_acceptance_verdict(args, loss_pct: float, periodicity_stats):
+    """
+    验收结论（阈值可通过 CLI 参数调整，默认值参考行业惯例：
+    临床级可穿戴设备 QC 常用 5% 数据缺失作为验收阈值，优化良好的 BLE
+    可穿戴系统能做到 <1% 丢包率）：
+        丢包率 < --loss-excellent（默认1%）        → 优秀，通过
+        丢包率 < --loss-warn（默认3%）              → 合格，通过
+        丢包率 < --loss-fail（默认5%）              → 有条件通过，建议关注
+        丢包率 >= --loss-fail                       → 不通过
+        检测到强周期性缺口（稳健CV < --periodic-cv-threshold）
+                                                      → 无论丢包率多低，直接不通过
+                                                        （系统性设计缺陷，不是偶发噪声，
+                                                         长期使用会持续复现）
+    """
+    is_periodic = (periodicity_stats is not None
+                   and periodicity_stats['robust_cv'] < args.periodic_cv_threshold)
+
+    print()
+    print('══ 验收结论 ══')
+    print(f'  丢包率: {loss_pct:.2f}%  （优秀<{args.loss_excellent}%  合格<{args.loss_warn}%  '
+          f'有条件通过<{args.loss_fail}%  不通过>={args.loss_fail}%）')
+
+    if is_periodic:
+        print(f'  判定: ✘ 不通过')
+        print(f'  原因: 检测到强周期性缺口（约每 {periodicity_stats["median_s"]:.1f} 秒规律性丢一段，'
+              f'当前丢包率 {loss_pct:.2f}%）。规律性说明这是设备固件/硬件存在的系统性问题'
+              f'（不是偶发噪声），不会因为多测几次就消失，长期使用会持续复现——'
+              f'即便丢包率本身低于阈值也应判定不通过，建议要求厂家整改后重新验收。')
+        return
+
+    if loss_pct >= args.loss_fail:
+        verdict = '✘ 不通过'
+        reason = f'丢包率 {loss_pct:.2f}% 超过不通过阈值 {args.loss_fail}%。'
+    elif loss_pct >= args.loss_warn:
+        verdict = '⚠ 有条件通过'
+        reason = (f'丢包率 {loss_pct:.2f}% 处于 {args.loss_warn}%~{args.loss_fail}% 区间，'
+                  f'未达到不通过标准，但建议关注、多测几组数据确认稳定性。')
+    elif loss_pct >= args.loss_excellent:
+        verdict = '✔ 合格，通过'
+        reason = f'丢包率 {loss_pct:.2f}% 低于 {args.loss_warn}%，属于合格范围。'
+    else:
+        verdict = '✔ 优秀，通过'
+        reason = f'丢包率 {loss_pct:.2f}% 低于 {args.loss_excellent}%，数据质量优秀。'
+
+    print(f'  判定: {verdict}')
+    print(f'  原因: {reason}')
 
 
 if __name__ == '__main__':
