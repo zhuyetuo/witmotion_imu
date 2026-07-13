@@ -10,6 +10,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `wit_parse.py` | WitMotion 协议解析（离线 + BLE）：`parse_packets`、`StreamingByteBuffer`、`parse_one_packet`、`DEFAULT_NOTIFY_CANDIDATES`、`fmt_chip_time_dotms` 等 |
 | `hicc_parse.py` | HICC_PetCollar 协议解析：GATT UUID、帧常量、DP 解析、`FrameBuffer`、校时帧构造、`find_tx_uuid`/`find_rx_uuid`/`send_timesync` |
 | `hicc_offline_to_labelstudio.py` | HICC 离线日志（`HH:MM:SS.MS,AX,AY,AZ,GX,GY,GZ`）转 Label Studio 格式 CSV |
+| `check_periodic_gaps.py` | 检测 HICC 离线 TXT / Label Studio CSV 数据里是否存在周期性缺口 |
 | `csv_time_slice.py` | 按时间范围截取 Label Studio 格式 CSV 的一段数据 |
 | `wit_ble_live.py` | WitMotion BLE 实时采集主程序，导入 `ble_utils` + `wit_parse`；支持 `--hourly` 长期采集（整点自动切换CSV文件） |
 | `hicc_ble_live.py` | HICC BLE 实时采集主程序，导入 `ble_utils` + `hicc_parse`；支持 `--hourly` 长期采集（整点自动切换CSV文件） |
@@ -169,6 +170,18 @@ python hicc_offline_to_labelstudio.py data/26060314.TXT --date 2026-06-03
 **时间戳倒退的处理**：只有倒退幅度接近一整天（≥12小时，比如 23:59 → 00:00）才判定为真正跨午夜、日期 +1；如果只是小幅倒退（比如同一分钟内秒数从 59 突然跳回 01，分钟数没变——这是部分 HICC 离线日志里实际出现过的设备端记录异常），会判定为设备日志自身的毛刺而不是跨天，直接丢弃这些行以保证 timestamp 严格递增（Label Studio 的硬性要求），并打印丢弃了多少行。
 
 **真实数据缺口检测**：脚本还会用中位数采样间隔估算正常节奏，把明显超出正常间隔的地方（默认阈值：中位间隔的 5 倍）识别为"设备本身没有记录到数据"的真实缺口并打印出来（区别于上面"脚本主动丢弃的倒退行"）。如果发现大量周期性缺口（比如每隔几秒就丢一小段），说明是设备采集本身不稳定，需要反馈给硬件/固件排查，转换脚本无法凭空补全本来就不存在的数据。
+
+### 单独检测数据缺口是否呈周期性
+
+`hicc_offline_to_labelstudio.py` 转换时会顺带报一次缺口，但如果只是想单独检查某份数据（HICC 离线 TXT 或已生成的 Label Studio CSV 都可以），或者想调整判定阈值，用 `check_periodic_gaps.py`：
+
+```bash
+python check_periodic_gaps.py data/26071009.TXT
+python check_periodic_gaps.py data/26071009.csv
+python check_periodic_gaps.py data/26071009.TXT --gap-ratio 3 --max-print 30
+```
+
+会自动按文件表头识别是 HICC 离线 TXT 还是 Label Studio CSV 格式，统计缺口数量/时长分布，并进一步分析这些缺口的"复发间隔"是否有规律（用中位数+绝对中位差而不是均值/标准差，避免个别超大缺口把统计结果带偏），给出强周期性/有一定规律/不规律三档判断。发现强周期性缺口通常意味着设备采集端本身有规律性卡顿，值得反馈给硬件/固件排查。
 
 ### 按时间范围截取 CSV
 
