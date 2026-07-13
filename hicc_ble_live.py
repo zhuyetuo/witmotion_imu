@@ -346,8 +346,10 @@ async def run(args):
                         now_str = datetime.now(TZ_CST).strftime('%Y-%m-%d %H:%M:%S')
                         acc_str = ''
                         if d.get('frame_type') == '6axis':
-                            acc_str = (f"  最新加速度: X={d.get('acc_x', 0):+.4f} "
-                                       f"Y={d.get('acc_y', 0):+.4f} Z={d.get('acc_z', 0):+.4f} m/s²")
+                            acc_str = (f"  acc=({d.get('acc_x', 0):+.4f},{d.get('acc_y', 0):+.4f},"
+                                       f"{d.get('acc_z', 0):+.4f})m/s²  "
+                                       f"gyro=({d.get('gyro_x', 0):+.4f},{d.get('gyro_y', 0):+.4f},"
+                                       f"{d.get('gyro_z', 0):+.4f})rad/s")
                         print(f'  [{now_str}] 六轴 {csv_writer.count_6axis} 帧  环境 {csv_writer.count_env} 帧'
                               f'{acc_str}  {last_hz[0]:.1f}Hz')
             else:
