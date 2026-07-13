@@ -10,6 +10,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `wit_parse.py` | WitMotion 协议解析（离线 + BLE）：`parse_packets`、`StreamingByteBuffer`、`parse_one_packet`、`DEFAULT_NOTIFY_CANDIDATES`、`fmt_chip_time_dotms` 等 |
 | `hicc_parse.py` | HICC_PetCollar 协议解析：GATT UUID、帧常量、DP 解析、`FrameBuffer`、校时帧构造、`find_tx_uuid`/`find_rx_uuid`/`send_timesync` |
 | `hicc_offline_to_labelstudio.py` | HICC 离线日志（`HH:MM:SS.MS,AX,AY,AZ,GX,GY,GZ`）转 Label Studio 格式 CSV |
+| `csv_time_slice.py` | 按时间范围截取 Label Studio 格式 CSV 的一段数据 |
 | `wit_ble_live.py` | WitMotion BLE 实时采集主程序，导入 `ble_utils` + `wit_parse` |
 | `hicc_ble_live.py` | HICC BLE 实时采集主程序，导入 `ble_utils` + `hicc_parse` |
 | `wit_drift_analysis.py` | WitMotion 时间漂移分析与线性补偿验证 |
@@ -142,6 +143,16 @@ python hicc_offline_to_labelstudio.py data/26060314.TXT --date 2026-06-03
 **时间戳倒退的处理**：只有倒退幅度接近一整天（≥12小时，比如 23:59 → 00:00）才判定为真正跨午夜、日期 +1；如果只是小幅倒退（比如同一分钟内秒数从 59 突然跳回 01，分钟数没变——这是部分 HICC 离线日志里实际出现过的设备端记录异常），会判定为设备日志自身的毛刺而不是跨天，直接丢弃这些行以保证 timestamp 严格递增（Label Studio 的硬性要求），并打印丢弃了多少行。
 
 **真实数据缺口检测**：脚本还会用中位数采样间隔估算正常节奏，把明显超出正常间隔的地方（默认阈值：中位间隔的 5 倍）识别为"设备本身没有记录到数据"的真实缺口并打印出来（区别于上面"脚本主动丢弃的倒退行"）。如果发现大量周期性缺口（比如每隔几秒就丢一小段），说明是设备采集本身不稳定，需要反馈给硬件/固件排查，转换脚本无法凭空补全本来就不存在的数据。
+
+### 按时间范围截取 CSV
+
+从一份 Label Studio 格式的 CSV（`timestamp, acc_x, acc_y, acc_z, gyro_x, gyro_y, gyro_z`）里截取某一段时间的数据，格式不变，方便只标注/训练某个时间段：
+
+```bash
+python csv_time_slice.py 26071009.csv "2026-07-10 09:22:57" "2026-07-10 09:24:01"
+```
+
+输出文件默认跟输入同目录、同名，只加一个时间范围后缀：`26071009_092257-092401.csv`。起止时间闭区间（含边界），支持带或不带毫秒。也可以用 `-o` 指定输出路径。
 
 ### IMU + 摄像头同步采集
 
