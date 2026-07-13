@@ -11,7 +11,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `hicc_parse.py` | HICC_PetCollar 协议解析：GATT UUID、帧常量、DP 解析、`FrameBuffer`、校时帧构造、`find_tx_uuid`/`find_rx_uuid`/`send_timesync` |
 | `hicc_offline_to_labelstudio.py` | HICC 离线日志（`HH:MM:SS.MS,AX,AY,AZ,GX,GY,GZ`）转 Label Studio 格式 CSV |
 | `csv_time_slice.py` | 按时间范围截取 Label Studio 格式 CSV 的一段数据 |
-| `wit_ble_live.py` | WitMotion BLE 实时采集主程序，导入 `ble_utils` + `wit_parse` |
+| `wit_ble_live.py` | WitMotion BLE 实时采集主程序，导入 `ble_utils` + `wit_parse`；支持 `--hourly` 长期采集（整点自动切换CSV文件） |
 | `hicc_ble_live.py` | HICC BLE 实时采集主程序，导入 `ble_utils` + `hicc_parse` |
 | `wit_drift_analysis.py` | WitMotion 时间漂移分析与线性补偿验证 |
 | `hicc_drift_analysis.py` | HICC 时间漂移分析与线性补偿验证 |
@@ -82,7 +82,15 @@ python wit_ble_live.py --name WTSDCL --calibrate
 
 # 查看设备 GATT 服务/特征值（用于核实 UUID）
 python wit_ble_live.py --name WTSDCL --list-services
+
+# 长期采集模式：每到整点自动切换新CSV文件，文件名 YYYYMMDDHH.csv（如 2026071309.csv）
+python wit_ble_live.py --name WTSDCL --hourly
+
+# 长期采集，指定输出目录（默认 data/）
+python wit_ble_live.py --name WTSDCL --hourly --hourly-dir data/wit_hourly
 ```
+
+**长期采集模式（`--hourly`）**：适合挂机长时间采集。每到整点（PC 系统时间）自动关闭当前文件、新开一个文件，文件名 `YYYYMMDDHH.csv`（比如 `2026071309.csv` 表示 2026-07-13 09点这一小时的数据），避免单个文件过大，也避免程序意外中断导致这一整段时间的数据全部丢失（顶多丢当前这一小时还没切换的部分）。此模式下 `-o/--output` 不生效。
 
 ### HICC_PetCollar
 
@@ -198,6 +206,10 @@ python imu_camera_sync.py --device wit --name WTSDCL --cam-fps 20
 # 指定摄像头编号（默认 0）
 python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --camera 1
 
+# 指定分辨率（默认就是 720p: 1280x720，驱动不支持时会自动退化并打印警告）
+python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --width 1280 --height 720
+python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --width 1920 --height 1080
+
 # 保存不带叠加信息的原始视频（默认叠加 IMU/帧率/延迟信息，方便数据标注）
 python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1B --no-save-overlay
 
@@ -254,6 +266,15 @@ python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --resample-hz
 **同步模式**：默认摄像头会等待新的 IMU 样本到达后才抓帧（事件驱动），使两条独立时间线（摄像头定时器 vs BLE 到达时间）天然对齐，避免同一个 IMU 样本被多帧复用。`--no-imu-sync` 可切回旧的固定定时器模式（仅供调试对比）。
 
 视频文件第 N 帧与 `{base}_meta.csv` 里 `frame_idx=N` 那一行严格一一对应（按写入顺序保证）。视频默认通过 `ffmpeg` 管道以可变帧率（VFR）写入，每帧的时间戳直接采用写入时刻的真实系统时间，因此**视频总时长天然精确等于真实录制时长**（误差通常 <10ms），与 CSV 完全一致，不需要也无法事后修正。未安装 `ffmpeg` 时会打印警告并退化为固定 fps 写入，此时播放时长可能有 0.1s 级别误差（帧与 CSV 行的对应关系依然准确，只是播放时长显示有偏差）。建议安装 `ffmpeg` 并确保它在 `PATH` 中。
+
+**视频体积**：默认优先用 H.264（`libx264`）编码，比旧版默认的 `mpeg4` 压缩率高很多，同画质下体积通常只有 1/5~1/10。用 `--video-crf` 调整压缩质量（默认 28，数值越大文件越小、画质越差，标注用途 23~30 都够用），比如：
+
+```bash
+python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --video-crf 32   # 文件更小
+python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --video-crf 20   # 画质更好，文件更大
+```
+
+如果 ffmpeg 没有 `libx264` 支持（少见），会自动退化用 `mpeg4`（体积明显更大）。
 
 **关于重复复用 IMU 样本**：如果 IMU 采样率低于摄像头目标帧率，个别帧会拿到与上一帧相同的 IMU 值（不是对齐错误，是当时 IMU 数据确实没变）。想减少这种情况，可以把设备采样率调高于摄像头帧率（比如采集阶段用 50Hz），采集到的高频数据之后可以重采样降到最终部署速率；部署时训练和推理仍应使用统一的目标采样率。
 

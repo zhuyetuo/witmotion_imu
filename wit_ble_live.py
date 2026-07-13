@@ -48,11 +48,18 @@ WitMotion BLE 模组的 GATT UUID（经典款 WT901BLECL 已验证，WT901SDCL-B
     # 如果默认UUID订阅不到数据，先列出该设备真实的服务/特征值：
     python wit_ble_live.py --name WT901 --list-services
 
+    # 长期采集模式：每到整点自动切换新CSV文件，文件名 YYYYMMDDHH.csv（如 2026071309.csv）
+    python wit_ble_live.py --name WT901 --hourly
+
+    # 长期采集，指定输出目录
+    python wit_ble_live.py --name WT901 --hourly --hourly-dir data/wit_hourly
+
     # 按 Ctrl+C 停止采集，已写入的CSV文件会被正常关闭保存。
 """
 
 import argparse
 import asyncio
+import os
 import sys
 import time
 from datetime import datetime
@@ -82,20 +89,59 @@ class LiveCsvWriter:
     否则视为蓝牙重连导致的时钟复位/重传坏帧，直接丢弃并打印提示。
     这样实时采集中途如果发生短暂断连重连，导出的CSV依然保证时间戳
     严格单调递增，可以直接用于 Label Studio。
+
+    hourly=True 时开启长期采集模式：每到整点（PC 系统时间）自动关闭当前
+    文件、新开一个文件，文件名为 YYYYMMDDHH.csv（例如 2026071309.csv 表示
+    2026-07-13 09点这一个小时），保存在 out_dir 目录下，方便长期挂机采集
+    不会因为单个文件过大或程序意外中断而丢失全部数据。
     """
 
-    def __init__(self, path, encoding='utf-8', keep_bad_frames=False):
-        import csv
-        self._f = open(path, 'w', encoding=encoding, newline='')
-        self._writer = csv.writer(self._f)
-        self._writer.writerow(LABELSTUDIO_HEADER)
-        self._f.flush()
+    def __init__(self, path=None, encoding='utf-8', keep_bad_frames=False,
+                 hourly=False, out_dir='data'):
+        self.encoding = encoding
         self.keep_bad_frames = keep_bad_frames
+        self.hourly = hourly
+        self.out_dir = out_dir
         self.last_good_time = None
         self.count_written = 0
         self.count_dropped = 0
+        self._f = None
+        self._writer = None
+        self.current_path = None
+        self._current_hour_tag = None
+
+        if hourly:
+            self._rotate_if_needed(force=True)
+        else:
+            self._open(path)
+
+    def _open(self, path):
+        import csv
+        self.current_path = path
+        self._f = open(path, 'w', encoding=self.encoding, newline='')
+        self._writer = csv.writer(self._f)
+        self._writer.writerow(LABELSTUDIO_HEADER)
+        self._f.flush()
+
+    def _rotate_if_needed(self, force=False):
+        now = datetime.now()
+        hour_tag = now.strftime('%Y%m%d%H')
+        if not force and hour_tag == self._current_hour_tag:
+            return
+        if self._f is not None:
+            prev_path = self.current_path
+            self._f.close()
+            print(f'  [整点切换] 已保存: {prev_path}')
+        os.makedirs(self.out_dir, exist_ok=True)
+        self._current_hour_tag = hour_tag
+        new_path = os.path.join(self.out_dir, f'{hour_tag}.csv')
+        self._open(new_path)
+        print(f'  新文件: {new_path}')
 
     def write_packet(self, p):
+        if self.hourly:
+            self._rotate_if_needed()
+
         t = p['chip_time']
         if not self.keep_bad_frames:
             if t is None:
@@ -244,6 +290,11 @@ async def run(args):
         pass  # 既不打印数据也不写文件，仅列服务
     elif print_only:
         print('打印模式: 不创建/写入任何文件，仅在终端实时显示数据。')
+    elif args.hourly:
+        writer = LiveCsvWriter(hourly=True, keep_bad_frames=args.keep_bad_frames, out_dir=args.hourly_dir)
+        print(f'长期采集模式: 每到整点自动切换新文件，保存目录 {args.hourly_dir}/，'
+              f'文件名 YYYYMMDDHH.csv（当前: {writer.current_path}）')
+        print('提示: 在 Label Studio 的 Time Series 标注配置里，timeFormat 请填: %Y-%m-%d %H:%M:%S.%L')
     else:
         mac_tag = device.address.replace(':', '').lower()
         ts_tag = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -344,7 +395,7 @@ async def run(args):
             if writer is not None:
                 writer.close()
                 print(f'\n采集结束。共写入 {writer.count_written} 帧，丢弃坏帧 {writer.count_dropped} 个。'
-                      f'\n文件已保存: {output_path}')
+                      f'\n文件已保存: {writer.current_path}')
             elif print_only:
                 print(f'\n采集结束。共打印 {print_count[0]} 帧，丢弃坏帧 {dropped_count_print[0]} 个。'
                       f'\n（打印模式未写入任何文件。）')
@@ -377,6 +428,13 @@ def main():
                      help='漂移评估采集时长（秒），默认 30 秒')
     ap.add_argument('--duration', type=float, default=0,
                      help='采集时长（秒），到时自动停止；不填或填 0 则手动 Ctrl+C 停止')
+    ap.add_argument('--hourly', action='store_true',
+                     help='长期采集模式：每到整点（PC系统时间）自动切换新的CSV文件，'
+                          '文件名 YYYYMMDDHH.csv（例如 2026071309.csv 表示2026-07-13 09点这一小时），'
+                          '避免长时间挂机单个文件过大、或程序意外中断丢失全部数据。'
+                          '与 -o/--output 互斥，此模式下忽略 -o。')
+    ap.add_argument('--hourly-dir', default='data',
+                     help='--hourly 模式下的输出目录，默认 data/')
     args = ap.parse_args()
 
     try:
