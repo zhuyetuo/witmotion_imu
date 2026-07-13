@@ -255,6 +255,15 @@ python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --resample-hz
 
 视频文件第 N 帧与 `{base}_meta.csv` 里 `frame_idx=N` 那一行严格一一对应（按写入顺序保证）。视频默认通过 `ffmpeg` 管道以可变帧率（VFR）写入，每帧的时间戳直接采用写入时刻的真实系统时间，因此**视频总时长天然精确等于真实录制时长**（误差通常 <10ms），与 CSV 完全一致，不需要也无法事后修正。未安装 `ffmpeg` 时会打印警告并退化为固定 fps 写入，此时播放时长可能有 0.1s 级别误差（帧与 CSV 行的对应关系依然准确，只是播放时长显示有偏差）。建议安装 `ffmpeg` 并确保它在 `PATH` 中。
 
+**视频体积**：默认优先用 H.264（`libx264`）编码，比旧版默认的 `mpeg4` 压缩率高很多，同画质下体积通常只有 1/5~1/10。用 `--video-crf` 调整压缩质量（默认 28，数值越大文件越小、画质越差，标注用途 23~30 都够用），比如：
+
+```bash
+python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --video-crf 32   # 文件更小
+python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --video-crf 20   # 画质更好，文件更大
+```
+
+如果 ffmpeg 没有 `libx264` 支持（少见），会自动退化用 `mpeg4`（体积明显更大）。
+
 **关于重复复用 IMU 样本**：如果 IMU 采样率低于摄像头目标帧率，个别帧会拿到与上一帧相同的 IMU 值（不是对齐错误，是当时 IMU 数据确实没变）。想减少这种情况，可以把设备采样率调高于摄像头帧率（比如采集阶段用 50Hz），采集到的高频数据之后可以重采样降到最终部署速率；部署时训练和推理仍应使用统一的目标采样率。
 
 **采样率建议**：最终设备用多少 Hz（如 16Hz），采集、训练、推理三端都应保持一致，避免因采样率不一致导致特征分布偏移。

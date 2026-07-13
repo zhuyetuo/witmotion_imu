@@ -52,6 +52,10 @@ IMU + 摄像头同步采集脚本
     时长，与 CSV 时间戳精确对应，无需（也无法）事后修正 fps。未安装 ffmpeg
     时退化为固定 fps 写入，时长可能有 0.1s 级别误差。
 
+    编码优先用 H.264（libx264，压缩率远高于旧版默认的 mpeg4，同画质下体积
+    通常小 5~10 倍），--video-crf 调整压缩质量（默认 28，数值越大文件越小）；
+    没有 libx264 的 ffmpeg 构建才退化用 mpeg4。
+
 依赖:
     pip install bleak opencv-python
     ffmpeg（用于精确对齐的视频写入，未安装会自动退化并提示）
@@ -458,6 +462,20 @@ def draw_imu_overlay(frame, imu: dict | None, imu_lag_ms: float, imu_missing: bo
     return frame
 
 
+_ffmpeg_encoder_cache = {}
+
+
+def _ffmpeg_has_encoder(name: str) -> bool:
+    if name not in _ffmpeg_encoder_cache:
+        try:
+            result = subprocess.run(['ffmpeg', '-hide_banner', '-encoders'],
+                                     capture_output=True, timeout=10)
+            _ffmpeg_encoder_cache[name] = name.encode() in result.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            _ffmpeg_encoder_cache[name] = False
+    return _ffmpeg_encoder_cache[name]
+
+
 class _FfmpegVfrSink:
     """
     通过管道把每一帧实时喂给 ffmpeg，用 -use_wallclock_as_timestamps 1 让
@@ -467,18 +485,25 @@ class _FfmpegVfrSink:
     按外部指定的 fps 重新计算已有时间戳，所以必须从写入源头就用真实时间。
     """
 
-    def __init__(self, path: str, width: int, height: int):
+    def __init__(self, path: str, width: int, height: int, crf: int = 28):
         self.path = path
+        # 优先用 H.264（libx264），压缩率比 mpeg4 高很多（同画质下体积通常
+        # 只有 mpeg4 的 1/5~1/10），标注用途不需要高码率；没有 libx264 的
+        # ffmpeg 构建（少见）才退化用 mpeg4。
         # 注意：ffmpeg 的编码器名是 mpeg4（写出的 fourcc 才是 mp4v），
         # 不存在名为 "mp4v" 的编码器，写错会导致 ffmpeg 直接报错退出、
         # 输出文件为空/损坏，且之前 stderr=DEVNULL 会把报错吞掉不可见。
+        if _ffmpeg_has_encoder('libx264'):
+            codec_args = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(crf)]
+        else:
+            codec_args = ['-c:v', 'mpeg4', '-q:v', '3']
         self.proc = subprocess.Popen(
             [
                 'ffmpeg', '-y', '-loglevel', 'error',
                 '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-s', f'{width}x{height}',
                 '-use_wallclock_as_timestamps', '1',
                 '-i', '-',
-                '-c:v', 'mpeg4', '-pix_fmt', 'yuv420p', '-vsync', 'vfr', '-q:v', '3',
+                *codec_args, '-pix_fmt', 'yuv420p', '-vsync', 'vfr',
                 path,
             ],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -661,7 +686,7 @@ def run_camera(args):
         raw_path   = f'{base}_raw.csv'
         use_ffmpeg = shutil.which('ffmpeg') is not None
         if use_ffmpeg:
-            video_writer = _FfmpegVfrSink(video_path, actual_w, actual_h)
+            video_writer = _FfmpegVfrSink(video_path, actual_w, actual_h, crf=args.video_crf)
         else:
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             video_writer = _Cv2CfrSink(video_path, fourcc, float(target_fps), actual_w, actual_h)
@@ -896,6 +921,10 @@ def main():
                     help='正式录制前的预热时长（秒），默认 5s。预热期间持续抓帧丢弃、不写入任何'
                          '文件，等摄像头自动曝光/帧率、IMU 连接都稳定后再正式开始计时录制'
                          '（文件名时间戳也是预热结束后的真实时刻）。设为 0 关闭预热。')
+    ap.add_argument('--video-crf', type=int, default=28, choices=range(0, 52), metavar='N',
+                    help='H.264 压缩质量参数 CRF（0-51），默认 28。数值越小画质越好、文件越大；'
+                         '数值越大文件越小、画质越差。标注用途 23~30 都够用，18 以下接近无损但'
+                         '体积明显变大。仅在系统 ffmpeg 支持 libx264 时生效，否则退化用 mpeg4。')
     args = ap.parse_args()
 
     if args.probe:
