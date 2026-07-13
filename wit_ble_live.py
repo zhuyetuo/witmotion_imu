@@ -306,6 +306,7 @@ async def run(args):
     print_count = [0]
     last_good_time_print = [None]
     dropped_count_print = [0]
+    last_status_print = [0.0]
     hz = HzCounter()
 
     def notification_handler(sender, data: bytearray):
@@ -338,7 +339,9 @@ async def run(args):
                       f'{current_hz:.1f}Hz')
             else:
                 writer.write_packet(p)
-                if writer.count_written % 50 == 0:
+                now_mono = time.monotonic()
+                if not args.quiet and now_mono - last_status_print[0] >= args.status_interval:
+                    last_status_print[0] = now_mono
                     acc = p['acc']
                     print(f'  已接收 {writer.count_written} 帧  最新加速度: '
                           f'X={acc[0]:.3f} Y={acc[1]:.3f} Z={acc[2]:.3f} g  '
@@ -435,6 +438,11 @@ def main():
                           '与 -o/--output 互斥，此模式下忽略 -o。')
     ap.add_argument('--hourly-dir', default='data',
                      help='--hourly 模式下的输出目录，默认 data/')
+    ap.add_argument('--status-interval', type=float, default=60.0,
+                     help='写文件模式下状态提示的打印间隔（秒），默认 60 秒打印一次；'
+                          '之前是每 50 帧打印一次，高频采集（如100Hz）时刷屏太快，改成按时间间隔')
+    ap.add_argument('--quiet', action='store_true',
+                     help='完全不打印"已接收 N 帧"这类状态提示（仍会打印连接/丢帧/整点切换等关键信息）')
     args = ap.parse_args()
 
     try:
