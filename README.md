@@ -486,6 +486,9 @@ python imu_camera_sync_multicam.py --camera 0 --camera 1 --imu wit=WTSDCL --imu 
 
 # 每个设备降采样到16Hz，只保留降采样版文件，循环录制每段3分钟
 python imu_camera_sync_multicam.py --camera 0 --camera 1 --imu wit=WTSDCL --imu hicc=EA:CB:3E:CF:00:1A --duration 180 --resample-hz 16 --resample-only --loop
+
+# 常用组合：2路摄像头 + WitMotion + HICC，降采样到16Hz，只保留降采样文件，预热10秒，循环录制每段1分钟，指定保存目录
+python imu_camera_sync_multicam.py --imu wit=WT901BLE68 --imu hicc=EA:CB:3E:CF:00:1A --duration 60 --resample-hz 16 --camera 0 --camera 1 --width 1280 --height 720 --loop --resample-only --out-dir data/multicam_multiimu --warmup-sec 10
 ```
 
 `--camera` 可重复传，第一个对应 `cam1`，第二个对应 `cam2`，以此类推。
