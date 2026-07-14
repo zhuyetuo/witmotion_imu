@@ -218,8 +218,11 @@ async def _run_wit(args):
         packets = buf.feed(bytes(data))
         for pkt in packets:
             p = parse_one_packet(pkt)
-            if p is None or p['chip_time'] is None:
+            if p is None:
                 continue
+            # 只用 PC 时间（pc_ms）做时间戳，不依赖芯片时间：芯片时间需要设备
+            # 用官方上位机校准过才有效，未校时的设备 chip_time 恒为 None，
+            # 之前误把它当成过滤条件会导致这类设备的数据被整体丢弃。
             _push_imu({
                 'pc_ms':  pc_ms,
                 'acc_x':  p['acc'][0],

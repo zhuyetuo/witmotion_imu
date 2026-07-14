@@ -418,6 +418,6 @@ python hicc_drift_analysis.py --address EA:CB:3E:CF:00:1B --duration 120 --plot
 ## 注意事项
 
 - **BLE 一次只能连一个**：同一台设备不能同时被两个程序连接。如果连接失败，先确认没有其他程序（官方上位机、手机 App）占用连接。
-- **WitMotion 校时**：芯片时间需用官方上位机软件校准，本工具不提供写入校时的功能（WT901 系列协议只读）。
+- **WitMotion 校时**：芯片时间需用官方上位机软件校准，本工具不提供写入校时的功能（WT901 系列协议只读）。未校时的设备芯片时间字段无效（`wit_ble_live.py --print-only` 里"片上="会显示空白），`imu_camera_sync.py` 完全不依赖芯片时间（只用电脑时间做时间戳），未校时也能正常采集；但 `wit_ble_live.py` 写 CSV 时默认会丢弃芯片时间无效的帧（`--keep-bad-frames` 可保留，此时时间戳仍用电脑时间，只是不做"时间戳必须递增"的过滤）。
 - **HICC 校时**：连接后会自动下发当前北京时间，无需手动操作。`--no-timesync` 可跳过（设备时钟已准确时使用）。
 - **Label Studio 时间戳**：`timeFormat` 必须填 `%Y-%m-%d %H:%M:%S.%L`，用 `.` 分隔毫秒而非 `:`，否则 Label Studio 会报解析错误。
