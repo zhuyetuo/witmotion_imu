@@ -296,11 +296,21 @@ python imu_camera_sync.py --device wit --name WTSDCL --duration 180 --loop
 
 # 循环录制，每段3分钟，降采样到16Hz，720p
 python imu_camera_sync.py --device wit --name WTSDCL --duration 180 --resample-hz 16 --camera 0 --width 1280 --height 720 --loop
+
+# 指定保存目录（默认 data/，不存在会自动创建）
+python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --out-dir data/session1
+
+# 只保留降采样版文件（resampled mp4/csv），其余中间文件自动删除
+python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --resample-hz 16 --resample-only
 ```
 
 视频默认叠加 IMU 数值、帧率、imu_lag 等信息（标注时可直观判断数据质量）。
 
 **循环录制模式（`--loop`）**：跟 `--duration` 配合使用，每段录制到时自动结束当前片段（各自生成一套完整的 mp4/csv/meta/raw/resampled 文件）、马上开始下一段，一直循环下去，直到你按 `Q`/`ESC` 或 `Ctrl+C` 才真正停止。摄像头和 BLE 连接全程保持不断开、不重连，只在片段边界切换输出文件，适合需要长时间采集但又想按固定时长切片（比如每 1 分钟或 3 分钟一段）方便后续分别标注的场景。
+
+**`--out-dir`（默认 `data`）**：指定录制文件的保存目录，目录不存在会自动创建。
+
+**`--resample-only`**：配合 `--resample-hz` 使用，只保留降采样版的 `{resampled_base}.mp4` / `.csv`，把按帧对齐版的 `{base}.mp4/.csv/_meta.csv/_raw.csv` 全部删掉，省磁盘空间。对齐校验（两个版本）都会先正常跑完再删除文件，不影响校验结果的准确性。
 
 **`--cam-fps`（旧名 `--fps`，仍兼容）只控制摄像头的目标帧率，与 IMU 采样率无关**：IMU 实际采样率完全由设备自身配置决定（比如 WitMotion 上位机设成 100Hz，这里就是 100Hz），跟摄像头帧率是两个独立的东西。采集阶段可以让 IMU 跑得比摄像头快（比如摄像头 20fps + IMU 100Hz），有利于更精确对齐；训练模型前再把 IMU 数据统一降采样到最终产品的实际频率（比如 16Hz）。
 

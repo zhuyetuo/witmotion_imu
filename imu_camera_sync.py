@@ -81,11 +81,18 @@ IMU + 摄像头同步采集脚本
 
     # 循环录制：每段60秒，录完自动开始下一段，直到按 Q/ESC 或 Ctrl+C 才停止
     python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --loop
+
+    # 指定保存目录
+    python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --out-dir data/session1
+
+    # 只保留降采样版文件（resampled mp4/csv），其余中间文件自动删除
+    python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --resample-hz 16 --resample-only
 """
 
 import argparse
 import asyncio
 import csv
+import os
 import shutil
 import subprocess
 import sys
@@ -711,7 +718,8 @@ def _run_one_segment(args, cap, actual_w, actual_h, target_fps, frame_interval,
     ts_tag  = datetime.now().strftime('%Y%m%d_%H%M%S')
     dev_tag = args.device
     mac_tag = ble_mac[0].replace(':', '').lower()
-    base    = f'data/{dev_tag}_{mac_tag}_{ts_tag}'
+    os.makedirs(args.out_dir, exist_ok=True)
+    base    = os.path.join(args.out_dir, f'{dev_tag}_{mac_tag}_{ts_tag}')
 
     video_writer    = None
     imu_csv_file    = None
@@ -928,6 +936,16 @@ def _run_one_segment(args, cap, actual_w, actual_h, target_fps, frame_interval,
             except Exception as e:
                 print(f'对齐校验运行失败: {e}（可手动运行 python check_alignment.py {resampled_base}）')
 
+            if args.resample_only:
+                # 对齐校验已经用到 base.mp4/csv/meta/raw，必须等上面全部跑完才能删，
+                # 只保留降采样版（resampled_base.mp4/.csv）。
+                for p in (f'{base}.mp4', f'{base}.csv', f'{base}_meta.csv', f'{base}_raw.csv'):
+                    try:
+                        os.remove(p)
+                    except OSError as e:
+                        print(f'删除 {p} 失败: {e}')
+                print(f'\n--resample-only: 已删除原始文件，只保留 {resampled_base}.mp4 / .csv')
+
     return should_stop[0]
 
 
@@ -973,6 +991,12 @@ def main():
                     help='循环录制模式：每段 --duration 秒，录完自动开始下一段（各段独立生成一套'
                          '文件），直到按 Q/ESC 或 Ctrl+C 才停止。摄像头/BLE 连接全程保持不重连，'
                          '只在片段边界切换文件。需要配合 --duration 使用。')
+    ap.add_argument('--out-dir', default='data',
+                    help='录制输出目录，默认 data/（目录不存在会自动创建）')
+    ap.add_argument('--resample-only', action='store_true',
+                    help='只保留降采样版文件（{resampled_base}.mp4 / .csv），'
+                         '删除按帧对齐版 {base}.mp4/.csv/_meta.csv/_raw.csv。'
+                         '对齐校验仍会先跑完再删除，不影响校验结果。')
     args = ap.parse_args()
 
     if args.probe:
