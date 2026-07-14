@@ -424,6 +424,9 @@ python imu_camera_sync_multi.py --imu wit=WTSDCL --imu hicc=EA:CB:3E:CF:00:1A --
 
 # 每个设备都降采样到16Hz，只保留降采样版文件，循环录制每段3分钟
 python imu_camera_sync_multi.py --imu wit=WTSDCL --imu hicc=EA:CB:3E:CF:00:1A --duration 180 --resample-hz 16 --resample-only --loop
+
+# 常用组合：WitMotion + HICC，循环录制每段1分钟，降采样到16Hz，720p，只保留降采样文件，指定保存目录
+python imu_camera_sync_multi.py --imu wit=WT901BLE68 --imu hicc=EA:CB:3E:CF:00:1A --duration 60 --resample-hz 16 --camera 0 --width 1280 --height 720 --loop --resample-only --out-dir data/multi_imu
 ```
 
 `--imu` 可重复传，格式为 `类型=标识`：
