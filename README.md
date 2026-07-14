@@ -302,6 +302,12 @@ python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --out-dir dat
 
 # 只保留降采样版文件（resampled mp4/csv），其余中间文件自动删除
 python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --resample-hz 16 --resample-only
+
+# 常用组合：WitMotion，循环录制每段3分钟，降采样到16Hz，720p，只保留降采样文件，指定保存目录
+python imu_camera_sync.py --device wit --name WTSDCL --duration 180 --resample-hz 16 --camera 0 --width 1280 --height 720 --loop --resample-only --out-dir data/imu_video
+
+# 常用组合：HICC，同上
+python imu_camera_sync.py --device hicc --address EA:CB:3E:CF:00:1A --duration 180 --resample-hz 16 --camera 0 --width 1280 --height 720 --loop --resample-only --out-dir data/imu_video
 ```
 
 视频默认叠加 IMU 数值、帧率、imu_lag 等信息（标注时可直观判断数据质量）。
