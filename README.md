@@ -18,6 +18,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `hicc_drift_analysis.py` | HICC 时间漂移分析与线性补偿验证 |
 | `imu_camera_sync.py` | IMU + 摄像头同步采集（BLE 后台线程 + 主线程 OpenCV） |
 | `imu_camera_sync_multi.py` | 一个摄像头 + 多个 IMU 设备同步采集（v1，暂不含 `--loop`/`--resample-hz`/`--probe`） |
+| `check_multi_imu_quality.py` | 统计 `imu_camera_sync_multi.py` 生成的 `_meta.csv` 里各设备的 lag/missing/hz 质量 |
 | `check_alignment.py` | 校验录制的视频与 CSV 是否严格对齐（帧数/时长/起止时间）；`imu_camera_sync.py` 录制结束会自动调用 |
 | `data/` | 采集输出文件目录（CSV、MP4） |
 
@@ -435,6 +436,31 @@ python imu_camera_sync_multi.py --imu wit=D5:34:E2:B9:6F:32 --imu hicc=EA:CB:3E:
 | `{base}_imu1_raw.csv`、`{base}_imu2_raw.csv`... | 各设备的原始 IMU 全量流水，不受摄像头帧率影响 |
 
 录制结束会自动调用 `check_alignment.py` 校验视频帧数与组合 CSV 行数是否一致、起止时间是否对齐（跟 `imu_camera_sync.py` 一样）。
+
+**查看各设备的对齐质量**：`check_alignment.py` 只验证视频和 CSV 整体是否对齐，不区分是哪个设备的问题。想单独看每个设备的 lag_ms 分布、missing 比例、hz 是否达标，用 `check_multi_imu_quality.py`：
+
+```bash
+python check_multi_imu_quality.py data/multi_20260714_164918_meta.csv
+```
+
+输出示例：
+
+```
+总帧数: 1201
+识别到 2 个设备: imu1, imu2
+
+── imu1 ──
+  imu_missing: 12/1201 (1.0%)
+  imu_hz: mean=50.0  min=48.0  max=52.0
+  lag_ms: min=1.2  max=85.3  mean=22.4  median=18.5
+    <=  10 ms:   320 帧 (26.9%)
+    <=  20 ms:   612 帧 (51.5%)
+    ...
+
+── imu2 ──
+  imu_missing: 3/1201 (0.3%)
+  ...
+```
 
 ### 时间漂移分析
 
