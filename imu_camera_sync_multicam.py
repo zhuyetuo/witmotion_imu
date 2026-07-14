@@ -376,24 +376,31 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                     print(f'  [{cam.label}] ✘ 帧数不一致: 视频 {actual_frames} 帧, CSV {frame_idx} 行')
 
             print()
-            print('── 降采样（每个设备独立，配对每路摄像头视频）──')
+            print('── 降采样（每路摄像头 x 每个设备各生成一对同名 mp4/csv）──')
             resampled_pairs = []  # (cam_label, device_label, resampled_base)
             for d in devices:
-                resampled_csv_base = f'{base}_{d.label}_resampled{args.resample_hz:g}hz'
+                if not cameras:
+                    continue
+                # 每个设备只需要算一次降采样，但要让每一对 mp4/csv 文件名（去掉
+                # 扩展名）完全一致才能直接拖进 Label Studio 配对，所以第一路摄像头
+                # 直接把降采样结果写到配对文件名下，其余摄像头再从这份结果复制过去
+                # （内容完全相同，只是复制成不同文件名，方便按文件名对拖拽上传）。
+                first_pair_base = f'{base}_{cameras[0].label}_{d.label}_resampled{args.resample_hz:g}hz'
                 resample_raw_imu(
-                    f'{base}_{d.label}_raw.csv', f'{resampled_csv_base}.csv', args.resample_hz,
+                    f'{base}_{d.label}_raw.csv', f'{first_pair_base}.csv', args.resample_hz,
                     t_start_ms=first_tick_ts_ms, t_end_ms=last_tick_ts_ms,
                 )
-                print(f'  {resampled_csv_base}.csv（{d.label} 降采样，起止时间已对齐）')
                 for cam in cameras:
-                    resampled_video = f'{base}_{cam.label}_{d.label}_resampled{args.resample_hz:g}hz.mp4'
+                    pair_base = f'{base}_{cam.label}_{d.label}_resampled{args.resample_hz:g}hz'
                     try:
-                        shutil.copyfile(f'{base}_{cam.label}.mp4', resampled_video)
-                        print(f'  {resampled_video}（{cam.label} 视频复制，供 Label Studio 与 '
-                              f'{d.label} resampled CSV 配对）')
-                        resampled_pairs.append((cam.label, d.label, resampled_csv_base))
+                        shutil.copyfile(f'{base}_{cam.label}.mp4', f'{pair_base}.mp4')
+                        if cam is not cameras[0]:
+                            shutil.copyfile(f'{first_pair_base}.csv', f'{pair_base}.csv')
+                        print(f'  {pair_base}.mp4 / .csv（{cam.label} 视频 + {d.label} 降采样数据，'
+                              f'文件名一致可直接拖拽配对）')
+                        resampled_pairs.append((cam.label, d.label, pair_base))
                     except OSError as e:
-                        print(f'复制 {resampled_video} 失败: {e}')
+                        print(f'生成 {pair_base} 配对文件失败: {e}')
 
             if args.resample_only:
                 for cam in cameras:
