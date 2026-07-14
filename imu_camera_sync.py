@@ -78,6 +78,9 @@ IMU + 摄像头同步采集脚本
 
     # 预热时间改成 8 秒（默认 5 秒），关闭预热用 --warmup-sec 0
     python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --warmup-sec 8
+
+    # 循环录制：每段60秒，录完自动开始下一段，直到按 Q/ESC 或 Ctrl+C 才停止
+    python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --loop
 """
 
 import argparse
@@ -658,10 +661,14 @@ def run_camera(args):
     print(f'摄像头分辨率: {actual_w}x{actual_h}  摄像头目标帧率: {target_fps} fps（不影响 IMU 采样率，IMU 由设备自身配置）')
 
     record_mode = args.duration and args.duration > 0
+    loop_mode = args.loop and record_mode
+    if args.loop and not record_mode:
+        print('警告: --loop 需要配合 --duration（每段录制时长）使用，已忽略 --loop。')
 
     # 预热：摄像头刚打开时自动曝光/白平衡还没收敛，帧率往往不稳定；IMU 刚连接
     # 也可能有积压/抖动。预热期间持续抓帧丢弃、不写入任何文件，等稳定后再
-    # 正式开始计时录制，文件名时间戳也用预热结束后的真实时刻。
+    # 正式开始计时录制，文件名时间戳也用预热结束后的真实时刻。只在第一段前
+    # 预热一次，循环模式下后续片段不用重新预热（摄像头/IMU 已经稳定）。
     if record_mode and args.warmup_sec > 0:
         print(f'预热 {args.warmup_sec:.1f}s（摄像头/IMU 稳定中，不写入数据）...')
         warmup_until = time.time() + args.warmup_sec
@@ -669,6 +676,37 @@ def run_camera(args):
             cap.read()
             time.sleep(max(0.0, 1.0 / target_fps))
         print(f'预热结束: CAM {_measure_actual_fps(cap, warmup=0, sample=10):.1f}fps  IMU {_current_imu_hz():.1f}Hz')
+
+    try:
+        segment_no = 0
+        while True:
+            segment_no += 1
+            if loop_mode:
+                print(f'\n════ 第 {segment_no} 段录制开始 ════')
+            should_stop = _run_one_segment(
+                args, cap, actual_w, actual_h, target_fps, frame_interval,
+                record_mode, save_overlay,
+            )
+            if not loop_mode or should_stop or stop_event.is_set():
+                break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        cap.release()
+        try:
+            cv2.destroyAllWindows()
+        except cv2.error:
+            pass
+
+
+def _run_one_segment(args, cap, actual_w, actual_h, target_fps, frame_interval,
+                      record_mode, save_overlay) -> bool:
+    """
+    录制一段（--duration 秒），返回是否应该整体停止（True=用户按 q/ESC 或
+    出错/BLE断开，False=正常到时结束，--loop 时会继续录下一段）。
+    """
+    should_stop = [False]
 
     ts_tag  = datetime.now().strftime('%Y%m%d_%H%M%S')
     dev_tag = args.device
@@ -760,6 +798,7 @@ def run_camera(args):
             ret, frame = cap.read()
             if not ret:
                 print('摄像头读取失败，退出。')
+                should_stop[0] = True
                 break
 
             cam_ts    = time.time()
@@ -826,6 +865,7 @@ def run_camera(args):
             except cv2.error:
                 if not record_mode:
                     print('cv2.imshow 不支持（可能是 headless 版本）。')
+                    should_stop[0] = True
                     break
 
             if record_mode and elapsed >= args.duration:
@@ -837,13 +877,14 @@ def run_camera(args):
             except cv2.error:
                 key = 0xFF
             if key in (ord('q'), ord('Q'), 27):
+                should_stop[0] = True
                 break
 
     except KeyboardInterrupt:
-        pass
+        should_stop[0] = True
     finally:
-        stop_event.set()
-        cap.release()
+        if stop_event.is_set():
+            should_stop[0] = True
         if video_writer:
             video_writer.close()
         if imu_csv_file:
@@ -853,10 +894,6 @@ def run_camera(args):
         if raw_csv_file:
             _set_raw_csv_writer(None)  # 先切断 BLE 线程的写入引用，再关闭文件，避免竞态
             raw_csv_file.close()
-        try:
-            cv2.destroyAllWindows()
-        except cv2.error:
-            pass
         print(f'\n共采集 {frame_idx} 帧视频  {elapsed:.1f}s  目标 {target_fps} fps')
         if record_mode:
             print(f'已保存: {base}.mp4')
@@ -890,6 +927,8 @@ def run_camera(args):
                 check_alignment.run_check(resampled_base, meta_base=base, strict_frame_match=False)
             except Exception as e:
                 print(f'对齐校验运行失败: {e}（可手动运行 python check_alignment.py {resampled_base}）')
+
+    return should_stop[0]
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
@@ -930,6 +969,10 @@ def main():
                     help='H.264 压缩质量参数 CRF（0-51），默认 28。数值越小画质越好、文件越大；'
                          '数值越大文件越小、画质越差。标注用途 23~30 都够用，18 以下接近无损但'
                          '体积明显变大。仅在系统 ffmpeg 支持 libx264 时生效，否则退化用 mpeg4。')
+    ap.add_argument('--loop', action='store_true',
+                    help='循环录制模式：每段 --duration 秒，录完自动开始下一段（各段独立生成一套'
+                         '文件），直到按 Q/ESC 或 Ctrl+C 才停止。摄像头/BLE 连接全程保持不重连，'
+                         '只在片段边界切换文件。需要配合 --duration 使用。')
     args = ap.parse_args()
 
     if args.probe:
