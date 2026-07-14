@@ -293,6 +293,9 @@ python imu_camera_sync.py --device wit --name WTSDCL --duration 60 --loop
 
 # 循环录制，每段3分钟
 python imu_camera_sync.py --device wit --name WTSDCL --duration 180 --loop
+
+# 循环录制，每段3分钟，降采样到16Hz，720p
+python imu_camera_sync.py --device wit --name WTSDCL --duration 180 --resample-hz 16 --camera 0 --width 1280 --height 720 --loop
 ```
 
 视频默认叠加 IMU 数值、帧率、imu_lag 等信息（标注时可直观判断数据质量）。
