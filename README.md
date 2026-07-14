@@ -17,6 +17,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `wit_drift_analysis.py` | WitMotion 时间漂移分析与线性补偿验证 |
 | `hicc_drift_analysis.py` | HICC 时间漂移分析与线性补偿验证 |
 | `imu_camera_sync.py` | IMU + 摄像头同步采集（BLE 后台线程 + 主线程 OpenCV） |
+| `imu_camera_sync_multi.py` | 一个摄像头 + 多个 IMU 设备同步采集（v1，暂不含 `--loop`/`--resample-hz`/`--probe`） |
 | `check_alignment.py` | 校验录制的视频与 CSV 是否严格对齐（帧数/时长/起止时间）；`imu_camera_sync.py` 录制结束会自动调用 |
 | `data/` | 采集输出文件目录（CSV、MP4） |
 
@@ -402,6 +403,36 @@ python check_alignment.py data/wit_d534e2b96f32_20260703_105514.mp4
 视频文件本身不含绝对时间戳，脚本会优先读取同目录的 `{base}_meta.csv` 拿到每帧真实的系统时间作为视频起止时间（最准确）；如果没有 `_meta.csv`，退化为从文件名解析录制起始时间 + 视频时长估算（仅精确到秒）。
 
 判定标准：**帧数与 CSV 行数必须严格相等**（一帧一行是硬性对齐条件）；时长、起止时间允许有 ≤0.5s 的误差（正常安装 ffmpeg 的情况下通常在 10ms 以内；若 ffmpeg 不可用会退化为固定 fps 写入，此时时长可能有 0.1s 级别误差，不代表帧错位）。
+
+### 一个摄像头 + 多个 IMU 设备同步采集
+
+`imu_camera_sync_multi.py` 是 `imu_camera_sync.py` 的多设备版本，同一路摄像头同时对齐多台 IMU（WitMotion 和/或 HICC 混用都可以）。v1 版本先做核心功能，暂不包含 `--loop`/`--resample-hz`/`--probe`/`--resample-only` 这些 `imu_camera_sync.py` 里的高级选项。
+
+```bash
+# 一个摄像头 + 2 个 WitMotion 设备
+python imu_camera_sync_multi.py --imu wit=WTSDCL1 --imu wit=WTSDCL2 --duration 60
+
+# 1个 WitMotion + 1个 HICC 混用（HICC 必须用 MAC 地址）
+python imu_camera_sync_multi.py --imu wit=WTSDCL --imu hicc=EA:CB:3E:CF:00:1A --duration 60
+
+# WitMotion 也可以直接用 MAC 地址指定，不用按名称模糊匹配
+python imu_camera_sync_multi.py --imu wit=D5:34:E2:B9:6F:32 --imu hicc=EA:CB:3E:CF:00:1A --duration 60
+```
+
+`--imu` 可重复传，格式为 `类型=标识`：
+- `wit=<名称关键字或MAC地址>`（自动识别标识是不是 MAC 格式）
+- `hicc=<MAC地址>`（HICC 必须用 MAC 地址）
+
+第一个 `--imu` 对应 `imu1`，第二个对应 `imu2`，以此类推，输出的列名/文件名都用这个编号区分。
+
+**输出文件：**
+
+| 文件 | 内容 |
+|---|---|
+| `{base}.mp4` | 视频（VFR，含叠加信息，同时显示每个设备的 Hz/lag） |
+| `{base}.csv` | 每帧一行：`timestamp, imu1_acc_x...imu1_gyro_z, imu2_acc_x...imu2_gyro_z, ...` |
+| `{base}_meta.csv` | 每帧一行，每个设备的 `imu_timestamp/lag_ms/missing/hz` 等对齐信息 |
+| `{base}_imu1_raw.csv`、`{base}_imu2_raw.csv`... | 各设备的原始 IMU 全量流水，不受摄像头帧率影响 |
 
 ### 时间漂移分析
 
