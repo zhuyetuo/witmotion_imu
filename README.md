@@ -434,6 +434,8 @@ python imu_camera_sync_multi.py --imu wit=D5:34:E2:B9:6F:32 --imu hicc=EA:CB:3E:
 | `{base}_meta.csv` | 每帧一行，每个设备的 `imu_timestamp/lag_ms/missing/hz` 等对齐信息 |
 | `{base}_imu1_raw.csv`、`{base}_imu2_raw.csv`... | 各设备的原始 IMU 全量流水，不受摄像头帧率影响 |
 
+录制结束会自动调用 `check_alignment.py` 校验视频帧数与组合 CSV 行数是否一致、起止时间是否对齐（跟 `imu_camera_sync.py` 一样）。
+
 ### 时间漂移分析
 
 ```bash

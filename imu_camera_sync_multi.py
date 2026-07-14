@@ -458,6 +458,13 @@ def run_camera(args, devices: list[ImuDevice]):
             print(f'已保存: {base}.mp4  {base}.csv  {base}_meta.csv')
             for d in devices:
                 print(f'       {base}_{d.label}_raw.csv')
+            print()
+            print('── 自动对齐校验 ──')
+            try:
+                import check_alignment
+                check_alignment.run_check(base)
+            except Exception as e:
+                print(f'对齐校验运行失败: {e}（可手动运行 python check_alignment.py {base}）')
 
 
 def parse_imu_spec(spec: str) -> tuple[str, str]:
