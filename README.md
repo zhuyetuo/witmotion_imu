@@ -18,6 +18,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `hicc_drift_analysis.py` | HICC 时间漂移分析与线性补偿验证 |
 | `imu_camera_sync.py` | IMU + 摄像头同步采集（BLE 后台线程 + 主线程 OpenCV） |
 | `imu_camera_sync_multi.py` | 一个摄像头 + 多个 IMU 设备同步采集，功能已跟 `imu_camera_sync.py` 对齐（含 `--loop`/`--resample-hz`/`--probe`/`--resample-only`） |
+| `imu_camera_sync_multicam.py` | 多个摄像头 + 多个 IMU 设备同步采集（v1，暂不含 `--loop`/`--resample-hz`/`--probe`），复用 `imu_camera_sync_multi.py` 的 BLE 部分 |
 | `check_multi_imu_quality.py` | 统计 `imu_camera_sync_multi.py` 生成的 `_meta.csv` 里各设备的 lag/missing/hz 质量 |
 | `check_alignment.py` | 校验录制的视频与 CSV 是否严格对齐（帧数/时长/起止时间）；`imu_camera_sync.py` 录制结束会自动调用 |
 | `data/` | 采集输出文件目录（CSV、MP4） |
@@ -471,6 +472,28 @@ python check_multi_imu_quality.py data/multi_20260714_164918_meta.csv
   imu_missing: 3/1201 (0.3%)
   ...
 ```
+
+### 多个摄像头 + 多个 IMU 设备同步采集
+
+`imu_camera_sync_multicam.py` 在 `imu_camera_sync_multi.py`（一个摄像头+多IMU）基础上再扩展一维，支持同时开多路摄像头，每路摄像头独立写视频，所有摄像头 + 所有 IMU 设备共用同一份"每个tick一行"的组合 CSV（同一时刻同时抓取所有摄像头画面 + 匹配所有 IMU 设备最近的样本）。IMU 部分复用 `imu_camera_sync_multi.py` 的 `ImuDevice`/BLE 连接逻辑，`--imu` 用法完全一样。v1 版本先做核心录制功能，暂不包含 `--loop`/`--resample-hz`/`--probe`/`--resample-only`。
+
+```bash
+# 2个摄像头 + 2个IMU设备
+python imu_camera_sync_multicam.py --camera 0 --camera 1 --imu wit=WTSDCL --imu hicc=EA:CB:3E:CF:00:1A --duration 60
+```
+
+`--camera` 可重复传，第一个对应 `cam1`，第二个对应 `cam2`，以此类推。
+
+**输出文件：**
+
+| 文件 | 内容 |
+|---|---|
+| `{base}_cam1.mp4`、`{base}_cam2.mp4`... | 每路摄像头各自的视频（VFR，含叠加信息） |
+| `{base}.csv` | 每个tick一行：`timestamp, imu1_acc_x...imu1_gyro_z, imu2_acc_x...imu2_gyro_z, ...` |
+| `{base}_meta.csv` | 每行的对齐信息：各摄像头的 fps，各IMU设备的 lag_ms/missing/hz |
+| `{base}_imu1_raw.csv`、`{base}_imu2_raw.csv`... | 各 IMU 设备的原始全量流水 |
+
+由于每个 tick 都是同时抓取所有摄像头一帧，所以每路视频的帧数理论上都应该严格等于组合 CSV 的行数；录制结束会自动逐个摄像头核对这一点（不复用 `check_alignment.py`，因为它假设视频和 CSV 同名成对，这里是 N 路视频共享 1 份 CSV，命名规则不满足它的假设）。
 
 ### 时间漂移分析
 
