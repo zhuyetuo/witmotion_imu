@@ -35,8 +35,12 @@
     {base}_meta.csv                            每行的对齐信息：各摄像头的 fps，各IMU设备的
                                                 lag_ms/missing/hz
     {base}_imu1_raw.csv, {base}_imu2_raw.csv... 各 IMU 设备的原始全量流水
-    {base}_cam1_imu1_resampled{HZ}hz.mp4/.csv...  每路摄像头 x 每个设备的降采样配对文件
-                                                （--resample-hz 指定目标频率，默认25）
+    {base}_imu1_resampled{HZ}hz.csv, {base}_imu2_resampled{HZ}hz.csv...
+        每个设备各自降采样后的 CSV（--resample-hz 指定目标频率，默认25）。
+        不复制视频——Label Studio 的 sync 机制支持同一页面放多个 Video +
+        多个 TimeSeries（只要 sync 属性一样就会联动），通过任务 JSON 里的
+        字段名绑定文件，不需要文件名匹配，直接把 N 路摄像头视频 + M 个
+        设备的降采样 CSV 一起加载进去即可自由切换查看。
 """
 
 import argparse
@@ -376,8 +380,11 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                     print(f'  [{cam.label}] ✘ 帧数不一致: 视频 {actual_frames} 帧, CSV {frame_idx} 行')
 
             print()
-            print('── 降采样（每个设备独立，配对每路摄像头视频）──')
-            resampled_pairs = []  # (cam_label, device_label, resampled_base)
+            print('── 降采样（每个设备独立一份，不复制视频）──')
+            # Label Studio 的 sync 机制支持同一个标注页面放多个 <Video> + 多个
+            # <TimeSeries>（只要 sync 属性值一样就会联动播放），是通过任务 JSON
+            # 里显式的字段名绑定文件，不是靠文件名匹配——所以不需要为每路摄像头
+            # 都复制一份视频来"凑同名"，摄像头视频保持每路一份即可。
             for d in devices:
                 resampled_csv_base = f'{base}_{d.label}_resampled{args.resample_hz:g}hz'
                 resample_raw_imu(
@@ -385,22 +392,8 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                     t_start_ms=first_tick_ts_ms, t_end_ms=last_tick_ts_ms,
                 )
                 print(f'  {resampled_csv_base}.csv（{d.label} 降采样，起止时间已对齐）')
-                for cam in cameras:
-                    resampled_video = f'{base}_{cam.label}_{d.label}_resampled{args.resample_hz:g}hz.mp4'
-                    try:
-                        shutil.copyfile(f'{base}_{cam.label}.mp4', resampled_video)
-                        print(f'  {resampled_video}（{cam.label} 视频复制，供 Label Studio 与 '
-                              f'{d.label} resampled CSV 配对）')
-                        resampled_pairs.append((cam.label, d.label, resampled_csv_base))
-                    except OSError as e:
-                        print(f'复制 {resampled_video} 失败: {e}')
 
             if args.resample_only:
-                for cam in cameras:
-                    try:
-                        os.remove(f'{base}_{cam.label}.mp4')
-                    except OSError as e:
-                        print(f'删除 {base}_{cam.label}.mp4 失败: {e}')
                 for p in (f'{base}.csv', f'{base}_meta.csv'):
                     try:
                         os.remove(p)
@@ -411,7 +404,8 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                         os.remove(f'{base}_{d.label}_raw.csv')
                     except OSError as e:
                         print(f'删除 {base}_{d.label}_raw.csv 失败: {e}')
-                print(f'\n--resample-only: 已删除原始文件，只保留各摄像头x设备的 resampled mp4/csv')
+                print(f'\n--resample-only: 已删除组合CSV/meta/原始流水，保留各摄像头视频（{" ".join(f"{base}_{c.label}.mp4" for c in cameras)}）'
+                      f'和各设备降采样CSV，请在 Label Studio 里用 sync 同时加载。')
 
     return should_stop[0]
 

@@ -498,11 +498,38 @@ python imu_camera_sync_multicam.py --camera 0 --camera 1 --imu wit=WTSDCL --imu 
 | `{base}.csv` | 每个tick一行：`timestamp, imu1_acc_x...imu1_gyro_z, imu2_acc_x...imu2_gyro_z, ...` |
 | `{base}_meta.csv` | 每行的对齐信息：各摄像头的 fps，各IMU设备的 lag_ms/missing/hz |
 | `{base}_imu1_raw.csv`、`{base}_imu2_raw.csv`... | 各 IMU 设备的原始全量流水 |
-| `{base}_cam1_imu1_resampled{HZ}hz.mp4/.csv`... | 每路摄像头 x 每个设备的降采样配对文件（`--resample-hz` 指定目标频率） |
+| `{base}_imu1_resampled{HZ}hz.csv`、`{base}_imu2_resampled{HZ}hz.csv`... | 每个设备各自降采样后的 CSV（`--resample-hz` 指定目标频率），**不复制视频** |
 
 由于每个 tick 都是同时抓取所有摄像头一帧，所以每路视频的帧数理论上都应该严格等于组合 CSV 的行数；录制结束会自动逐个摄像头核对这一点（不复用 `check_alignment.py`，因为它假设视频和 CSV 同名成对，这里是 N 路视频共享 1 份 CSV，命名规则不满足它的假设）。
 
-**降采样配对**：每个 IMU 设备降采样后的 CSV，会跟**每一路摄像头**的视频各配一份（`{base}_camX_imuY_resampled{HZ}hz.mp4/.csv`），比如 2 路摄像头 + 2 个设备会生成 4 组配对文件，方便挑任意一路摄像头画面配任意一个设备的数据去 Label Studio 标注。`--resample-only` 会在生成完所有配对文件后，删除原始的 `{base}_camN.mp4`、`{base}.csv`、`{base}_meta.csv`、`{base}_imuN_raw.csv`。
+**降采样输出不复制视频**：Label Studio 的 `sync` 机制支持同一个标注页面放多个 `<Video>` + 多个 `<TimeSeries>`（只要 `sync` 属性值一样就会联动播放），是通过任务 JSON 里显式的字段名（`value="$video1"`、`value="$csv1"` 等）绑定文件，**不是靠文件名匹配**。所以 N 路摄像头 + M 个设备不需要生成 N×M 份视频复制品，直接把 N 个原始摄像头视频 + M 个设备的降采样 CSV 一起加到 Label Studio 的任务 JSON 里、配置里都设成同一个 `sync` 组即可自由联动查看/标注，比如：
+
+```xml
+<View>
+  <Video name="video1" value="$video1" sync="sync_group"/>
+  <Video name="video2" value="$video2" sync="sync_group"/>
+
+  <TimeSeriesLabels name="label" toName="ts1">
+    <Label value="活动" background="#4CAF50"/>
+    <Label value="睡觉" background="#2196F3"/>
+    <Label value="抓挠" background="#F44336"/>
+  </TimeSeriesLabels>
+
+  <TimeSeries name="ts1" value="$csv1" sync="sync_group" timeColumn="timestamp"
+              timeFormat="%Y-%m-%d %H:%M:%S.%f" sep=",">
+    <Channel column="acc_x" strokeColor="#e74c3c" legend="imu1 Acc X" height="60"/>
+    <!-- ... -->
+  </TimeSeries>
+
+  <TimeSeries name="ts2" value="$csv2" sync="sync_group" timeColumn="timestamp"
+              timeFormat="%Y-%m-%d %H:%M:%S.%f" sep=",">
+    <Channel column="acc_x" strokeColor="#e74c3c" legend="imu2 Acc X" height="60"/>
+    <!-- ... -->
+  </TimeSeries>
+</View>
+```
+
+`--resample-only` 会删除组合 `{base}.csv`/`{base}_meta.csv`/`{base}_imuN_raw.csv`，但保留每路摄像头的原始视频（`{base}_camN.mp4`，只有 N 份，不重复）和各设备降采样后的 CSV。
 
 ### 时间漂移分析
 
