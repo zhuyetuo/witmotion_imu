@@ -8,14 +8,22 @@
 同一份"每帧一行"的组合 CSV（同一时刻抓取所有摄像头的画面 + 匹配所有 IMU
 设备最近的样本）。
 
-v1 版本先做核心录制功能，暂不包含 imu_camera_sync.py / imu_camera_sync_multi.py
-里的 --loop / --resample-hz / --probe / --resample-only 这些高级选项——
-先跑通"多摄像头+多IMU"这一层同步，验证没问题后再按需搬过来。
+功能已跟 imu_camera_sync.py / imu_camera_sync_multi.py 对齐：--loop /
+--resample-hz / --probe / --resample-only 全部支持。
 
 用法:
     # 2个摄像头 + 2个IMU设备
     python imu_camera_sync_multicam.py --camera 0 --camera 1 \\
         --imu wit=WTSDCL --imu hicc=EA:CB:3E:CF:00:1A --duration 60
+
+    # 探测硬件能力：每路摄像头 + 每个 IMU 设备实际输出频率
+    python imu_camera_sync_multicam.py --camera 0 --camera 1 \\
+        --imu wit=WTSDCL --imu hicc=EA:CB:3E:CF:00:1A --probe
+
+    # 每个设备降采样到16Hz，只保留降采样版文件，循环录制每段3分钟
+    python imu_camera_sync_multicam.py --camera 0 --camera 1 \\
+        --imu wit=WTSDCL --imu hicc=EA:CB:3E:CF:00:1A \\
+        --duration 180 --resample-hz 16 --resample-only --loop
 
 --camera 可重复传，第一个对应 cam1，第二个对应 cam2，以此类推。
 --imu 用法跟 imu_camera_sync_multi.py 完全一样（type=标识，可重复传）。
@@ -27,6 +35,8 @@ v1 版本先做核心录制功能，暂不包含 imu_camera_sync.py / imu_camera
     {base}_meta.csv                            每行的对齐信息：各摄像头的 fps，各IMU设备的
                                                 lag_ms/missing/hz
     {base}_imu1_raw.csv, {base}_imu2_raw.csv... 各 IMU 设备的原始全量流水
+    {base}_cam1_imu1_resampled{HZ}hz.mp4/.csv...  每路摄像头 x 每个设备的降采样配对文件
+                                                （--resample-hz 指定目标频率，默认25）
 """
 
 import argparse
@@ -44,7 +54,9 @@ except ImportError:
     print('缺少 opencv-python，请先安装: pip install opencv-python')
     sys.exit(1)
 
-from imu_camera_sync import _FfmpegVfrSink, _Cv2CfrSink, _measure_actual_fps
+from imu_camera_sync import (
+    _FfmpegVfrSink, _Cv2CfrSink, _measure_actual_fps, probe_camera, resample_raw_imu,
+)
 from imu_camera_sync_multi import (
     ImuDevice, ble_thread_main, parse_imu_spec, stop_event, _new_sample_event,
 )
@@ -77,10 +89,14 @@ class CameraStream:
         self.ts_window.append(now)
         return float(len(self.ts_window))
 
-    def release(self):
-        self.cap.release()
+    def close_writer(self):
         if self.video_writer:
             self.video_writer.close()
+            self.video_writer = None
+
+    def release(self):
+        self.cap.release()
+        self.close_writer()
 
 
 def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame_idx):
@@ -115,14 +131,14 @@ def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame
 
 def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice]):
     target_fps = args.cam_fps
-    frame_interval = 1.0 / target_fps
-    save_overlay = not args.no_save_overlay
-    imu_sync = not args.no_imu_sync
 
     for cam in cameras:
         print(f'{cam.label} ({cam.index}): {cam.actual_w}x{cam.actual_h}  目标帧率: {target_fps}fps')
 
     record_mode = args.duration and args.duration > 0
+    loop_mode = args.loop and record_mode
+    if args.loop and not record_mode:
+        print('警告: --loop 需要配合 --duration 使用，已忽略 --loop。')
 
     if record_mode and args.warmup_sec > 0:
         print(f'预热 {args.warmup_sec:.1f}s...')
@@ -135,6 +151,35 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice]):
             f'{c.label}={_measure_actual_fps(c.cap, warmup=0, sample=10):.1f}fps' for c in cameras)
         imu_report = '  '.join(f'{d.label}={d.current_hz():.1f}Hz' for d in devices)
         print(f'预热结束: {cam_report}  {imu_report}')
+
+    try:
+        segment_no = 0
+        while True:
+            segment_no += 1
+            if loop_mode:
+                print(f'\n════ 第 {segment_no} 段录制开始 ════')
+            should_stop = _run_one_segment(args, cameras, devices, target_fps, record_mode)
+            if not loop_mode or should_stop or stop_event.is_set():
+                break
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
+        for cam in cameras:
+            cam.release()
+        try:
+            cv2.destroyAllWindows()
+        except cv2.error:
+            pass
+
+
+def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice],
+                      target_fps: int, record_mode: bool) -> bool:
+    """录制一段，返回是否应该整体停止（True=用户退出/出错，False=正常到时结束）。"""
+    should_stop = [False]
+    frame_interval = 1.0 / target_fps
+    save_overlay = not args.no_save_overlay
+    imu_sync = not args.no_imu_sync
 
     ts_tag = datetime.now().strftime('%Y%m%d_%H%M%S')
     os.makedirs(args.out_dir, exist_ok=True)
@@ -190,6 +235,8 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice]):
     next_tick = start_time
     frame_idx = 0
     elapsed = 0.0
+    first_tick_ts_ms = None
+    last_tick_ts_ms = None
     max_lag_ms = 3 * (1000.0 / target_fps)
 
     try:
@@ -215,6 +262,10 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice]):
             if tick_ts < start_time:
                 continue
 
+            if first_tick_ts_ms is None:
+                first_tick_ts_ms = tick_ts_ms
+            last_tick_ts_ms = tick_ts_ms
+
             frames = []
             read_failed = False
             for cam in cameras:
@@ -222,6 +273,7 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice]):
                 if not ret:
                     print(f'{cam.label} 读取失败，退出。')
                     read_failed = True
+                    should_stop[0] = True
                     break
                 frames.append(frame)
             if read_failed:
@@ -268,6 +320,7 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice]):
                     if not record_mode:
                         print('cv2.imshow 不支持（可能是 headless 版本）。')
                         read_failed = True
+                        should_stop[0] = True
 
             if read_failed:
                 break
@@ -281,14 +334,16 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice]):
             except cv2.error:
                 key = 0xFF
             if key in (ord('q'), ord('Q'), 27):
+                should_stop[0] = True
                 break
 
     except KeyboardInterrupt:
-        pass
+        should_stop[0] = True
     finally:
-        stop_event.set()
+        if stop_event.is_set():
+            should_stop[0] = True
         for cam in cameras:
-            cam.release()
+            cam.close_writer()
         if csv_file:
             csv_file.close()
         if meta_file:
@@ -297,10 +352,6 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice]):
             d.set_raw_writer(None)
             if hasattr(d, '_raw_file'):
                 d._raw_file.close()
-        try:
-            cv2.destroyAllWindows()
-        except cv2.error:
-            pass
         print(f'\n共采集 {frame_idx} 个同步tick  {elapsed:.1f}s')
         if record_mode:
             print(f'已保存: {base}.csv  {base}_meta.csv')
@@ -324,6 +375,65 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice]):
                 else:
                     print(f'  [{cam.label}] ✘ 帧数不一致: 视频 {actual_frames} 帧, CSV {frame_idx} 行')
 
+            print()
+            print('── 降采样（每个设备独立，配对每路摄像头视频）──')
+            resampled_pairs = []  # (cam_label, device_label, resampled_base)
+            for d in devices:
+                resampled_csv_base = f'{base}_{d.label}_resampled{args.resample_hz:g}hz'
+                resample_raw_imu(
+                    f'{base}_{d.label}_raw.csv', f'{resampled_csv_base}.csv', args.resample_hz,
+                    t_start_ms=first_tick_ts_ms, t_end_ms=last_tick_ts_ms,
+                )
+                print(f'  {resampled_csv_base}.csv（{d.label} 降采样，起止时间已对齐）')
+                for cam in cameras:
+                    resampled_video = f'{base}_{cam.label}_{d.label}_resampled{args.resample_hz:g}hz.mp4'
+                    try:
+                        shutil.copyfile(f'{base}_{cam.label}.mp4', resampled_video)
+                        print(f'  {resampled_video}（{cam.label} 视频复制，供 Label Studio 与 '
+                              f'{d.label} resampled CSV 配对）')
+                        resampled_pairs.append((cam.label, d.label, resampled_csv_base))
+                    except OSError as e:
+                        print(f'复制 {resampled_video} 失败: {e}')
+
+            if args.resample_only:
+                for cam in cameras:
+                    try:
+                        os.remove(f'{base}_{cam.label}.mp4')
+                    except OSError as e:
+                        print(f'删除 {base}_{cam.label}.mp4 失败: {e}')
+                for p in (f'{base}.csv', f'{base}_meta.csv'):
+                    try:
+                        os.remove(p)
+                    except OSError as e:
+                        print(f'删除 {p} 失败: {e}')
+                for d in devices:
+                    try:
+                        os.remove(f'{base}_{d.label}_raw.csv')
+                    except OSError as e:
+                        print(f'删除 {base}_{d.label}_raw.csv 失败: {e}')
+                print(f'\n--resample-only: 已删除原始文件，只保留各摄像头x设备的 resampled mp4/csv')
+
+    return should_stop[0]
+
+
+def run_probe(args, cam_indices: list[int], devices: list[ImuDevice], probe_seconds: float = 5.0):
+    """探测每路摄像头能力 + 短暂连接所有 IMU 设备测量各自实际输出频率，不录制。"""
+    for i, cam_idx in enumerate(cam_indices, start=1):
+        print(f'── cam{i} (摄像头 {cam_idx}) ──')
+        probe_camera(cam_idx)
+
+    print(f'── IMU 设备能力探测（连接 {probe_seconds:.0f} 秒测量各设备实际频率）──')
+    t = threading.Thread(target=ble_thread_main, args=(devices, args.scan_timeout), daemon=True)
+    t.start()
+    time.sleep(2.0 + probe_seconds)
+    stop_event.set()
+    t.join(timeout=3.0)
+
+    for d in devices:
+        print(f'  [{d.label}] ({d.dev_type}={d.ident})  实际输出频率: 约 {d.current_hz():.1f} Hz')
+    print('  （这是设备当前配置的频率，不是"最大支持频率"；WitMotion 具体可选档位需要在'
+          '官方上位机软件里查看/修改。）')
+
 
 def main():
     ap = argparse.ArgumentParser(description='多个摄像头 + 多个 IMU 设备同步采集')
@@ -341,6 +451,14 @@ def main():
     ap.add_argument('--scan-timeout', type=float, default=8.0, help='BLE 扫描超时（秒），默认 8')
     ap.add_argument('--no-save-overlay', action='store_true', help='保存干净视频（不含叠加信息）')
     ap.add_argument('--no-imu-sync', action='store_true', help='关闭事件驱动同步，改用固定定时器抓帧')
+    ap.add_argument('--resample-hz', type=float, default=25.0,
+                    help='录制结束后把每个设备的原始IMU流水降采样到该频率，默认25Hz')
+    ap.add_argument('--resample-only', action='store_true',
+                    help='只保留各摄像头x设备的降采样版文件，删除原始的 {base}_camN.mp4/.csv/_meta.csv/_raw.csv')
+    ap.add_argument('--loop', action='store_true',
+                    help='循环录制模式：每段 --duration 秒，录完自动开始下一段，直到按 Q/ESC 或 Ctrl+C 才停止')
+    ap.add_argument('--probe', action='store_true',
+                    help='只探测硬件能力（每路摄像头 + 各IMU设备当前实际输出频率），不录制，探测完直接退出')
     args = ap.parse_args()
 
     devices = []
@@ -351,6 +469,10 @@ def main():
             print(e)
             sys.exit(1)
         devices.append(ImuDevice(dev_type, ident, label=f'imu{i}'))
+
+    if args.probe:
+        run_probe(args, args.camera, devices)
+        return
 
     cameras = []
     for i, cam_idx in enumerate(args.camera, start=1):

@@ -18,7 +18,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `hicc_drift_analysis.py` | HICC 时间漂移分析与线性补偿验证 |
 | `imu_camera_sync.py` | IMU + 摄像头同步采集（BLE 后台线程 + 主线程 OpenCV） |
 | `imu_camera_sync_multi.py` | 一个摄像头 + 多个 IMU 设备同步采集，功能已跟 `imu_camera_sync.py` 对齐（含 `--loop`/`--resample-hz`/`--probe`/`--resample-only`） |
-| `imu_camera_sync_multicam.py` | 多个摄像头 + 多个 IMU 设备同步采集（v1，暂不含 `--loop`/`--resample-hz`/`--probe`），复用 `imu_camera_sync_multi.py` 的 BLE 部分 |
+| `imu_camera_sync_multicam.py` | 多个摄像头 + 多个 IMU 设备同步采集，功能已跟 `imu_camera_sync.py`/`imu_camera_sync_multi.py` 对齐（含 `--loop`/`--resample-hz`/`--probe`/`--resample-only`），复用 `imu_camera_sync_multi.py` 的 BLE 部分 |
 | `check_multi_imu_quality.py` | 统计 `imu_camera_sync_multi.py` 生成的 `_meta.csv` 里各设备的 lag/missing/hz 质量 |
 | `check_alignment.py` | 校验录制的视频与 CSV 是否严格对齐（帧数/时长/起止时间）；`imu_camera_sync.py` 录制结束会自动调用 |
 | `data/` | 采集输出文件目录（CSV、MP4） |
@@ -475,11 +475,17 @@ python check_multi_imu_quality.py data/multi_20260714_164918_meta.csv
 
 ### 多个摄像头 + 多个 IMU 设备同步采集
 
-`imu_camera_sync_multicam.py` 在 `imu_camera_sync_multi.py`（一个摄像头+多IMU）基础上再扩展一维，支持同时开多路摄像头，每路摄像头独立写视频，所有摄像头 + 所有 IMU 设备共用同一份"每个tick一行"的组合 CSV（同一时刻同时抓取所有摄像头画面 + 匹配所有 IMU 设备最近的样本）。IMU 部分复用 `imu_camera_sync_multi.py` 的 `ImuDevice`/BLE 连接逻辑，`--imu` 用法完全一样。v1 版本先做核心录制功能，暂不包含 `--loop`/`--resample-hz`/`--probe`/`--resample-only`。
+`imu_camera_sync_multicam.py` 在 `imu_camera_sync_multi.py`（一个摄像头+多IMU）基础上再扩展一维，支持同时开多路摄像头，每路摄像头独立写视频，所有摄像头 + 所有 IMU 设备共用同一份"每个tick一行"的组合 CSV（同一时刻同时抓取所有摄像头画面 + 匹配所有 IMU 设备最近的样本）。IMU 部分复用 `imu_camera_sync_multi.py` 的 `ImuDevice`/BLE 连接逻辑，`--imu` 用法完全一样。功能已跟单摄像头版本对齐，`--loop`/`--resample-hz`/`--probe`/`--resample-only`/`--no-save-overlay`/`--no-imu-sync` 全部支持。
 
 ```bash
 # 2个摄像头 + 2个IMU设备
 python imu_camera_sync_multicam.py --camera 0 --camera 1 --imu wit=WTSDCL --imu hicc=EA:CB:3E:CF:00:1A --duration 60
+
+# 探测硬件能力：每路摄像头 + 每个 IMU 设备实际输出频率
+python imu_camera_sync_multicam.py --camera 0 --camera 1 --imu wit=WTSDCL --imu hicc=EA:CB:3E:CF:00:1A --probe
+
+# 每个设备降采样到16Hz，只保留降采样版文件，循环录制每段3分钟
+python imu_camera_sync_multicam.py --camera 0 --camera 1 --imu wit=WTSDCL --imu hicc=EA:CB:3E:CF:00:1A --duration 180 --resample-hz 16 --resample-only --loop
 ```
 
 `--camera` 可重复传，第一个对应 `cam1`，第二个对应 `cam2`，以此类推。
@@ -492,8 +498,11 @@ python imu_camera_sync_multicam.py --camera 0 --camera 1 --imu wit=WTSDCL --imu 
 | `{base}.csv` | 每个tick一行：`timestamp, imu1_acc_x...imu1_gyro_z, imu2_acc_x...imu2_gyro_z, ...` |
 | `{base}_meta.csv` | 每行的对齐信息：各摄像头的 fps，各IMU设备的 lag_ms/missing/hz |
 | `{base}_imu1_raw.csv`、`{base}_imu2_raw.csv`... | 各 IMU 设备的原始全量流水 |
+| `{base}_cam1_imu1_resampled{HZ}hz.mp4/.csv`... | 每路摄像头 x 每个设备的降采样配对文件（`--resample-hz` 指定目标频率） |
 
 由于每个 tick 都是同时抓取所有摄像头一帧，所以每路视频的帧数理论上都应该严格等于组合 CSV 的行数；录制结束会自动逐个摄像头核对这一点（不复用 `check_alignment.py`，因为它假设视频和 CSV 同名成对，这里是 N 路视频共享 1 份 CSV，命名规则不满足它的假设）。
+
+**降采样配对**：每个 IMU 设备降采样后的 CSV，会跟**每一路摄像头**的视频各配一份（`{base}_camX_imuY_resampled{HZ}hz.mp4/.csv`），比如 2 路摄像头 + 2 个设备会生成 4 组配对文件，方便挑任意一路摄像头画面配任意一个设备的数据去 Label Studio 标注。`--resample-only` 会在生成完所有配对文件后，删除原始的 `{base}_camN.mp4`、`{base}.csv`、`{base}_meta.csv`、`{base}_imuN_raw.csv`。
 
 ### 时间漂移分析
 
