@@ -163,6 +163,12 @@ python hicc_offline_to_labelstudio.py data/26060314.TXT
 
 # 文件名无法自动识别日期时，用 --date 显式指定
 python hicc_offline_to_labelstudio.py data/26060314.TXT --date 2026-06-03
+
+# 批量模式：传一个目录，转换该目录下所有 .TXT 文件（输出跟输入同目录）
+python hicc_offline_to_labelstudio.py data/hicc/pp
+
+# 批量模式，指定统一的输出目录
+python hicc_offline_to_labelstudio.py data/hicc/pp -o data/hicc/pp_csv
 ```
 
 日期识别规则：文件名形如 `YYMMDDHH`（8位数字，末两位是小时，会跟数据第一行的小时数交叉验证，比如 `26060314.TXT` → 2026-06-03，`14` 与第一行 `14:23:48` 对上）；识别不到就用今天日期并打印警告（相对时间顺序依然正确，只是绝对日期可能不对）。
