@@ -97,11 +97,12 @@ class LiveCsvWriter:
     """
 
     def __init__(self, path=None, encoding='utf-8', keep_bad_frames=False,
-                 hourly=False, out_dir='data'):
+                 hourly=False, out_dir='data', device_tag=None):
         self.encoding = encoding
         self.keep_bad_frames = keep_bad_frames
         self.hourly = hourly
         self.out_dir = out_dir
+        self.device_tag = device_tag
         self.last_good_time = None
         self.count_written = 0
         self.count_dropped = 0
@@ -134,7 +135,8 @@ class LiveCsvWriter:
             print(f'  [整点切换] 已保存: {prev_path}')
         os.makedirs(self.out_dir, exist_ok=True)
         self._current_hour_tag = hour_tag
-        new_path = os.path.join(self.out_dir, f'{hour_tag}.csv')
+        fname = f'{hour_tag}_{self.device_tag}.csv' if self.device_tag else f'{hour_tag}.csv'
+        new_path = os.path.join(self.out_dir, fname)
         self._open(new_path)
         print(f'  新文件: {new_path}')
 
@@ -291,9 +293,11 @@ async def run(args):
     elif print_only:
         print('打印模式: 不创建/写入任何文件，仅在终端实时显示数据。')
     elif args.hourly:
-        writer = LiveCsvWriter(hourly=True, keep_bad_frames=args.keep_bad_frames, out_dir=args.hourly_dir)
+        device_tag = (device.name or device.address).replace(':', '').replace(' ', '_')
+        writer = LiveCsvWriter(hourly=True, keep_bad_frames=args.keep_bad_frames,
+                                out_dir=args.hourly_dir, device_tag=device_tag)
         print(f'长期采集模式: 每到整点自动切换新文件，保存目录 {args.hourly_dir}/，'
-              f'文件名 YYYYMMDDHH.csv（当前: {writer.current_path}）')
+              f'文件名 YYYYMMDDHH_{device_tag}.csv（当前: {writer.current_path}）')
         print('提示: 在 Label Studio 的 Time Series 标注配置里，timeFormat 请填: %Y-%m-%d %H:%M:%S.%L')
     else:
         mac_tag = device.address.replace(':', '').lower()

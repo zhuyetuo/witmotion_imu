@@ -10,6 +10,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `wit_parse.py` | WitMotion 协议解析（离线 + BLE）：`parse_packets`、`StreamingByteBuffer`、`parse_one_packet`、`DEFAULT_NOTIFY_CANDIDATES`、`fmt_chip_time_dotms` 等 |
 | `hicc_parse.py` | HICC_PetCollar 协议解析：GATT UUID、帧常量、DP 解析、`FrameBuffer`、校时帧构造、`find_tx_uuid`/`find_rx_uuid`/`send_timesync` |
 | `hicc_offline_to_labelstudio.py` | HICC 离线日志（`HH:MM:SS.MS,AX,AY,AZ,GX,GY,GZ`）转 Label Studio 格式 CSV |
+| `check_periodic_gaps.py` | 检测 HICC 离线 TXT / Label Studio CSV 数据里是否存在周期性缺口 |
 | `csv_time_slice.py` | 按时间范围截取 Label Studio 格式 CSV 的一段数据 |
 | `wit_ble_live.py` | WitMotion BLE 实时采集主程序，导入 `ble_utils` + `wit_parse`；支持 `--hourly` 长期采集（整点自动切换CSV文件） |
 | `hicc_ble_live.py` | HICC BLE 实时采集主程序，导入 `ble_utils` + `hicc_parse`；支持 `--hourly` 长期采集（整点自动切换CSV文件） |
@@ -83,7 +84,7 @@ python wit_ble_live.py --name WTSDCL --calibrate
 # 查看设备 GATT 服务/特征值（用于核实 UUID）
 python wit_ble_live.py --name WTSDCL --list-services
 
-# 长期采集模式：每到整点自动切换新CSV文件，文件名 YYYYMMDDHH.csv（如 2026071309.csv）
+# 长期采集模式：每到整点自动切换新CSV文件，文件名 YYYYMMDDHH_设备名.csv（如 2026071309_WT901BLE68.csv）
 python wit_ble_live.py --name WTSDCL --hourly
 
 # 长期采集，指定输出目录（默认 data/）
@@ -96,7 +97,7 @@ python wit_ble_live.py --name WTSDCL --hourly --status-interval 300
 python wit_ble_live.py --name WTSDCL --hourly --quiet
 ```
 
-**长期采集模式（`--hourly`）**：适合挂机长时间采集。每到整点（PC 系统时间）自动关闭当前文件、新开一个文件，文件名 `YYYYMMDDHH.csv`（比如 `2026071309.csv` 表示 2026-07-13 09点这一小时的数据），避免单个文件过大，也避免程序意外中断导致这一整段时间的数据全部丢失（顶多丢当前这一小时还没切换的部分）。此模式下 `-o/--output` 不生效。
+**长期采集模式（`--hourly`）**：适合挂机长时间采集。每到整点（PC 系统时间）自动关闭当前文件、新开一个文件，文件名 `YYYYMMDDHH_设备名.csv`（比如 `2026071309_WT901BLE68.csv` 表示 2026-07-13 09点这一小时、设备名为 WT901BLE68 的数据；设备名后缀方便同时挂多台设备采集时文件不冲突），避免单个文件过大，也避免程序意外中断导致这一整段时间的数据全部丢失（顶多丢当前这一小时还没切换的部分）。此模式下 `-o/--output` 不生效。
 
 **状态提示打印**：默认每 60 秒打印一次"已接收 N 帧"状态（`--status-interval` 可调整间隔）；采样率高（比如 100Hz）时按帧数打印会刷屏太快，改成按时间间隔打印。完全不想看到这类提示可以加 `--quiet`（连接、丢帧、整点切换等关键信息仍会打印）。
 
@@ -162,6 +163,12 @@ python hicc_offline_to_labelstudio.py data/26060314.TXT
 
 # 文件名无法自动识别日期时，用 --date 显式指定
 python hicc_offline_to_labelstudio.py data/26060314.TXT --date 2026-06-03
+
+# 批量模式：传一个目录，转换该目录下所有 .TXT 文件（输出跟输入同目录）
+python hicc_offline_to_labelstudio.py data/hicc/pp
+
+# 批量模式，指定统一的输出目录
+python hicc_offline_to_labelstudio.py data/hicc/pp -o data/hicc/pp_csv
 ```
 
 日期识别规则：文件名形如 `YYMMDDHH`（8位数字，末两位是小时，会跟数据第一行的小时数交叉验证，比如 `26060314.TXT` → 2026-06-03，`14` 与第一行 `14:23:48` 对上）；识别不到就用今天日期并打印警告（相对时间顺序依然正确，只是绝对日期可能不对）。
@@ -169,6 +176,35 @@ python hicc_offline_to_labelstudio.py data/26060314.TXT --date 2026-06-03
 **时间戳倒退的处理**：只有倒退幅度接近一整天（≥12小时，比如 23:59 → 00:00）才判定为真正跨午夜、日期 +1；如果只是小幅倒退（比如同一分钟内秒数从 59 突然跳回 01，分钟数没变——这是部分 HICC 离线日志里实际出现过的设备端记录异常），会判定为设备日志自身的毛刺而不是跨天，直接丢弃这些行以保证 timestamp 严格递增（Label Studio 的硬性要求），并打印丢弃了多少行。
 
 **真实数据缺口检测**：脚本还会用中位数采样间隔估算正常节奏，把明显超出正常间隔的地方（默认阈值：中位间隔的 5 倍）识别为"设备本身没有记录到数据"的真实缺口并打印出来（区别于上面"脚本主动丢弃的倒退行"）。如果发现大量周期性缺口（比如每隔几秒就丢一小段），说明是设备采集本身不稳定，需要反馈给硬件/固件排查，转换脚本无法凭空补全本来就不存在的数据。
+
+### 单独检测数据缺口是否呈周期性
+
+`hicc_offline_to_labelstudio.py` 转换时会顺带报一次缺口，但如果只是想单独检查某份数据（HICC 离线 TXT 或已生成的 Label Studio CSV 都可以），或者想调整判定阈值，用 `check_periodic_gaps.py`：
+
+```bash
+python check_periodic_gaps.py data/26071009.TXT
+python check_periodic_gaps.py data/26071009.csv
+python check_periodic_gaps.py data/26071009.TXT --gap-ratio 3 --max-print 30
+```
+
+会自动按文件表头识别是 HICC 离线 TXT 还是 Label Studio CSV 格式，统计缺口数量/时长分布，并进一步分析这些缺口的"复发间隔"是否有规律（用中位数+绝对中位差而不是均值/标准差，避免个别超大缺口把统计结果带偏），给出强周期性/有一定规律/不规律三档判断。发现强周期性缺口通常意味着设备采集端本身有规律性卡顿，值得反馈给硬件/固件排查。
+
+**验收判定**：脚本最后会给出正式的验收结论（阈值可调），厂家交样机测试时可以直接用这个结论判断能不能过：
+
+| 丢包率（缺口总时长 / 总采集时长） | 判定 |
+|---|---|
+| < 1%（`--loss-excellent`） | 优秀，通过 |
+| 1% ~ 3%（`--loss-warn`） | 合格，通过 |
+| 3% ~ 5%（`--loss-fail`） | 有条件通过，建议关注 |
+| ≥ 5% | 不通过 |
+| 检测到强周期性缺口（稳健变异系数 < `--periodic-cv-threshold`，默认0.15） | **无论丢包率多低都直接不通过** |
+
+默认阈值参考行业惯例：临床级可穿戴设备 QC 常用 5% 数据缺失作为验收线，优化良好的 BLE 可穿戴系统能做到 <1% 丢包率。周期性缺口之所以无条件判不通过，是因为它说明的是固件/硬件系统性问题（比如每隔几秒规律性卡顿丢包），不是偶发噪声，不会因为多测几次就消失，长期使用会持续复现——这种情况不应该靠"丢包率还没超阈值"侥幸通过验收，应该退回厂家整改。
+
+```bash
+# 自定义阈值示例：丢包率超过 2% 就判不通过
+python check_periodic_gaps.py data/26071009.TXT --loss-fail 2
+```
 
 ### 按时间范围截取 CSV
 

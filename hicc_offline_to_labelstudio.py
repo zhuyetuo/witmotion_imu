@@ -153,32 +153,22 @@ def report_time_gaps(out_rows, gap_ratio: float = 5.0):
             print(f'  ...（其余 {len(gaps) - 20} 处从略）')
 
 
-def main():
-    ap = argparse.ArgumentParser(description='HICC_PetCollar 离线数据转 Label Studio 格式 CSV')
-    ap.add_argument('input', help='HICC 离线数据文件路径（HH:MM:SS.MS,AX,AY,AZ,GX,GY,GZ 格式）')
-    ap.add_argument('-o', '--output', default=None,
-                     help='输出路径，默认跟输入文件同名同目录，仅扩展名改为 .csv')
-    ap.add_argument('--date', default=None, help='显式指定日期 YYYY-MM-DD，覆盖文件名自动识别')
-    args = ap.parse_args()
-
-    if not os.path.exists(args.input):
-        print(f'文件不存在: {args.input}')
-        sys.exit(1)
-
-    rows = parse_hicc_offline_csv(args.input)
+def convert_one(input_path: str, output_path: str = None, date_override: str = None) -> bool:
+    """转换单个文件，成功返回 True。失败/跳过打印原因并返回 False。"""
+    rows = parse_hicc_offline_csv(input_path)
     if not rows:
-        print('未解析到任何数据行。')
-        sys.exit(1)
+        print(f'[跳过] 未解析到任何数据行: {input_path}')
+        return False
 
-    if args.date:
+    if date_override:
         try:
-            base_date = datetime.strptime(args.date, '%Y-%m-%d').date()
+            base_date = datetime.strptime(date_override, '%Y-%m-%d').date()
         except ValueError:
-            print(f'--date 格式错误，应为 YYYY-MM-DD: {args.date}')
-            sys.exit(1)
+            print(f'--date 格式错误，应为 YYYY-MM-DD: {date_override}')
+            return False
     else:
         first_hour = int(rows[0]['time_str'].split(':')[0])
-        base_date = guess_date_from_filename(args.input, first_row_hour=first_hour)
+        base_date = guess_date_from_filename(input_path, first_row_hour=first_hour)
         if base_date is None:
             base_date = datetime.now().date()
             print(f'警告: 无法从文件名识别日期，使用今天日期 {base_date}（同一份文件内的相对时间顺序仍正确，'
@@ -188,18 +178,60 @@ def main():
 
     ls_rows = build_labelstudio_rows(rows, base_date)
 
-    if args.output:
-        out_path = args.output
-    else:
-        out_path = os.path.splitext(args.input)[0] + '.csv'
-
+    out_path = output_path or (os.path.splitext(input_path)[0] + '.csv')
     with open(out_path, 'w', encoding='utf-8', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(LABELSTUDIO_HEADER)
         writer.writerows(ls_rows)
 
     print(f'已生成: {out_path}（{len(ls_rows)} 行）')
-    print('提示: 在 Label Studio 的 Time Series 标注配置里，timeFormat 请填: %Y-%m-%d %H:%M:%S.%L')
+    return True
+
+
+def main():
+    ap = argparse.ArgumentParser(description='HICC_PetCollar 离线数据转 Label Studio 格式 CSV')
+    ap.add_argument('input', help='HICC 离线数据文件路径（HH:MM:SS.MS,AX,AY,AZ,GX,GY,GZ 格式），'
+                                   '也可以传一个目录，批量转换目录下所有 .TXT 文件')
+    ap.add_argument('-o', '--output', default=None,
+                     help='单文件模式：输出路径，默认跟输入文件同名同目录，仅扩展名改为 .csv。'
+                          '批量模式：输出目录，默认跟输入目录相同')
+    ap.add_argument('--date', default=None, help='显式指定日期 YYYY-MM-DD，覆盖文件名自动识别（对批量模式下所有文件生效）')
+    args = ap.parse_args()
+
+    if not os.path.exists(args.input):
+        print(f'路径不存在: {args.input}')
+        sys.exit(1)
+
+    if os.path.isdir(args.input):
+        txt_files = sorted(
+            f for f in os.listdir(args.input)
+            if f.lower().endswith('.txt')
+        )
+        if not txt_files:
+            print(f'目录下没有找到 .TXT 文件: {args.input}')
+            sys.exit(1)
+
+        out_dir = args.output
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+
+        print(f'批量转换模式: {args.input} 下共 {len(txt_files)} 个 .TXT 文件')
+        ok_count = 0
+        for fname in txt_files:
+            in_path = os.path.join(args.input, fname)
+            out_path = os.path.join(out_dir, os.path.splitext(fname)[0] + '.csv') if out_dir else None
+            print(f'\n── {fname} ──')
+            if convert_one(in_path, output_path=out_path, date_override=args.date):
+                ok_count += 1
+
+        print(f'\n批量转换完成: 成功 {ok_count}/{len(txt_files)} 个文件')
+        print('提示: 在 Label Studio 的 Time Series 标注配置里，timeFormat 请填: %Y-%m-%d %H:%M:%S.%L')
+        return
+
+    if convert_one(args.input, output_path=args.output, date_override=args.date):
+        print('提示: 在 Label Studio 的 Time Series 标注配置里，timeFormat 请填: %Y-%m-%d %H:%M:%S.%L')
+    else:
+        sys.exit(1)
 
 
 if __name__ == '__main__':
