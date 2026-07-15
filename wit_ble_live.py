@@ -315,8 +315,13 @@ async def run(args):
     dropped_count_print = [0]
     last_status_print = [0.0]
     hz = HzCounter()
+    # 独立于解析逻辑的原始 BLE notify 计数：用来区分"notify 事件本身到达
+    # 速率就不够"还是"notify 到达了但我们解析/写入丢了包"。
+    notify_stats = {'count': 0, 'bytes': 0}
 
     def notification_handler(sender, data: bytearray):
+        notify_stats['count'] += 1
+        notify_stats['bytes'] += len(data)
         packets = buffer.feed(bytes(data))
         for pkt in packets:
             p = parse_one_packet(pkt)
@@ -403,12 +408,21 @@ async def run(args):
                 await client.stop_notify(subscribed)
             except Exception:
                 pass
+            avg_pkts_per_notify = (
+                (writer.count_written + writer.count_dropped if writer is not None else print_count[0] + dropped_count_print[0])
+                / notify_stats['count'] if notify_stats['count'] else 0.0
+            )
+            print(f'\n[诊断] 共收到 {notify_stats["count"]} 次 BLE notify，'
+                  f'共 {notify_stats["bytes"]} 字节，平均每次 notify 含 {avg_pkts_per_notify:.2f} 个数据包'
+                  f'（每个数据包28字节；如果这个值明显小于1，说明部分 notify 里的数据不足一个完整包，'
+                  f'可能是 MTU/分片问题；如果接近1但总 notify 次数偏低，说明是 BLE notify 事件到达速率'
+                  f'本身不够，不是我们代码丢的包）')
             if writer is not None:
                 writer.close()
-                print(f'\n采集结束。共写入 {writer.count_written} 帧，丢弃坏帧 {writer.count_dropped} 个。'
+                print(f'采集结束。共写入 {writer.count_written} 帧，丢弃坏帧 {writer.count_dropped} 个。'
                       f'\n文件已保存: {writer.current_path}')
             elif print_only:
-                print(f'\n采集结束。共打印 {print_count[0]} 帧，丢弃坏帧 {dropped_count_print[0]} 个。'
+                print(f'采集结束。共打印 {print_count[0]} 帧，丢弃坏帧 {dropped_count_print[0]} 个。'
                       f'\n（打印模式未写入任何文件。）')
 
 
