@@ -410,6 +410,8 @@ python check_alignment.py data/wit_d534e2b96f32_20260703_105514.mp4
 
 `imu_camera_sync_multi.py` 是 `imu_camera_sync.py` 的多设备版本，同一路摄像头同时对齐多台 IMU（WitMotion 和/或 HICC 混用都可以）。功能已经跟单设备版本对齐，`--loop`/`--resample-hz`/`--probe`/`--resample-only`/`--no-save-overlay`/`--no-imu-sync` 全部支持，用法和含义跟 `imu_camera_sync.py` 一致，只是每个设备各自一份数据。
 
+**自动重连**：如果设备戴在狗脖子上，随着活动项圈会慢慢移位、趴地时天线被压住等情况，BLE 信号变差到一定程度会导致连接被判定为真正断开（不只是丢几个包）。断开后脚本会自动每 2 秒尝试重新扫描/连接，一直重试到 `--duration` 结束或手动停止，信号恢复后会自动续上继续采集，不会因为中途断过一次连接就永远显示 `imu_missing`。（`imu_camera_sync_multicam.py` 复用同一套连接逻辑，同样支持自动重连。）
+
 ```bash
 # 一个摄像头 + 2 个 WitMotion 设备
 python imu_camera_sync_multi.py --imu wit=WTSDCL1 --imu wit=WTSDCL2 --duration 60
