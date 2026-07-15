@@ -132,23 +132,15 @@ class ImuDevice:
 # ── BLE 连接（每个设备一个协程，同一个事件循环里并发跑） ────────────────────
 
 async def run_wit_device(device: ImuDevice, scan_timeout: float):
+    """
+    自动重连：BLE 信号太差（比如项圈被狗压在身下）会导致连接被判定为真正
+    断开，而不只是丢几个包。断开后不退出协程，而是稍等一下重新扫描/连接，
+    不断重试直到 stop_event 被设置（--duration 到时或用户手动停止），
+    这样信号恢复后能自动续上，不会一直卡在"最后一次断开前"的状态。
+    """
     from wit_parse import DEFAULT_NOTIFY_CANDIDATES, StreamingByteBuffer, parse_one_packet
 
-    is_mac = bool(_MAC_RE.match(device.ident))
-    ble_device = await find_device(
-        None if is_mac else device.ident,
-        device.ident if is_mac else None,
-        timeout=scan_timeout,
-    )
-    if ble_device is None:
-        print(f'[{device.label}] 找不到 WitMotion 设备: {device.ident}')
-        return
-
-    print(f'[{device.label}] WitMotion 已连接: {ble_device.name}  {ble_device.address}')
-    device.mac = ble_device.address
-    buf = StreamingByteBuffer()
-
-    def on_data(_, data: bytearray):
+    def on_data(_, data: bytearray, buf):
         pc_ms = time.time() * 1000.0
         for pkt in buf.feed(bytes(data)):
             p = parse_one_packet(pkt)
@@ -160,29 +152,65 @@ async def run_wit_device(device: ImuDevice, scan_timeout: float):
                 'gyro_x': p['gyro'][0], 'gyro_y': p['gyro'][1], 'gyro_z': p['gyro'][2],
             })
 
-    async with BleakClient(ble_device) as client:
-        subscribed = None
-        for uuid in DEFAULT_NOTIFY_CANDIDATES:
-            try:
-                await client.start_notify(uuid, on_data)
-                subscribed = uuid
-                break
-            except Exception:
-                continue
-        if subscribed is None:
-            print(f'[{device.label}] 订阅 Notify 失败')
-            return
-        print(f'[{device.label}] 已订阅: {subscribed}')
-        while not stop_event.is_set():
-            await asyncio.sleep(0.1)
+    first_attempt = True
+    while not stop_event.is_set():
+        is_mac = bool(_MAC_RE.match(device.ident))
+        ble_device = await find_device(
+            None if is_mac else device.ident,
+            device.ident if is_mac else None,
+            timeout=scan_timeout,
+        )
+        if ble_device is None:
+            action = '扫描' if first_attempt else '重连'
+            print(f'[{device.label}] {action}未找到 WitMotion 设备: {device.ident}，2秒后重试...')
+            first_attempt = False
+            await asyncio.sleep(2.0)
+            continue
+
+        disconnected = asyncio.Event()
+
+        def on_disconnect(_client):
+            disconnected.set()
+
+        buf = StreamingByteBuffer()
         try:
-            await client.stop_notify(subscribed)
-        except Exception:
-            pass
+            async with BleakClient(ble_device, disconnected_callback=on_disconnect) as client:
+                print(f'[{device.label}] WitMotion 已连接: {ble_device.name}  {ble_device.address}')
+                device.mac = ble_device.address
+                subscribed = None
+                for uuid in DEFAULT_NOTIFY_CANDIDATES:
+                    try:
+                        await client.start_notify(uuid, lambda s, d: on_data(s, d, buf))
+                        subscribed = uuid
+                        break
+                    except Exception:
+                        continue
+                if subscribed is None:
+                    print(f'[{device.label}] 订阅 Notify 失败，2秒后重试...')
+                    await asyncio.sleep(2.0)
+                    continue
+                print(f'[{device.label}] 已订阅: {subscribed}')
+                while not stop_event.is_set() and not disconnected.is_set():
+                    await asyncio.sleep(0.1)
+                if disconnected.is_set():
+                    print(f'[{device.label}] 连接断开（信号问题），尝试自动重连...')
+                    continue
+                try:
+                    await client.stop_notify(subscribed)
+                except Exception:
+                    pass
+        except Exception as e:
+            if stop_event.is_set():
+                break
+            print(f'[{device.label}] 连接异常: {e}，2秒后重试...')
+            await asyncio.sleep(2.0)
+            continue
+        break
     print(f'[{device.label}] WitMotion 已断开')
 
 
 async def run_hicc_device(device: ImuDevice, scan_timeout: float):
+    """自动重连，原因同 run_wit_device（信号差导致真实断连，不重连就永远卡在断开状态）。"""
     from hicc_parse import (
         FrameBuffer, parse_dp_sequence, find_tx_uuid, find_rx_uuid, send_timesync,
         DP_ACC_X, DP_ACC_Y, DP_ACC_Z, DP_GYRO_X, DP_GYRO_Y, DP_GYRO_Z, CMD_REPORT,
@@ -194,10 +222,8 @@ async def run_hicc_device(device: ImuDevice, scan_timeout: float):
 
     address = device.ident
     device.mac = address
-    print(f'[{device.label}] 连接 HICC: {address}')
-    fb = FrameBuffer()
 
-    def on_data(_, data: bytearray):
+    def on_data(_, data: bytearray, fb):
         pc_ms = time.time() * 1000.0
         for frame in fb.feed(bytes(data)):
             if frame[3] != CMD_REPORT:
@@ -213,22 +239,42 @@ async def run_hicc_device(device: ImuDevice, scan_timeout: float):
                 'gyro_z': dps[DP_GYRO_Z] / 1_000_000.0,
             })
 
-    async with BleakClient(address) as client:
-        tx_uuid = await find_tx_uuid(client)
-        rx_uuid = await find_rx_uuid(client)
-        if tx_uuid is None:
-            print(f'[{device.label}] 找不到 HICC TX 特征值')
-            return
-        if rx_uuid:
-            await send_timesync(client, rx_uuid)
-        await client.start_notify(tx_uuid, on_data)
-        print(f'[{device.label}] 已订阅: {tx_uuid}')
-        while not stop_event.is_set():
-            await asyncio.sleep(0.1)
+    while not stop_event.is_set():
+        print(f'[{device.label}] 连接 HICC: {address}')
+        disconnected = asyncio.Event()
+
+        def on_disconnect(_client):
+            disconnected.set()
+
+        fb = FrameBuffer()
         try:
-            await client.stop_notify(tx_uuid)
-        except Exception:
-            pass
+            async with BleakClient(address, disconnected_callback=on_disconnect) as client:
+                tx_uuid = await find_tx_uuid(client)
+                rx_uuid = await find_rx_uuid(client)
+                if tx_uuid is None:
+                    print(f'[{device.label}] 找不到 HICC TX 特征值，2秒后重试...')
+                    await asyncio.sleep(2.0)
+                    continue
+                if rx_uuid:
+                    await send_timesync(client, rx_uuid)
+                await client.start_notify(tx_uuid, lambda s, d: on_data(s, d, fb))
+                print(f'[{device.label}] 已订阅: {tx_uuid}')
+                while not stop_event.is_set() and not disconnected.is_set():
+                    await asyncio.sleep(0.1)
+                if disconnected.is_set():
+                    print(f'[{device.label}] 连接断开（信号问题），尝试自动重连...')
+                    continue
+                try:
+                    await client.stop_notify(tx_uuid)
+                except Exception:
+                    pass
+        except Exception as e:
+            if stop_event.is_set():
+                break
+            print(f'[{device.label}] 连接异常: {e}，2秒后重试...')
+            await asyncio.sleep(2.0)
+            continue
+        break
     print(f'[{device.label}] HICC 已断开')
 
 

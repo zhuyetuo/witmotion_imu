@@ -33,7 +33,8 @@ IMU + 摄像头同步采集脚本
 {base}_resampled{HZ}hz.csv（降采样结果，Label Studio 兼容格式）:
     录制结束后自动用 --resample-hz 指定的目标频率对 {base}_raw.csv 做低通+
     线性插值降采样生成，与视频帧率/对齐无关，方便按需生成 20/16/15Hz 等
-    目标训练频率的数据，不用等到训练脚本里再处理。
+    目标训练频率的数据，不用等到训练脚本里再处理。BLE 真实断连（比如项圈
+    信号差）导致的时间缺口会被识别出来直接留空，不会被插值编出假数据。
 
 同步模式:
     默认事件驱动（等待新 IMU 样本到达再抓帧），摄像头与 IMU 天然对齐，
@@ -364,11 +365,20 @@ _TS_FMT = '%Y-%m-%d %H:%M:%S.%f'
 
 
 def resample_raw_imu(raw_path: str, out_path: str, target_hz: float,
-                      t_start_ms: float = None, t_end_ms: float = None):
+                      t_start_ms: float = None, t_end_ms: float = None,
+                      gap_ratio: float = 5.0):
     """
     独立于摄像头帧率，把 {base}_raw.csv 里的完整原始 IMU 流降采样到 target_hz。
     降采样前先做一次简单的滑动平均低通滤波（窗口按原始/目标采样率之比估算），
     减少直接抽稀带来的走样（aliasing），再用线性插值取到目标频率的等间隔时刻点。
+
+    真实断连处理:
+        BLE 信号差导致连接中断时（比如项圈趴地被压住），raw.csv 里会有一段
+        真实的时间缺口。np.interp 默认会在缺口两端之间"编"出一条平滑的假
+        数据，看起来像连续真实运动但其实是瞎猜的，混进训练数据会有问题。
+        这里会检测缺口（跟 check_periodic_gaps.py 同样的判定：超过中位采样
+        间隔 gap_ratio 倍视为一次缺口），落在缺口内的目标时间点直接留空
+        （不插值、不编数据），如实反映"这段时间真的没采集到"。
 
     t_start_ms/t_end_ms: 若提供，输出的时间范围裁到 [t_start_ms, t_end_ms]
     （通常传视频第一帧/最后一帧的真实 cam_timestamp），保证降采样结果与视频
@@ -394,7 +404,9 @@ def resample_raw_imu(raw_path: str, out_path: str, target_hz: float,
             for name in ('acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z')}
 
     step_ms = 1000.0 / target_hz
-    avg_dt_ms = float(np.mean(np.diff(t))) if len(t) > 1 else step_ms
+    diffs_ms = np.diff(t)
+    avg_dt_ms = float(np.mean(diffs_ms)) if len(diffs_ms) else step_ms
+    median_dt_ms = float(np.median(diffs_ms)) if len(diffs_ms) else step_ms
     window = max(1, int(round(step_ms / avg_dt_ms))) if avg_dt_ms > 0 else 1
     if window > 1:
         kernel = np.ones(window) / window
@@ -408,16 +420,30 @@ def resample_raw_imu(raw_path: str, out_path: str, target_hz: float,
     range_end   = min(range_end, t[-1])
 
     new_t = np.arange(range_start, range_end, step_ms)
+
+    # 每个目标时间点两侧最近的真实样本间隔多大；超过阈值说明这个点落在一次
+    # 真实断连缺口里，不能编数据
+    gap_threshold_ms = median_dt_ms * gap_ratio
+    idx = np.clip(np.searchsorted(t, new_t), 1, len(t) - 1)
+    local_gap_ms = t[idx] - t[idx - 1]
+    is_gap = local_gap_ms > gap_threshold_ms
+    gap_count = int(np.sum(is_gap))
+
     with open(out_path, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
         writer.writerow(CSV_HEADER)
-        for ts_ms in new_t:
+        for ts_ms, gap in zip(new_t, is_gap):
             ts_str = datetime.fromtimestamp(ts_ms / 1000.0).strftime(_TS_FMT)[:-3]
-            values = [f'{np.interp(ts_ms, t, cols[name]):.6f}'
-                      for name in ('acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z')]
+            if gap:
+                values = ['', '', '', '', '', '']
+            else:
+                values = [f'{np.interp(ts_ms, t, cols[name]):.6f}'
+                          for name in ('acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z')]
             writer.writerow([ts_str] + values)
 
     print(f'已生成降采样 IMU CSV: {out_path}（{target_hz:.1f}Hz，{len(new_t)} 行，低通窗口={window}）')
+    if gap_count:
+        print(f'  其中 {gap_count} 行落在真实断连缺口内，已留空（不插值编数据）')
 
 
 def draw_imu_overlay(frame, imu: dict | None, imu_lag_ms: float, imu_missing: bool,
