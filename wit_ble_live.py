@@ -145,10 +145,13 @@ class LiveCsvWriter:
             self._rotate_if_needed()
 
         t = p['chip_time']
-        if not self.keep_bad_frames:
-            if t is None:
-                self.count_dropped += 1
-                return False
+        # 注意：芯片时间戳只用来识别"蓝牙重连导致时钟复位/重传"这种坏帧
+        # （chip_time 非单调递增）。有些设备/固件片上时钟从未被官方上位机
+        # 校准过，year/month/day 字段本身就是无效值，chip_time 恒为 None
+        # ——这不代表数据是坏帧，CSV 实际写入用的时间戳是 PC 系统时间
+        # （见下面 now = datetime.now()），跟 chip_time 无关。之前 chip_time
+        # 为 None 时直接丢弃会导致这类设备全部数据都进不了 CSV（写入0帧）。
+        if not self.keep_bad_frames and t is not None:
             if self.last_good_time is not None and t <= self.last_good_time:
                 self.count_dropped += 1
                 print(f'  [丢弃坏帧] 时间戳非单调递增: {fmt_chip_time_dotms(p)}')
