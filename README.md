@@ -559,13 +559,24 @@ python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit -
 **自动延迟校准**：用 `--auto-calibrate-latency`，预热结束后脚本会提示你对着摄像头把设备猛地晃一下/敲一下，随后自动在视频画面（连续帧灰度差）和IMU加速度（模长偏离1g的程度）两条独立时间线上分别检测这次动作造成的"尖峰"，两个尖峰的时间差就是RTSP视频延迟，全自动测出来、不需要人工掐表比对，测出来之后会在查找IMU样本时自动把视频帧时间戳往回拨这个量再匹配。如果动作幅度不够大、检测不到明显尖峰，会提示重试或退回 `--video-latency-ms` 手动指定的值（默认0，不补偿）。
 
 ```bash
-# 自动校准延迟后再录制（预热5秒后会提示晃动设备，8秒内完成即可）
+# 第一次用这个流：自动校准延迟后再录制（预热5秒后会提示晃动设备，8秒内完成即可）
 python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit --name WTSDCL \
     --duration 60 --auto-calibrate-latency
 
 # 已经知道大概延迟数值（比如测过是180ms），手动指定，跳过自动校准环节
 python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit --name WTSDCL \
     --duration 60 --video-latency-ms 180
+```
+
+**延迟只用测一次，会自动缓存**：RTSP链路延迟基本是摄像头/go2rtc/网络这条链路本身固定的属性，不是每次录制都会变，没必要每次开录都让人晃一下设备。`--auto-calibrate-latency` 测出结果后会自动按 `host:port/stream` 存到本地缓存文件（默认 `.rtsp_latency_cache.json`，跟脚本同目录），**之后再录同一个流，不用加任何延迟相关参数，会自动读缓存里的值来补偿**；只有想重新测量（比如换了摄像头/网络环境）才需要重新加 `--auto-calibrate-latency`。优先级：显式 `--video-latency-ms` > 本次 `--auto-calibrate-latency` 现测 > 缓存里之前测过的值 > 0（不补偿）。不想用缓存机制可以加 `--no-latency-cache`。
+
+```bash
+# 第一次：测一次并缓存
+python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit --name WTSDCL \
+    --duration 60 --auto-calibrate-latency
+
+# 之后同一个流直接录，自动读缓存里的延迟值补偿，不用再晃设备
+python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit --name WTSDCL --duration 60
 ```
 
 ### 时间漂移分析

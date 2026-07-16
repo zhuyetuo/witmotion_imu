@@ -68,6 +68,7 @@ os.environ.setdefault(
 )
 
 import csv
+import json
 import shutil
 import statistics
 import sys
@@ -123,6 +124,48 @@ class LatestFrameReader:
 
 def build_rtsp_url(host: str, port: int, stream: str) -> str:
     return f'rtsp://{host}:{port}/{stream}'
+
+
+# ── 延迟校准结果缓存 ─────────────────────────────────────────────────────────
+# RTSP 链路延迟基本是 go2rtc/摄像头/网络这条链路本身的固有属性，跟每次录制无关，
+# 校准一次之后没必要每次开录都重新让人晃一下设备——按 host:port/stream 存到本地
+# 缓存文件里，下次同一个流直接复用，除非显式加 --auto-calibrate-latency 要求重测。
+
+def _cache_key(host: str, port: int, stream: str) -> str:
+    return f'{host}:{port}/{stream}'
+
+
+def load_cached_latency(cache_file: str, host: str, port: int, stream: str):
+    try:
+        with open(cache_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    entry = data.get(_cache_key(host, port, stream))
+    if not entry:
+        return None
+    return entry.get('latency_ms')
+
+
+def save_cached_latency(cache_file: str, host: str, port: int, stream: str, latency_ms: float):
+    data = {}
+    try:
+        with open(cache_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    data[_cache_key(host, port, stream)] = {
+        'latency_ms': latency_ms,
+        'calibrated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    try:
+        os.makedirs(os.path.dirname(cache_file) or '.', exist_ok=True)
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f'  已把这次测得的延迟（{latency_ms:+.0f}ms）保存到 {cache_file}，'
+              f'以后录这个流（{_cache_key(host, port, stream)}）会自动复用，不用再手动加 --auto-calibrate-latency。')
+    except OSError as e:
+        print(f'  警告: 延迟缓存写入失败: {e}（这次测出的值仍会用于本次录制，只是不会持久化）')
 
 
 # 视频内容判定为"发生在多久之前"的固定偏移（RTSP链路自身的编码+网络+解码延迟）。
@@ -312,14 +355,35 @@ def run_camera(args):
     # 视频延迟补偿量（毫秒）：--video-latency-ms 手动指定的值作为默认/兜底，
     # --auto-calibrate-latency 测出来的结果会覆盖它（测不出来则保留手动值，
     # 手动值默认 0，即不补偿）。
+    # 延迟补偿优先级: 显式 --video-latency-ms > 本次 --auto-calibrate-latency 现测 >
+    # 缓存里之前测过的值（同一个 host:port/stream 复用）> 0（不补偿）。
     latency_ms = args.video_latency_ms
-    if record_mode and args.auto_calibrate_latency and not ics.stop_event.is_set():
+    if latency_ms is not None:
+        print(f'使用手动指定的视频延迟补偿: {latency_ms:+.0f}ms（--video-latency-ms）')
+    elif args.auto_calibrate_latency and record_mode and not ics.stop_event.is_set():
         measured = auto_calibrate_latency(cap, resize_to, timeout=args.calibrate_timeout)
         if measured is not None:
             latency_ms = measured
+            if not args.no_latency_cache:
+                save_cached_latency(args.latency_cache_file, args.host, args.port, args.stream, latency_ms)
         else:
-            print(f'  自动校准未成功，本次录制沿用 --video-latency-ms 指定的补偿值: {latency_ms:.0f}ms')
+            cached = None if args.no_latency_cache else load_cached_latency(
+                args.latency_cache_file, args.host, args.port, args.stream)
+            latency_ms = cached if cached is not None else 0.0
+            print(f'  自动校准未成功，本次录制使用: {latency_ms:+.0f}ms'
+                  + ('（沿用之前缓存的校准结果）' if cached is not None else '（无缓存值，不补偿）'))
         print()
+    else:
+        cached = None if args.no_latency_cache else load_cached_latency(
+            args.latency_cache_file, args.host, args.port, args.stream)
+        if cached is not None:
+            latency_ms = cached
+            print(f'使用之前校准并缓存的视频延迟补偿: {latency_ms:+.0f}ms'
+                  f'（{_cache_key(args.host, args.port, args.stream)}，如需重新测量加 --auto-calibrate-latency）')
+        else:
+            latency_ms = 0.0
+            if record_mode:
+                print('未指定/未缓存视频延迟补偿，本次不做补偿（首次建议加 --auto-calibrate-latency 校准一次）。')
 
     try:
         segment_no = 0
@@ -620,14 +684,23 @@ def main():
                     help='预热结束后自动测量RTSP视频延迟并补偿：会提示你对着摄像头把设备猛地晃一下/'
                          '敲一下，脚本据此自动检测视频画面和IMU加速度里同时出现的"尖峰"，'
                          '两者时间差就是需要补偿的视频延迟，全程不需要人工掐表。'
-                         '测不出明显尖峰时会退回 --video-latency-ms 指定的值（默认0，即不补偿）。')
-    ap.add_argument('--video-latency-ms', type=float, default=0.0,
+                         '测出的结果会自动存到 --latency-cache-file，同一个 host:port/stream '
+                         '以后录制会自动复用，不用每次都重新晃动设备；只有想重新测量时才需要再加这个参数。')
+    ap.add_argument('--video-latency-ms', type=float, default=None,
                     help='手动指定视频延迟补偿量（毫秒，视频比IMU晚多少），查找IMU样本时会用'
-                         '"视频帧时间戳 - 这个值"去匹配。--auto-calibrate-latency 测出结果后会'
-                         '覆盖这里的值；两者都不用则默认为0，不做补偿（适合本地延迟很小的场景）。')
+                         '"视频帧时间戳 - 这个值"去匹配，优先级最高（会跳过缓存和自动校准）。'
+                         '不指定的话，按顺序：本次 --auto-calibrate-latency 现测的结果 > 之前'
+                         '缓存过的同一个流的校准结果 > 0（不补偿）。')
     ap.add_argument('--calibrate-timeout', type=float, default=8.0,
                     help='--auto-calibrate-latency 的采样窗口时长（秒），默认8秒，'
                          '需要在这段时间内完成"晃动/敲击"动作')
+    ap.add_argument('--latency-cache-file', default=os.path.join(
+                        os.path.dirname(os.path.abspath(__file__)), '.rtsp_latency_cache.json'),
+                    help='延迟校准结果的缓存文件路径，按 host:port/stream 分别存一份，'
+                         '默认存在脚本同目录下的 .rtsp_latency_cache.json')
+    ap.add_argument('--no-latency-cache', action='store_true',
+                    help='不读取也不写入延迟缓存文件（每次都要么不补偿、要么用 --video-latency-ms/'
+                         '--auto-calibrate-latency 现场指定/现测）')
     args = ap.parse_args()
 
     if args.probe:
