@@ -27,10 +27,15 @@ imu_camera_sync.py，不重复实现。
     IMU样本，本地摄像头延迟接近0没问题，但RTSP画面内容实际上是"之前"发生
     的（IMU是BLE直连、近似实时），如果不处理，配对的IMU数值会比画面里的
     动作提前一个"RTSP延迟"的量，是系统性偏差。用 --auto-calibrate-latency
-    可以自动测出这个延迟并补偿：预热结束后提示你对着摄像头把设备猛地晃一下
-    /敲一下，脚本会在视频画面（连续帧灰度差）和IMU加速度（模长偏离1g）两条
-    独立时间线上分别检测这次动作的"尖峰"，两个尖峰的时间差就是延迟，之后
-    查找IMU样本时自动把视频帧时间戳往回拨这个量。也可以用 --video-latency-ms
+    可以自动测出这个延迟并补偿，预热结束后分三步、全程有明确提示：
+        1. 静置（默认5秒）：保持设备/画面不动，先稳定下来。
+        2. 倒计时（默认3秒，"3、2、1"）：提前预告，准备好动作。
+        3. 动手窗口（默认3秒）："现在！"之后这几秒内随便什么时候、多大力
+           晃/敲一下都行，不用掐时机——脚本只在这个窗口内找"最大的尖峰"。
+    脚本会在视频画面（连续帧灰度差）和IMU加速度（模长偏离1g）两条独立时间
+    线上分别检测这次动作的尖峰，两个尖峰的时间差就是延迟，之后查找IMU样本
+    时自动把视频帧时间戳往回拨这个量。测出的结果会自动缓存（按host:port/
+    stream区分），下次录同一个流不用再重新校准。也可以用 --video-latency-ms
     手动指定一个已知的延迟值，跳过自动校准。
 
 用法:
@@ -175,34 +180,16 @@ _MOTION_SPIKE_THRESHOLD = 15.0   # 灰度帧间均值绝对差，明显晃动/�
 _ACCEL_SPIKE_THRESHOLD_G = 0.3   # 加速度模长偏离1g的量，明显晃动/敲击通常远超这个值（静止时通常<0.05g）
 
 
-def auto_calibrate_latency(cap, resize_to, timeout: float = 8.0):
-    """
-    自动测量 RTSP 链路的视频延迟（画面内容比真实发生时刻晚多少毫秒）。
-
-    原理：请使用者在这段时间内对着摄像头把项圈/设备猛地晃一下或敲一下——
-    这个动作会同时在两条独立的时间线上留下一个"尖峰"：
-        1. 视频画面：连续帧灰度图的逐帧差异（mean abs diff）会突然变大
-           （动作幅度够大的话，远超静止时的背景噪声水平）。
-        2. IMU 加速度：|acc| 偏离静止时的 1g 会突然变大。
-    IMU 是 BLE 直连，延迟很小（近似"实时"）；摄像头是 RTSP，链路上有真实的
-    编码+网络+解码延迟。所以视频里检测到尖峰的时刻，会比 IMU 里检测到尖峰的
-    时刻晚一个"RTSP延迟"，两者之差就是需要补偿的量——不需要人工掐表比对，
-    全自动测出来。
-
-    返回: 测得的延迟（毫秒，视频比IMU晚多少），测不出明显尖峰则返回 None
-    （调用方应提示用户加大动作幅度重试，或改用 --video-latency-ms 手动指定）。
-    """
-    print(f'── 延迟自动校准（{timeout:.0f}秒）──')
-    print('  请对着摄像头，把项圈/IMU设备猛地晃一下或敲一下（动作要够突然、够大），')
-    print('  建议先等 1~2 秒保持静止，再做这个动作，方便脚本区分"背景噪声"和"真实尖峰"。')
-
+def _drain_video_imu(cap, resize_to, duration: float, collect: bool):
+    """辅助函数：跑 duration 秒，读摄像头帧+收集新到的IMU样本。
+    collect=False 时只是丢弃（用于"静置"阶段稳定画面/避免尖峰检测用到旧帧的残留差值），
+    collect=True 时返回 (video_samples, imu_samples)，时间戳都是各自到达时的PC毫秒。"""
     prev_gray = None
-    video_samples = []  # (ts_ms, motion_score)
-    imu_samples = []    # (ts_ms, accel_dev_g)
+    video_samples = []
+    imu_samples = []
     seen_imu_seq = set()
-
     t_start_ms = time.time() * 1000.0
-    deadline = time.time() + timeout
+    deadline = time.time() + duration
     while time.time() < deadline:
         ok, frame = cap.read()
         if ok and frame is not None:
@@ -210,33 +197,73 @@ def auto_calibrate_latency(cap, resize_to, timeout: float = 8.0):
                 frame = cv2.resize(frame, resize_to)
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             ts_ms = time.time() * 1000.0
-            if prev_gray is not None and prev_gray.shape == gray.shape:
+            if collect and prev_gray is not None and prev_gray.shape == gray.shape:
                 score = float(cv2.absdiff(gray, prev_gray).mean())
                 video_samples.append((ts_ms, score))
             prev_gray = gray
 
-        with ics._imu_lock:
-            recent = [r for r in ics._imu_buffer if r['pc_ms'] >= t_start_ms]
-        for r in recent:
-            if r['seq'] in seen_imu_seq:
-                continue
-            seen_imu_seq.add(r['seq'])
-            mag = (r['acc_x'] ** 2 + r['acc_y'] ** 2 + r['acc_z'] ** 2) ** 0.5
-            imu_samples.append((r['pc_ms'], abs(mag - 1.0)))
+        if collect:
+            with ics._imu_lock:
+                recent = [r for r in ics._imu_buffer if r['pc_ms'] >= t_start_ms]
+            for r in recent:
+                if r['seq'] in seen_imu_seq:
+                    continue
+                seen_imu_seq.add(r['seq'])
+                mag = (r['acc_x'] ** 2 + r['acc_y'] ** 2 + r['acc_z'] ** 2) ** 0.5
+                imu_samples.append((r['pc_ms'], abs(mag - 1.0)))
 
         time.sleep(0.005)
+    return video_samples, imu_samples
 
-    if len(video_samples) < 5 or len(imu_samples) < 5:
-        print('  校准失败：采集到的视频/IMU样本太少（摄像头或IMU还没稳定），跳过自动补偿。')
+
+def auto_calibrate_latency(cap, resize_to, still_sec: float = 5.0,
+                            countdown_sec: int = 3, action_sec: float = 3.0):
+    """
+    自动测量 RTSP 链路的视频延迟（画面内容比真实发生时刻晚多少毫秒）。
+
+    分三个阶段，全程有明确提示，跟着提示做就行:
+        1. 静置 still_sec 秒：保持摄像头画面里的设备/项圈不动，脚本借这段
+           时间让画面和数据流都稳定下来。
+        2. 倒计时 countdown_sec 秒（3、2、1）：提前预告，准备好动作。
+        3. "动手" 窗口 action_sec 秒：这段时间内随便多用力晃/敲一下都行——
+           不需要掐时机、不需要精确对准某一刻，只要在这个窗口内做出一个
+           明显的大动作，脚本只会在这个窗口的数据里找"最大的那个尖峰"。
+
+    原理：这次动作会同时在两条独立的时间线上留下一个"尖峰"：
+        1. 视频画面：连续帧灰度图的逐帧差异（mean abs diff）会突然变大。
+        2. IMU 加速度：|acc| 偏离静止时的 1g 会突然变大。
+    IMU 是 BLE 直连，延迟很小（近似"实时"）；摄像头是 RTSP，链路上有真实的
+    编码+网络+解码延迟。所以视频里检测到尖峰的时刻，会比 IMU 里检测到尖峰的
+    时刻晚一个"RTSP延迟"，两者之差就是需要补偿的量。
+
+    返回: 测得的延迟（毫秒，视频比IMU晚多少），测不出明显尖峰则返回 None
+    （调用方应提示用户加大动作幅度重试，或改用 --video-latency-ms 手动指定）。
+    """
+    print(f'── 延迟自动校准 ──')
+    print(f'  第1步/静置：接下来 {still_sec:.0f} 秒请保持项圈/IMU设备和摄像头画面都不动...')
+    _drain_video_imu(cap, resize_to, still_sec, collect=False)
+
+    print('  第2步/准备：倒计时结束后有一个动作窗口，到时候用力晃一下或敲一下项圈/设备就行，')
+    print('  不用掐准时机、不用小心翼翼——窗口内随便什么时候动、动作多大力都可以。')
+    for n in range(countdown_sec, 0, -1):
+        print(f'    {n}...')
+        time.sleep(1.0)
+
+    print(f'  第3步/动手：现在！接下来 {action_sec:.0f} 秒内用力晃一下/敲一下项圈或设备 👋')
+    video_samples, imu_samples = _drain_video_imu(cap, resize_to, action_sec, collect=True)
+    print('  动作窗口结束，正在计算...')
+
+    if len(video_samples) < 3 or len(imu_samples) < 3:
+        print('  校准失败：这个窗口内采集到的视频/IMU样本太少（摄像头或IMU可能还没稳定），跳过自动补偿。')
         return None
 
     video_peak_ts, video_peak_val = max(video_samples, key=lambda x: x[1])
     imu_peak_ts, imu_peak_val = max(imu_samples, key=lambda x: x[1])
 
     if video_peak_val < _MOTION_SPIKE_THRESHOLD or imu_peak_val < _ACCEL_SPIKE_THRESHOLD_G:
-        print(f'  校准失败：没检测到明显的晃动尖峰（视频峰值={video_peak_val:.1f}，'
-              f'IMU峰值={imu_peak_val:.2f}g），动作幅度可能不够大，跳过自动补偿。'
-              '可以重新跑一次，或者用 --video-latency-ms 手动指定。')
+        print(f'  校准失败：这个窗口内没检测到明显的晃动尖峰（视频峰值={video_peak_val:.1f}，'
+              f'IMU峰值={imu_peak_val:.2f}g），可能动作幅度不够大，或者没在动作窗口内做动作。'
+              '可以重新跑一次 --auto-calibrate-latency，或者用 --video-latency-ms 手动指定。')
         return None
 
     latency_ms = video_peak_ts - imu_peak_ts
@@ -361,7 +388,12 @@ def run_camera(args):
     if latency_ms is not None:
         print(f'使用手动指定的视频延迟补偿: {latency_ms:+.0f}ms（--video-latency-ms）')
     elif args.auto_calibrate_latency and record_mode and not ics.stop_event.is_set():
-        measured = auto_calibrate_latency(cap, resize_to, timeout=args.calibrate_timeout)
+        measured = auto_calibrate_latency(
+            cap, resize_to,
+            still_sec=args.calibrate_still_sec,
+            countdown_sec=args.calibrate_countdown_sec,
+            action_sec=args.calibrate_action_sec,
+        )
         if measured is not None:
             latency_ms = measured
             if not args.no_latency_cache:
@@ -691,9 +723,14 @@ def main():
                          '"视频帧时间戳 - 这个值"去匹配，优先级最高（会跳过缓存和自动校准）。'
                          '不指定的话，按顺序：本次 --auto-calibrate-latency 现测的结果 > 之前'
                          '缓存过的同一个流的校准结果 > 0（不补偿）。')
-    ap.add_argument('--calibrate-timeout', type=float, default=8.0,
-                    help='--auto-calibrate-latency 的采样窗口时长（秒），默认8秒，'
-                         '需要在这段时间内完成"晃动/敲击"动作')
+    ap.add_argument('--calibrate-still-sec', type=float, default=5.0,
+                    help='--auto-calibrate-latency 第1步"静置"时长（秒），默认5秒，'
+                         '这段时间保持设备/画面不动即可')
+    ap.add_argument('--calibrate-countdown-sec', type=int, default=3,
+                    help='--auto-calibrate-latency 第2步倒计时秒数，默认3秒（3、2、1）')
+    ap.add_argument('--calibrate-action-sec', type=float, default=3.0,
+                    help='--auto-calibrate-latency 第3步"动手"窗口时长（秒），默认3秒，'
+                         '倒计时结束后这段时间内随时用力晃/敲一下都可以，不用掐时机')
     ap.add_argument('--latency-cache-file', default=os.path.join(
                         os.path.dirname(os.path.abspath(__file__)), '.rtsp_latency_cache.json'),
                     help='延迟校准结果的缓存文件路径，按 host:port/stream 分别存一份，'
