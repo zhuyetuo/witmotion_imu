@@ -352,7 +352,14 @@ def _run_one_segment(args, cap, actual_w, actual_h, target_fps, frame_interval,
     dev_tag = args.device
     mac_tag = ics.ble_mac[0].replace(':', '').lower()
     os.makedirs(args.out_dir, exist_ok=True)
-    base = os.path.join(args.out_dir, f'{dev_tag}_{mac_tag}_rtsp_{args.stream}_{ts_tag}')
+    # 注意：文件名不能出现 "_camN"（下划线+cam+数字）这种子串——label_infra 的
+    # 上传/导入脚本（upload_server.py）用正则 `_cam\d+` 判断"是不是多摄像头会话"，
+    # 命中就会把 task data 的 key 从单视角的 "video" 改成多视角的 "video1"/"video2"...
+    # 如果 go2rtc 的流名称正好叫 cam0/cam1 这种，之前拼出来的文件名会变成
+    # "..._rtsp_cam0_..."，被误判成多摄像头，导致导入单视角项目时报
+    # "'video' key is expected in task data" 400错误。这里用连字符而不是
+    # 下划线拼流名称，规避这个正则，不管 go2rtc 流叫什么名字都不会误触发。
+    base = os.path.join(args.out_dir, f'{dev_tag}_{mac_tag}_rtspstream-{args.stream}_{ts_tag}')
 
     if latency_ms:
         print(f'本段录制使用视频延迟补偿: {latency_ms:+.0f}ms（查找IMU样本时，视频帧时间戳会先减去这个量）')
