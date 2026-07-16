@@ -223,5 +223,5 @@ data/*.mp4
 data/test/*.csv
 data/test/*.mp4
 
-# RTSP 延迟校准缓存（机器/网络环境相关，不提交）
+# RTSP 视频延迟补偿配置（机器/网络环境相关，因人而异，不提交）
 .rtsp_latency_cache.json
