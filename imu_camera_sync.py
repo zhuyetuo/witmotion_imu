@@ -406,7 +406,16 @@ def resample_raw_imu(raw_path: str, out_path: str, target_hz: float,
     step_ms = 1000.0 / target_hz
     diffs_ms = np.diff(t)
     avg_dt_ms = float(np.mean(diffs_ms)) if len(diffs_ms) else step_ms
-    median_dt_ms = float(np.median(diffs_ms)) if len(diffs_ms) else step_ms
+    # BLE 一次 notify 里经常打包好几个采样点一起送到（同一批内的包处理耗时
+    # 几乎为0），这些批内间隔会拉低整体中位数，导致正常的"批与批之间"间隔
+    # （比如25次/秒的notify、每次4个包，批间隔~40ms）被误判成断连缺口。
+    # 用于判定缺口阈值的中位数，只统计明显大于0的间隔（过滤掉批内间隔），
+    # 才能代表真实的"正常采样节奏"；真正的断连间隔（几十秒到几分钟级）在
+    # 这些间隔里仍然是极少数离群值，中位数依然稳健，不会被平均拉偏。
+    gap_basis_diffs = diffs_ms[diffs_ms > 1.0]
+    if len(gap_basis_diffs) == 0:
+        gap_basis_diffs = diffs_ms
+    median_dt_ms = float(np.median(gap_basis_diffs)) if len(gap_basis_diffs) else step_ms
     window = max(1, int(round(step_ms / avg_dt_ms))) if avg_dt_ms > 0 else 1
     if window > 1:
         kernel = np.ones(window) / window
