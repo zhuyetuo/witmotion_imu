@@ -366,7 +366,7 @@ _TS_FMT = '%Y-%m-%d %H:%M:%S.%f'
 
 def resample_raw_imu(raw_path: str, out_path: str, target_hz: float,
                       t_start_ms: float = None, t_end_ms: float = None,
-                      gap_ratio: float = 5.0):
+                      gap_ratio: float = 5.0, latency_ms: float = 0.0):
     """
     独立于摄像头帧率，把 {base}_raw.csv 里的完整原始 IMU 流降采样到 target_hz。
     降采样前先做一次简单的滑动平均低通滤波（窗口按原始/目标采样率之比估算），
@@ -384,6 +384,13 @@ def resample_raw_imu(raw_path: str, out_path: str, target_hz: float,
     （通常传视频第一帧/最后一帧的真实 cam_timestamp），保证降采样结果与视频
     的起止时间、时长严格对齐；不提供则退化为用 raw.csv 自身的首尾时间
     （可能比视频略宽，因为 BLE 数据流启停时刻与视频帧采集不完全同步）。
+
+    latency_ms: 视频延迟补偿（比如 RTSP 链路的画面延迟，正值=画面比IMU晚这么多）。
+    输出的每一行时间戳（第一列 timestamp）仍然是视频/目标时间轴上的时刻（不变，
+    Label Studio 靠这一列跟视频对齐播放），但查这一行该取哪个 IMU 数值时，会先
+    把时间戳减去 latency_ms 再去原始IMU流里插值，取"画面里那个动作真实发生时刻"
+    对应的数值，而不是直接用画面到达时刻——否则 RTSP 摄像头这种有真实链路延迟
+    的场景下，配对的数值会比画面动作提前一个延迟量，是系统性偏差。
     """
     try:
         import numpy as np
@@ -429,11 +436,15 @@ def resample_raw_imu(raw_path: str, out_path: str, target_hz: float,
     range_end   = min(range_end, t[-1])
 
     new_t = np.arange(range_start, range_end, step_ms)
+    # 输出的时间戳列（跟视频对齐用）还是 new_t 本身；但去 IMU 原始流里取值/判断
+    # 缺口时，用减去 latency_ms 之后的时刻——这样才是画面里那个动作真实发生的
+    # 时刻对应的 IMU 数值，而不是画面到达（含链路延迟）时刻的数值。
+    lookup_t = new_t - latency_ms
 
     # 每个目标时间点两侧最近的真实样本间隔多大；超过阈值说明这个点落在一次
     # 真实断连缺口里，不能编数据
     gap_threshold_ms = median_dt_ms * gap_ratio
-    idx = np.clip(np.searchsorted(t, new_t), 1, len(t) - 1)
+    idx = np.clip(np.searchsorted(t, lookup_t), 1, len(t) - 1)
     local_gap_ms = t[idx] - t[idx - 1]
     is_gap = local_gap_ms > gap_threshold_ms
     gap_count = int(np.sum(is_gap))
@@ -441,12 +452,12 @@ def resample_raw_imu(raw_path: str, out_path: str, target_hz: float,
     with open(out_path, 'w', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
         writer.writerow(CSV_HEADER)
-        for ts_ms, gap in zip(new_t, is_gap):
+        for ts_ms, lookup_ts_ms, gap in zip(new_t, lookup_t, is_gap):
             ts_str = datetime.fromtimestamp(ts_ms / 1000.0).strftime(_TS_FMT)[:-3]
             if gap:
                 values = ['', '', '', '', '', '']
             else:
-                values = [f'{np.interp(ts_ms, t, cols[name]):.6f}'
+                values = [f'{np.interp(lookup_ts_ms, t, cols[name]):.6f}'
                           for name in ('acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z')]
             writer.writerow([ts_str] + values)
 

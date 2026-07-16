@@ -650,6 +650,7 @@ def _run_one_segment(args, cap, actual_w, actual_h, target_fps, frame_interval,
             ics.resample_raw_imu(
                 f'{base}_raw.csv', f'{resampled_base}.csv', args.resample_hz,
                 t_start_ms=first_cam_ts_ms, t_end_ms=last_cam_ts_ms,
+                latency_ms=latency_ms,
             )
             print(f'       {resampled_base}.csv（降采样，起止时间已对齐视频）')
             try:
