@@ -20,6 +20,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `imu_camera_sync_multi.py` | 一个摄像头 + 多个 IMU 设备同步采集，功能已跟 `imu_camera_sync.py` 对齐（含 `--loop`/`--resample-hz`/`--probe`/`--resample-only`） |
 | `imu_camera_sync_multicam.py` | 多个摄像头 + 多个 IMU 设备同步采集，功能已跟 `imu_camera_sync.py`/`imu_camera_sync_multi.py` 对齐（含 `--loop`/`--resample-hz`/`--probe`/`--resample-only`），复用 `imu_camera_sync_multi.py` 的 BLE 部分 |
 | `imu_camera_sync_rtsp.py` | IMU + RTSP摄像头（[micam_dev](https://github.com/zhuyetuo/micam_dev)/go2rtc 转出来的小米摄像头流）同步采集，跟 `imu_camera_sync.py` 功能一致（含 `--loop`/`--resample-hz`/`--probe`/`--resample-only`），直接复用 `imu_camera_sync.py` 的 BLE/CSV/降采样/对齐校验逻辑，只是摄像头来源换成 RTSP |
+| `imu_camera_sync_rtsp_multicam.py` | 多路RTSP摄像头 + 多个IMU设备同步采集，`imu_camera_sync_rtsp.py`（单路RTSP）+ `imu_camera_sync_multicam.py`（多本地摄像头）的结合体，每路RTSP流可以有各自不同的延迟补偿值 |
 | `check_multi_imu_quality.py` | 统计 `imu_camera_sync_multi.py` 生成的 `_meta.csv` 里各设备的 lag/missing/hz 质量 |
 | `check_alignment.py` | 校验录制的视频与 CSV 是否严格对齐（帧数/时长/起止时间）；`imu_camera_sync.py` 录制结束会自动调用 |
 | `data/` | 采集输出文件目录（CSV、MP4） |
@@ -577,6 +578,40 @@ python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit -
 python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit --name WTSDCL \
     --duration 60 --video-latency-ms 700
 ```
+
+### 多路 RTSP 摄像头 + 多个 IMU 设备同步采集
+
+`imu_camera_sync_rtsp_multicam.py` 是 `imu_camera_sync_rtsp.py`（单路RTSP）+ `imu_camera_sync_multicam.py`（多本地摄像头）的结合体：多路 RTSP 流（共用同一个 `--host`/`--port`，`--stream` 重复传）+ 多个 IMU 设备同步采集。IMU 采集逻辑直接复用 `imu_camera_sync_multi.py`，RTSP 低延迟读取复用 `imu_camera_sync_rtsp.py`。
+
+```bash
+# 2路RTSP流（cam0/cam1） + 1个IMU设备
+python imu_camera_sync_rtsp_multicam.py --host 192.168.2.140 --stream cam0 --stream cam1 \
+    --imu wit=WT901BLE68 --duration 60
+
+# 降采样到16Hz，循环录制，只保留降采样版
+python imu_camera_sync_rtsp_multicam.py --host 192.168.2.140 --stream cam0 --stream cam1 \
+    --imu wit=WT901BLE68 --duration 60 --resample-hz 16 --loop --resample-only \
+    --out-dir data/rtsp_multicam --warmup-sec 10
+
+# 探测每路流的分辨率/帧率 + IMU 实际输出频率
+python imu_camera_sync_rtsp_multicam.py --host 192.168.2.140 --stream cam0 --stream cam1 \
+    --imu wit=WT901BLE68 --probe
+```
+
+`--stream` 可重复传，第一个对应 `cam1`，第二个对应 `cam2`，以此类推。
+
+**每路流各自的延迟补偿**：不同RTSP流的链路延迟可能不一样（不同摄像头/网络路径），所以延迟补偿是按每一路流单独配置的，读取方式和文件跟 `imu_camera_sync_rtsp.py` 完全一样——同一个 `.rtsp_latency_cache.json`，按 `host:port/stream` 分别配置：
+
+```json
+{
+  "192.168.2.140:8554/cam0": {"latency_ms": 700},
+  "192.168.2.140:8554/cam1": {"latency_ms": 900}
+}
+```
+
+每次运行自动按各自的 `host:port/stream` 读取对应的值，不用传参数。也可以用 `--video-latency-ms` 给**所有流**统一指定同一个值（会覆盖配置文件里每一路的值）。
+
+**补偿只应用在降采样配对文件上**：不同摄像头延迟不一样，没法在"所有摄像头共用一份"的逐帧组合CSV（`{base}.csv`）里同时精确补偿多路不同的延迟，所以那份文件里的对齐用的是未做延迟补偿的原始抓帧时刻匹配，只作调试/参考用；真正标注请用每路摄像头自己的降采样配对文件（`{base}_camN_imuM_resampled{HZ}hz.mp4/.csv`），这些文件在录制结束后会按各自那一路的延迟值分别正确计算。
 
 ### 时间漂移分析
 
