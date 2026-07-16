@@ -19,6 +19,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `imu_camera_sync.py` | IMU + 摄像头同步采集（BLE 后台线程 + 主线程 OpenCV） |
 | `imu_camera_sync_multi.py` | 一个摄像头 + 多个 IMU 设备同步采集，功能已跟 `imu_camera_sync.py` 对齐（含 `--loop`/`--resample-hz`/`--probe`/`--resample-only`） |
 | `imu_camera_sync_multicam.py` | 多个摄像头 + 多个 IMU 设备同步采集，功能已跟 `imu_camera_sync.py`/`imu_camera_sync_multi.py` 对齐（含 `--loop`/`--resample-hz`/`--probe`/`--resample-only`），复用 `imu_camera_sync_multi.py` 的 BLE 部分 |
+| `imu_camera_sync_rtsp.py` | IMU + RTSP摄像头（[micam_dev](https://github.com/zhuyetuo/micam_dev)/go2rtc 转出来的小米摄像头流）同步采集，跟 `imu_camera_sync.py` 功能一致（含 `--loop`/`--resample-hz`/`--probe`/`--resample-only`），直接复用 `imu_camera_sync.py` 的 BLE/CSV/降采样/对齐校验逻辑，只是摄像头来源换成 RTSP |
 | `check_multi_imu_quality.py` | 统计 `imu_camera_sync_multi.py` 生成的 `_meta.csv` 里各设备的 lag/missing/hz 质量 |
 | `check_alignment.py` | 校验录制的视频与 CSV 是否严格对齐（帧数/时长/起止时间）；`imu_camera_sync.py` 录制结束会自动调用 |
 | `data/` | 采集输出文件目录（CSV、MP4） |
@@ -502,6 +503,18 @@ python imu_camera_sync_multicam.py --imu wit=WT901BLE68 --imu hicc=EA:CB:3E:CF:0
 
 `--camera` 可重复传，第一个对应 `cam1`，第二个对应 `cam2`，以此类推。
 
+**先探测摄像头实际支持的帧率，再决定 `--cam-fps`**：不同摄像头硬件支持的帧率不一样（有的到20fps封顶，有的能到60fps），录制前建议先用 `--probe` 看一眼实际能力（顺带也会连一下每个IMU设备测一下各自实际输出频率，一次性看全）：
+
+```bash
+python imu_camera_sync_multicam.py --camera 0 --imu wit=WT901BLE68 --imu wit=WTSDCL --probe
+```
+
+确认摄像头能跑到你想要的帧率后，用 `--cam-fps` 指定目标帧率（默认 20，比如改成 25）：
+
+```bash
+python imu_camera_sync_multicam.py --imu wit=WT901BLE68 --imu wit=WTSDCL --duration 10 --resample-hz 16 --camera 0 --width 1280 --height 720 --cam-fps 25 --loop --resample-only --out-dir data/multicam_multiimu --warmup-sec 1
+```
+
 **输出文件：**
 
 | 文件 | 内容 |
@@ -515,6 +528,31 @@ python imu_camera_sync_multicam.py --imu wit=WT901BLE68 --imu hicc=EA:CB:3E:CF:0
 由于每个 tick 都是同时抓取所有摄像头一帧，所以每路视频的帧数理论上都应该严格等于组合 CSV 的行数；录制结束会自动逐个摄像头核对这一点（不复用 `check_alignment.py`，因为它假设视频和 CSV 同名成对，这里是 N 路视频共享 1 份 CSV，命名规则不满足它的假设）。
 
 **降采样配对**：每个 IMU 设备降采样后的 CSV，会跟**每一路摄像头**的视频各配一份（`{base}_camX_imuY_resampled{HZ}hz.mp4/.csv`），比如 2 路摄像头 + 2 个设备会生成 4 组配对文件，方便挑任意一路摄像头画面配任意一个设备的数据去 Label Studio 标注。`--resample-only` 会在生成完所有配对文件后，删除原始的 `{base}_camN.mp4`、`{base}.csv`、`{base}_meta.csv`、`{base}_imuN_raw.csv`。
+
+### IMU + RTSP摄像头（micam_dev/go2rtc）同步采集
+
+`imu_camera_sync_rtsp.py` 跟 `imu_camera_sync.py` 功能完全一样（BLE采集、事件驱动对齐、VFR视频写入、`--resample-hz`降采样、断连缺口留空、录制结束自动跑`check_alignment.py`等），唯一区别是摄像头来源不是本地 USB 摄像头，而是 [micam_dev](https://github.com/zhuyetuo/micam_dev)（go2rtc）转出来的小米摄像头 RTSP 流。IMU/CSV/降采样/对齐校验逻辑直接 `import imu_camera_sync` 复用，不重复实现。
+
+```bash
+# 先探测 RTSP 流实际能拿到的分辨率/帧率 + IMU 实际输出频率
+python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --probe --device wit --name WTSDCL
+
+# 录制60秒
+python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit --name WTSDCL --duration 60
+
+# 降采样到16Hz，循环录制，只保留降采样版
+python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit --name WTSDCL \
+    --duration 60 --resample-hz 16 --loop --resample-only --out-dir data/rtsp
+
+# 画面统一缩放到指定尺寸（RTSP流本身只有几档固定质量，不支持任意分辨率）
+python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit --name WTSDCL --resize 1280x720
+```
+
+**关于延迟**：RTSP over TCP + FFmpeg 默认会做内部缓冲，实测常见 1~2秒 延迟（分辨率越高越明显）。本脚本参考 `micam_dev/scripts/capture_frame.py` 的两个做法把延迟降下来：
+1. 用 `OPENCV_FFMPEG_CAPTURE_OPTIONS` 环境变量告诉 FFmpeg 后端关闭内部缓冲（`fflags=nobuffer`、`flags=low_delay`），这是延迟的大头；
+2. 用后台线程持续读流，主循环永远拿"最新一帧"而不是排队处理堆积的旧帧（`LatestFrameReader`）。
+
+即便这样，RTSP 链路（摄像头编码→网络→go2rtc转发→FFmpeg解码）本身还是会比本地USB摄像头多几十到几百毫秒延迟，这是链路结构决定的，不是脚本能完全消除的；如果还嫌延迟大，可以到 go2rtc 端确认用的是较低分辨率/码率的 subtype（`capture_frame.py` 注释里提到摄像头只提供几档固定质量 `subtype=0-5`，不是任意分辨率）。由于同步是按 PC 系统时间对齐（跟本地摄像头版本一样），链路延迟不影响 IMU 与视频"谁对应谁"的正确性，只是画面看起来会比真实动作慢一点点，不影响标注数据本身的对齐精度。
 
 ### 时间漂移分析
 
