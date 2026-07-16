@@ -173,17 +173,18 @@ def save_cached_latency(cache_file: str, host: str, port: int, stream: str, late
         print(f'  警告: 延迟缓存写入失败: {e}（这次测出的值仍会用于本次录制，只是不会持久化）')
 
 
-# 视频内容判定为"发生在多久之前"的固定偏移（RTSP链路自身的编码+网络+解码延迟）。
-# 通过 auto_calibrate_latency() 自动测出来，用于把视频帧的时间戳往回拨这个量，
-# 再去 IMU 缓冲区里找对应的真实样本，而不是直接拿"收到这一帧的PC时刻"去找。
-_MOTION_SPIKE_THRESHOLD = 15.0   # 灰度帧间均值绝对差，明显晃动/敲击通常远超这个值（静止时通常<3）
-_ACCEL_SPIKE_THRESHOLD_G = 0.3   # 加速度模长偏离1g的量，明显晃动/敲击通常远超这个值（静止时通常<0.05g）
+# 尖峰判定阈值的兜底下限（绝对值）。实际用的阈值是"静置阶段测出来的背景噪声
+# 基线 × 倍数"，因为不同摄像头/分辨率/压缩率/光线下，画面帧间差异的噪声水平
+# 差异很大（压缩率高、分辨率低时，哪怕真实晃动，像素级differences也会被压缩
+# 抹平很多），固定死一个绝对阈值在有些设备上会太严格、测不出来。
+_MOTION_SPIKE_FLOOR = 5.0        # 灰度帧间均值绝对差的最低阈值下限
+_ACCEL_SPIKE_FLOOR_G = 0.15      # 加速度模长偏离1g的最低阈值下限
+_SPIKE_BASELINE_FACTOR = 4.0     # 阈值 = max(下限, 静置阶段噪声基线 × 这个倍数)
 
 
-def _drain_video_imu(cap, resize_to, duration: float, collect: bool):
-    """辅助函数：跑 duration 秒，读摄像头帧+收集新到的IMU样本。
-    collect=False 时只是丢弃（用于"静置"阶段稳定画面/避免尖峰检测用到旧帧的残留差值），
-    collect=True 时返回 (video_samples, imu_samples)，时间戳都是各自到达时的PC毫秒。"""
+def _drain_video_imu(cap, resize_to, duration: float):
+    """辅助函数：跑 duration 秒，读摄像头帧+收集新到的IMU样本，
+    返回 (video_samples, imu_samples)，时间戳都是各自到达时的PC毫秒。"""
     prev_gray = None
     video_samples = []
     imu_samples = []
@@ -197,20 +198,19 @@ def _drain_video_imu(cap, resize_to, duration: float, collect: bool):
                 frame = cv2.resize(frame, resize_to)
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             ts_ms = time.time() * 1000.0
-            if collect and prev_gray is not None and prev_gray.shape == gray.shape:
+            if prev_gray is not None and prev_gray.shape == gray.shape:
                 score = float(cv2.absdiff(gray, prev_gray).mean())
                 video_samples.append((ts_ms, score))
             prev_gray = gray
 
-        if collect:
-            with ics._imu_lock:
-                recent = [r for r in ics._imu_buffer if r['pc_ms'] >= t_start_ms]
-            for r in recent:
-                if r['seq'] in seen_imu_seq:
-                    continue
-                seen_imu_seq.add(r['seq'])
-                mag = (r['acc_x'] ** 2 + r['acc_y'] ** 2 + r['acc_z'] ** 2) ** 0.5
-                imu_samples.append((r['pc_ms'], abs(mag - 1.0)))
+        with ics._imu_lock:
+            recent = [r for r in ics._imu_buffer if r['pc_ms'] >= t_start_ms]
+        for r in recent:
+            if r['seq'] in seen_imu_seq:
+                continue
+            seen_imu_seq.add(r['seq'])
+            mag = (r['acc_x'] ** 2 + r['acc_y'] ** 2 + r['acc_z'] ** 2) ** 0.5
+            imu_samples.append((r['pc_ms'], abs(mag - 1.0)))
 
         time.sleep(0.005)
     return video_samples, imu_samples
@@ -241,7 +241,18 @@ def auto_calibrate_latency(cap, resize_to, still_sec: float = 5.0,
     """
     print(f'── 延迟自动校准 ──')
     print(f'  第1步/静置：接下来 {still_sec:.0f} 秒请保持项圈/IMU设备和摄像头画面都不动...')
-    _drain_video_imu(cap, resize_to, still_sec, collect=False)
+    baseline_video, baseline_imu = _drain_video_imu(cap, resize_to, still_sec)
+
+    # 用静置阶段实测的"背景噪声"水平算这次的判定阈值，而不是用一个固定死的
+    # 绝对数字——不同摄像头/分辨率/压缩率/光线下，画面噪声水平差异很大，
+    # 固定阈值在有些设备上会偏严格，测不出真实发生的尖峰（比如压缩率高、
+    # 分辨率低时，帧间差异本身就被压缩抹平了不少）。
+    video_baseline_val = statistics.median([v for _, v in baseline_video]) if baseline_video else 0.0
+    imu_baseline_val = statistics.median([v for _, v in baseline_imu]) if baseline_imu else 0.0
+    motion_threshold = max(_MOTION_SPIKE_FLOOR, video_baseline_val * _SPIKE_BASELINE_FACTOR)
+    accel_threshold = max(_ACCEL_SPIKE_FLOOR_G, imu_baseline_val * _SPIKE_BASELINE_FACTOR)
+    print(f'  静置阶段背景噪声: 视频={video_baseline_val:.1f}  IMU={imu_baseline_val:.3f}g'
+          f'  →  本次判定阈值: 视频>{motion_threshold:.1f}  IMU>{accel_threshold:.2f}g')
 
     print('  第2步/准备：倒计时结束后有一个动作窗口，到时候用力晃一下或敲一下项圈/设备就行，')
     print('  不用掐准时机、不用小心翼翼——窗口内随便什么时候动、动作多大力都可以。')
@@ -250,7 +261,7 @@ def auto_calibrate_latency(cap, resize_to, still_sec: float = 5.0,
         time.sleep(1.0)
 
     print(f'  第3步/动手：现在！接下来 {action_sec:.0f} 秒内用力晃一下/敲一下项圈或设备 👋')
-    video_samples, imu_samples = _drain_video_imu(cap, resize_to, action_sec, collect=True)
+    video_samples, imu_samples = _drain_video_imu(cap, resize_to, action_sec)
     print('  动作窗口结束，正在计算...')
 
     if len(video_samples) < 3 or len(imu_samples) < 3:
@@ -260,9 +271,9 @@ def auto_calibrate_latency(cap, resize_to, still_sec: float = 5.0,
     video_peak_ts, video_peak_val = max(video_samples, key=lambda x: x[1])
     imu_peak_ts, imu_peak_val = max(imu_samples, key=lambda x: x[1])
 
-    if video_peak_val < _MOTION_SPIKE_THRESHOLD or imu_peak_val < _ACCEL_SPIKE_THRESHOLD_G:
-        print(f'  校准失败：这个窗口内没检测到明显的晃动尖峰（视频峰值={video_peak_val:.1f}，'
-              f'IMU峰值={imu_peak_val:.2f}g），可能动作幅度不够大，或者没在动作窗口内做动作。'
+    if video_peak_val < motion_threshold or imu_peak_val < accel_threshold:
+        print(f'  校准失败：这个窗口内没检测到明显的晃动尖峰（视频峰值={video_peak_val:.1f}，阈值{motion_threshold:.1f}；'
+              f'IMU峰值={imu_peak_val:.2f}g，阈值{accel_threshold:.2f}g），可能动作幅度不够大，或者没在动作窗口内做动作。'
               '可以重新跑一次 --auto-calibrate-latency，或者用 --video-latency-ms 手动指定。')
         return None
 
