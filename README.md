@@ -502,6 +502,18 @@ python imu_camera_sync_multicam.py --imu wit=WT901BLE68 --imu hicc=EA:CB:3E:CF:0
 
 `--camera` 可重复传，第一个对应 `cam1`，第二个对应 `cam2`，以此类推。
 
+**先探测摄像头实际支持的帧率，再决定 `--cam-fps`**：不同摄像头硬件支持的帧率不一样（有的到20fps封顶，有的能到60fps），录制前建议先用 `--probe` 看一眼实际能力（顺带也会连一下每个IMU设备测一下各自实际输出频率，一次性看全）：
+
+```bash
+python imu_camera_sync_multicam.py --camera 0 --imu wit=WT901BLE68 --imu wit=WTSDCL --probe
+```
+
+确认摄像头能跑到你想要的帧率后，用 `--cam-fps` 指定目标帧率（默认 20，比如改成 25）：
+
+```bash
+python imu_camera_sync_multicam.py --imu wit=WT901BLE68 --imu wit=WTSDCL --duration 10 --resample-hz 16 --camera 0 --width 1280 --height 720 --cam-fps 25 --loop --resample-only --out-dir data/multicam_multiimu --warmup-sec 1
+```
+
 **输出文件：**
 
 | 文件 | 内容 |
