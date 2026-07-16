@@ -552,7 +552,21 @@ python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit -
 1. 用 `OPENCV_FFMPEG_CAPTURE_OPTIONS` 环境变量告诉 FFmpeg 后端关闭内部缓冲（`fflags=nobuffer`、`flags=low_delay`），这是延迟的大头；
 2. 用后台线程持续读流，主循环永远拿"最新一帧"而不是排队处理堆积的旧帧（`LatestFrameReader`）。
 
-即便这样，RTSP 链路（摄像头编码→网络→go2rtc转发→FFmpeg解码）本身还是会比本地USB摄像头多几十到几百毫秒延迟，这是链路结构决定的，不是脚本能完全消除的；如果还嫌延迟大，可以到 go2rtc 端确认用的是较低分辨率/码率的 subtype（`capture_frame.py` 注释里提到摄像头只提供几档固定质量 `subtype=0-5`，不是任意分辨率）。由于同步是按 PC 系统时间对齐（跟本地摄像头版本一样），链路延迟不影响 IMU 与视频"谁对应谁"的正确性，只是画面看起来会比真实动作慢一点点，不影响标注数据本身的对齐精度。
+即便这样，RTSP 链路（摄像头编码→网络→go2rtc转发→FFmpeg解码）本身还是会比本地USB摄像头多几十到几百毫秒延迟，这是链路结构决定的，不是脚本能完全消除的；如果还嫌延迟大，可以到 go2rtc 端确认用的是较低分辨率/码率的 subtype（`capture_frame.py` 注释里提到摄像头只提供几档固定质量 `subtype=0-5`，不是任意分辨率）。
+
+**这个延迟会不会影响标注（画面动作 vs 配对的IMU数值对不对得上）**：会，而且是需要处理的问题——跟本地USB摄像头不一样。同步逻辑是拿"收到这一帧的PC时刻"去IMU缓冲区找最近的样本；本地摄像头传输延迟接近0，"收到时刻"≈"画面里动作真实发生的时刻"，没问题。但RTSP有真实的编码+网络+解码延迟，"收到这一帧"的时候，画面内容其实是**之前**发生的，而IMU是BLE直连、近似实时——如果不做任何处理，配对给这一帧的IMU数值会比画面里的动作提前了一个"RTSP延迟"的量，是系统性偏差，不是随机噪声，标注时会看到画面和数值对不上。
+
+**自动延迟校准**：用 `--auto-calibrate-latency`，预热结束后脚本会提示你对着摄像头把设备猛地晃一下/敲一下，随后自动在视频画面（连续帧灰度差）和IMU加速度（模长偏离1g的程度）两条独立时间线上分别检测这次动作造成的"尖峰"，两个尖峰的时间差就是RTSP视频延迟，全自动测出来、不需要人工掐表比对，测出来之后会在查找IMU样本时自动把视频帧时间戳往回拨这个量再匹配。如果动作幅度不够大、检测不到明显尖峰，会提示重试或退回 `--video-latency-ms` 手动指定的值（默认0，不补偿）。
+
+```bash
+# 自动校准延迟后再录制（预热5秒后会提示晃动设备，8秒内完成即可）
+python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit --name WTSDCL \
+    --duration 60 --auto-calibrate-latency
+
+# 已经知道大概延迟数值（比如测过是180ms），手动指定，跳过自动校准环节
+python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit --name WTSDCL \
+    --duration 60 --video-latency-ms 180
+```
 
 ### 时间漂移分析
 
