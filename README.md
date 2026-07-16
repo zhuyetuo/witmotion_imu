@@ -556,32 +556,26 @@ python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit -
 
 **这个延迟会不会影响标注（画面动作 vs 配对的IMU数值对不对得上）**：会，而且是需要处理的问题——跟本地USB摄像头不一样。同步逻辑是拿"收到这一帧的PC时刻"去IMU缓冲区找最近的样本；本地摄像头传输延迟接近0，"收到时刻"≈"画面里动作真实发生的时刻"，没问题。但RTSP有真实的编码+网络+解码延迟，"收到这一帧"的时候，画面内容其实是**之前**发生的，而IMU是BLE直连、近似实时——如果不做任何处理，配对给这一帧的IMU数值会比画面里的动作提前了一个"RTSP延迟"的量，是系统性偏差，不是随机噪声，标注时会看到画面和数值对不上。
 
-**自动延迟校准**：用 `--auto-calibrate-latency`，预热结束后分三步走，全程有明确提示：
-1. **静置**（默认5秒，`--calibrate-still-sec`调）：保持设备和画面不动，脚本借这段时间顺带测一下"背景噪声"水平（不同摄像头/分辨率/压缩率下噪声差异很大），用来算这次判定尖峰的阈值，不是固定死一个数字——避免有的摄像头因为压缩率高、画面差异被抹平，明明真的晃动了却因为阈值太严格测不出来；
-2. **倒计时**（默认3秒，`--calibrate-countdown-sec`调）：打印"3、2、1"预告，提前准备好；
-3. **动手窗口**（默认3秒，`--calibrate-action-sec`调）：提示"现在！"之后，这几秒内**随便什么时候、多大力晃/敲一下都行**，不用掐准时机——脚本只在这个窗口的数据里找"最大的那个尖峰"，不需要精确对准某一刻。
+**延迟补偿配置文件**：延迟值需要自己测出来（比如对着摄像头把设备晃一下，人工对比视频里动作出现的时刻和IMU数据里加速度突变的时刻差多少毫秒），然后手动写进一个 JSON 配置文件，按 `host:port/stream` 分别配置：
 
-原理：这次动作会同时在视频画面（连续帧灰度差）和IMU加速度（模长偏离1g的程度）两条独立时间线上留下一个"尖峰"，两个尖峰的时间差就是RTSP视频延迟，全自动测出来、不需要人工掐表比对。测出来之后会在查找IMU样本时自动把视频帧时间戳往回拨这个量再匹配。如果这个窗口内没检测到明显尖峰（比如没听到"现在"就动、或者动作幅度不够大），会提示重试，也可以退回 `--video-latency-ms` 手动指定的值（默认不补偿）。
-
-```bash
-# 第一次用这个流：自动校准延迟后再录制（预热5秒后会提示晃动设备，8秒内完成即可）
-python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit --name WTSDCL \
-    --duration 60 --auto-calibrate-latency
-
-# 已经知道大概延迟数值（比如测过是180ms），手动指定，跳过自动校准环节
-python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit --name WTSDCL \
-    --duration 60 --video-latency-ms 180
+```json
+{
+  "192.168.2.140:8554/cam0": {"latency_ms": 700}
+}
 ```
 
-**延迟只用测一次，会自动缓存**：RTSP链路延迟基本是摄像头/go2rtc/网络这条链路本身固定的属性，不是每次录制都会变，没必要每次开录都让人晃一下设备。`--auto-calibrate-latency` 测出结果后会自动按 `host:port/stream` 存到本地缓存文件（默认 `.rtsp_latency_cache.json`，跟脚本同目录），**之后再录同一个流，不用加任何延迟相关参数，会自动读缓存里的值来补偿**；只有想重新测量（比如换了摄像头/网络环境）才需要重新加 `--auto-calibrate-latency`。优先级：显式 `--video-latency-ms` > 本次 `--auto-calibrate-latency` 现测 > 缓存里之前测过的值 > 0（不补偿）。不想用缓存机制可以加 `--no-latency-cache`。
+默认读脚本同目录下的 `.rtsp_latency_cache.json`（可以用 `--latency-config-file` 指定别的路径），**每次运行会自动读取这个文件、按当前 `--host`/`--port`/`--stream` 匹配对应的延迟值并应用，不用在命令行传任何延迟相关参数**：
 
 ```bash
-# 第一次：测一次并缓存
-python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit --name WTSDCL \
-    --duration 60 --auto-calibrate-latency
-
-# 之后同一个流直接录，自动读缓存里的延迟值补偿，不用再晃设备
+# 配置文件里已经配好 192.168.2.140:8554/cam0 的延迟值，直接录，自动应用
 python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit --name WTSDCL --duration 60
+```
+
+也可以用 `--video-latency-ms` 在命令行直接指定一个值，优先级比配置文件高：
+
+```bash
+python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit --name WTSDCL \
+    --duration 60 --video-latency-ms 700
 ```
 
 ### 时间漂移分析
