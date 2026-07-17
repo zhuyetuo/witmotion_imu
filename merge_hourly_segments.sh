@@ -113,7 +113,17 @@ cut -f1-5 "$INDEX" | sort -u | while IFS="$TAB" read -r prefix datehour combo hz
     if [ "$ext" == "mp4" ]; then
         listfile=$(mktemp)
         for f in "${files[@]}"; do
-            printf "file '%s'\n" "$(cd "$(dirname "$f")" && pwd)/$(basename "$f")" >> "$listfile"
+            abspath="$(cd "$(dirname "$f")" && pwd)/$(basename "$f")"
+            # Git Bash/MSYS 的 pwd 输出的是 /c/Users/... 这种 POSIX 风格路径，直接
+            # 写进 ffmpeg concat 列表文件的话，原生 Windows 版 ffmpeg.exe 解析这个
+            # 路径时会出问题（实测会错误地拼成 C:/c/Users/... 这种双重盘符，导致
+            # "Impossible to open" 报错）。有 cygpath 的话（Git Bash/MSYS 自带）用它
+            # 转成正常的 Windows 路径（C:/Users/...，正斜杠，避免转义问题）；
+            # 非 Windows 环境没有 cygpath，直接用原始路径。
+            if command -v cygpath >/dev/null 2>&1; then
+                abspath="$(cygpath -m "$abspath")"
+            fi
+            printf "file '%s'\n" "$abspath" >> "$listfile"
         done
         if ffmpeg -y -loglevel error -f concat -safe 0 -i "$listfile" -c copy "$out"; then
             echo "  ✔ 已生成: $out"
