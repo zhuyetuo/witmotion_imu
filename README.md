@@ -579,6 +579,8 @@ python imu_camera_sync_rtsp.py --host 192.168.2.140 --stream cam0 --device wit -
     --duration 60 --video-latency-ms 700
 ```
 
+**注意：实测RTSP延迟会随网络状况波动，不是固定值**，配置文件里写死的补偿值只在测量那一刻准确，之后可能有偏差；标注精度要求高的场景目前更推荐用本地USB摄像头版本（`imu_camera_sync.py`），延迟接近0更稳定。详见下面"多路 RTSP 摄像头"一节的说明。
+
 ### 多路 RTSP 摄像头 + 多个 IMU 设备同步采集
 
 `imu_camera_sync_rtsp_multicam.py` 是 `imu_camera_sync_rtsp.py`（单路RTSP）+ `imu_camera_sync_multicam.py`（多本地摄像头）的结合体：多路 RTSP 流（共用同一个 `--host`/`--port`，`--stream` 重复传）+ 多个 IMU 设备同步采集。IMU 采集逻辑直接复用 `imu_camera_sync_multi.py`，RTSP 低延迟读取复用 `imu_camera_sync_rtsp.py`。
@@ -596,9 +598,17 @@ python imu_camera_sync_rtsp_multicam.py --host 192.168.2.140 --stream cam0 --str
 # 探测每路流的分辨率/帧率 + IMU 实际输出频率
 python imu_camera_sync_rtsp_multicam.py --host 192.168.2.140 --stream cam0 --stream cam1 \
     --imu wit=WT901BLE68 --probe
+
+# 2个不同IMU设备（比如两只狗各戴一个collar）+ 2路摄像头，画面统一缩放到720p
+python imu_camera_sync_rtsp_multicam.py --host 192.168.2.140 --stream cam0 --stream cam1 \
+    --imu wit=设备1名称 --imu wit=设备2名称 \
+    --duration 10 --resample-hz 16 --loop --resample-only \
+    --out-dir data/rtsp_multicam --warmup-sec 10 --resize 1280x720
 ```
 
-`--stream` 可重复传，第一个对应 `cam1`，第二个对应 `cam2`，以此类推。
+`--stream` 可重复传，第一个对应 `cam1`，第二个对应 `cam2`，以此类推。`--imu` 同理可重复传多个（比如两只狗各戴一个IMU设备），每路摄像头 x 每个设备都会各自生成一对降采样配对文件（N路摄像头 × M个设备 = N×M对）。
+
+**上传到 Label Studio 前先确认项目模板要几个视角/几个IMU**：如果项目的标注模板是"2视角+2个独立IMU"（比如两只狗各自的摄像头角度+各自的collar数据），录制时就要用2个 `--imu`；如果只是"2个摄像头角度拍同一只狗、只有1个IMU"，录制用1个 `--imu` 就够了，但要确保上传时选的项目模板也是"单IMU"的（不然会因为 `csv`/`csv1`+`csv2` 这个key数量对不上而导入失败）——这不是文件命名的问题，是录制时用的设备数量要跟目标项目模板的设计场景匹配。
 
 **每路流各自的延迟补偿**：不同RTSP流的链路延迟可能不一样（不同摄像头/网络路径），所以延迟补偿是按每一路流单独配置的，读取方式和文件跟 `imu_camera_sync_rtsp.py` 完全一样——同一个 `.rtsp_latency_cache.json`，按 `host:port/stream` 分别配置：
 
@@ -612,6 +622,15 @@ python imu_camera_sync_rtsp_multicam.py --host 192.168.2.140 --stream cam0 --str
 每次运行自动按各自的 `host:port/stream` 读取对应的值，不用传参数。也可以用 `--video-latency-ms` 给**所有流**统一指定同一个值（会覆盖配置文件里每一路的值）。
 
 **补偿只应用在降采样配对文件上**：不同摄像头延迟不一样，没法在"所有摄像头共用一份"的逐帧组合CSV（`{base}.csv`）里同时精确补偿多路不同的延迟，所以那份文件里的对齐用的是未做延迟补偿的原始抓帧时刻匹配，只作调试/参考用；真正标注请用每路摄像头自己的降采样配对文件（`{base}_camN_imuM_resampled{HZ}hz.mp4/.csv`），这些文件在录制结束后会按各自那一路的延迟值分别正确计算。
+
+**实测：RTSP延迟不稳定，跟网络状况有关**：实际测试下来，RTSP链路的延迟会随网络状况波动（有时候延迟大、有时候延迟小），不是一个能长期固定不变的值，配置文件里写死的补偿值（比如 `latency_ms: 700`）只在测量那一刻的网络条件下准确，之后可能会有偏差。如果标注精度要求高，目前更推荐直接用本地USB摄像头（`imu_camera_sync.py`/`imu_camera_sync_multi.py`/`imu_camera_sync_multicam.py`），延迟接近0、稳定可靠，不需要处理这类链路延迟补偿的问题；RTSP版本适合对时间精度要求没那么严格、或者物理条件必须用网络摄像头（比如小米摄像头）的场景。目前配置文件可以先把 `latency_ms` 都设成 `0`（不补偿）：
+
+```json
+{
+  "192.168.2.140:8554/cam0": {"latency_ms": 0},
+  "192.168.2.140:8554/cam1": {"latency_ms": 0}
+}
+```
 
 ### 时间漂移分析
 
