@@ -23,6 +23,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `imu_camera_sync_rtsp_multicam.py` | 多路RTSP摄像头 + 多个IMU设备同步采集，`imu_camera_sync_rtsp.py`（单路RTSP）+ `imu_camera_sync_multicam.py`（多本地摄像头）的结合体，每路RTSP流可以有各自不同的延迟补偿值 |
 | `check_multi_imu_quality.py` | 统计 `imu_camera_sync_multi.py` 生成的 `_meta.csv` 里各设备的 lag/missing/hz 质量 |
 | `check_alignment.py` | 校验录制的视频与 CSV 是否严格对齐（帧数/时长/起止时间）；`imu_camera_sync.py` 录制结束会自动调用 |
+| `cleanup_resampled_pairs.sh` | 清理 multicam 系列脚本生成的 `{base}_camX_imuY_resampled{HZ}hz.mp4/.csv` 配对文件，只保留指定的几组组合，其余全删 |
 | `data/` | 采集输出文件目录（CSV、MP4） |
 
 ### 模块依赖关系
@@ -631,6 +632,17 @@ python imu_camera_sync_rtsp_multicam.py --host 192.168.2.140 --stream cam0 --str
   "192.168.2.140:8554/cam1": {"latency_ms": 0}
 }
 ```
+
+### 清理多余的降采样配对文件
+
+N路摄像头 x M个设备会生成 N×M 组 `{base}_camX_imuY_resampled{HZ}hz.mp4/.csv`，实际标注往往只需要其中几组固定的摄像头/设备组合，用 `cleanup_resampled_pairs.sh` 只保留指定的几组，其余全部删除：
+
+```bash
+# 保留 cam1_imu1(mp4+csv)、cam2_imu2(mp4+csv)、cam3_imu1(只留mp4)，其余全删
+./cleanup_resampled_pairs.sh data/multicam_multiimu cam1_imu1 cam2_imu2 cam3_imu1:mp4
+```
+
+每个"保留关键字"默认同时保留 mp4 和 csv；只想留其中一种时加后缀 `:mp4` 或 `:csv`。关键字按文件名子串匹配（不用写完整文件名，`camX_imuY` 这段就够）。运行后会先列出打算删除的文件清单，输入 `y` 确认后才会真正删除，避免手滑删错。
 
 ### 时间漂移分析
 
