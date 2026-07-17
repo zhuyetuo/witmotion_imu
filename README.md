@@ -661,7 +661,12 @@ python merge_hourly_segments.py data/multicam_multiimu --delete-originals
 
 # 只看诊断表，不做合并——先排查哪些1分钟小段本身视频/CSV时长就对不上
 python merge_hourly_segments.py data/multicam_multiimu --mismatch-only
+
+# 合并时跳过诊断表里标✘的段（时长明显不一致的），只合并没问题的段
+python merge_hourly_segments.py data/multicam_multiimu --skip-mismatched
 ```
+
+**跳过有问题的段（`--skip-mismatched`）**：实测常见情况是某几分钟的CSV跨度明显比视频短（比如60秒视频只对应20~40秒的CSV数据），这通常不是合并脚本的锅，而是那一分钟IMU设备本身真的断连了一段时间（比如项圈信号差、狗趴地压住天线）——`resample_raw_imu()` 降采样时会把结果范围裁到"真实收到过IMU数据"的区间内，所以那一分钟的CSV自然就比视频短。加 `--skip-mismatched` 会把这些标✘的段整个跳过（视频+CSV都不参与合并），只合并数据完整的段；被跳过的原始文件不受影响，不会被删除（即使同时加了 `--delete-originals`）。
 
 **Python 版比 shell 版多做的事**：
 
