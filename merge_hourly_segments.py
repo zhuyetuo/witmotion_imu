@@ -134,11 +134,16 @@ def scan_groups(directory: str):
 
 def diagnose_group(mp4_files, csv_files):
     """打印每一段视频实际时长 vs 对应CSV时间跨度的对照表，帮助定位哪一段有问题。
-    按时间戳配对（同一段录制的mp4/csv文件名除后缀外完全一致）。"""
+    按时间戳配对（同一段录制的mp4/csv文件名除后缀外完全一致）。
+
+    返回 (total_video_dur, total_csv_dur, mismatched_dts)，mismatched_dts 是
+    判定为"视频/CSV时长明显不一致"的那些段的时间戳集合，供调用方决定要不要
+    跳过这些段不参与合并（--skip-mismatched）。"""
     csv_by_dt = {dt: path for dt, path in csv_files}
     print(f'  {"时间戳":<17} {"视频时长":>10} {"CSV跨度":>10} {"CSV行数":>8}  状态')
     total_video_dur = 0.0
     total_csv_dur = 0.0
+    mismatched_dts = set()
     for dt, mp4_path in mp4_files:
         vdur = video_duration_sec(mp4_path)
         csv_path = csv_by_dt.get(dt)
@@ -156,9 +161,10 @@ def diagnose_group(mp4_files, csv_files):
             total_csv_dur += cdur
             if cdur > 0 and abs(vdur - cdur) / cdur > 0.15:
                 status = '✘ 视频/CSV时长明显不一致（这一段录制本身可能有问题，不是合并脚本的锅）'
+                mismatched_dts.add(dt)
         ts_str = dt.strftime('%Y%m%d_%H%M%S')
         print(f'  {ts_str:<17} {vdur_s:>10} {cdur_s:>10} {crows:>8}  {status}')
-    return total_video_dur, total_csv_dur
+    return total_video_dur, total_csv_dur, mismatched_dts
 
 
 def merge_mp4(files, out_path: str) -> tuple[bool, str]:
@@ -211,6 +217,9 @@ def main():
                      help='合并成功后删除参与合并的原始小段文件（默认不删）')
     ap.add_argument('--mismatch-only', action='store_true',
                      help='只打印诊断表，不做合并（用来先排查哪些段有时长不一致的问题）')
+    ap.add_argument('--skip-mismatched', action='store_true',
+                     help='合并时跳过诊断表里标✘的段（视频/CSV时长明显不一致的那些），'
+                          '只合并没问题的段；被跳过的原始文件不受影响，即使加了 --delete-originals 也不会删')
     args = ap.parse_args()
 
     directory = args.directory
@@ -245,7 +254,7 @@ def main():
         n_mp4, n_csv = len(mp4_files), len(csv_files)
 
         print(f'── {combo} ({datehour}, {hz}Hz) ── {n_mp4} 个视频段 / {n_csv} 个CSV段')
-        total_video_dur, total_csv_dur = diagnose_group(mp4_files, csv_files)
+        total_video_dur, total_csv_dur, mismatched_dts = diagnose_group(mp4_files, csv_files)
         if total_video_dur and total_csv_dur:
             diff_pct = abs(total_video_dur - total_csv_dur) / total_csv_dur * 100 if total_csv_dur else 0
             flag = '  ⚠ 合计时长差异较大，建议看上面哪一段标了✘' if diff_pct > 15 else ''
@@ -253,6 +262,20 @@ def main():
                   f'（差 {diff_pct:.1f}%）{flag}')
 
         if args.mismatch_only:
+            print()
+            print_progress(gi, total_groups, prefix='总进度 ')
+            continue
+
+        skipped = []
+        if args.skip_mismatched and mismatched_dts:
+            skipped = sorted(dt.strftime('%Y%m%d_%H%M%S') for dt in mismatched_dts)
+            mp4_files = [(dt, p) for dt, p in mp4_files if dt not in mismatched_dts]
+            csv_files = [(dt, p) for dt, p in csv_files if dt not in mismatched_dts]
+            print(f'  --skip-mismatched: 跳过 {len(skipped)} 段（{", ".join(skipped)}），'
+                  f'只合并剩下 {len(mp4_files)} 个视频段 / {len(csv_files)} 个CSV段')
+
+        if not mp4_files and not csv_files:
+            print('  跳过后没有可合并的文件了，本组不生成合并结果。')
             print()
             print_progress(gi, total_groups, prefix='总进度 ')
             continue
