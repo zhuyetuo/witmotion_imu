@@ -24,6 +24,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `check_multi_imu_quality.py` | 统计 `imu_camera_sync_multi.py` 生成的 `_meta.csv` 里各设备的 lag/missing/hz 质量 |
 | `check_alignment.py` | 校验录制的视频与 CSV 是否严格对齐（帧数/时长/起止时间）；`imu_camera_sync.py` 录制结束会自动调用 |
 | `cleanup_resampled_pairs.sh` | 清理 multicam 系列脚本生成的 `{base}_camX_imuY_resampled{HZ}hz.mp4/.csv` 配对文件，只保留指定的几组组合，其余全删 |
+| `merge_hourly_segments.sh` | 把 `--loop` 循环录制产生的一堆按小段切分的 resampled mp4/csv，按文件名时间戳合并成每小时一份 |
 | `data/` | 采集输出文件目录（CSV、MP4） |
 
 ### 模块依赖关系
@@ -641,6 +642,20 @@ N路摄像头 x M个设备会生成 N×M 组 `{base}_camX_imuY_resampled{HZ}hz.m
 # 保留 cam1_imu1(mp4+csv)、cam2_imu2(mp4+csv)、cam3_imu1(只留mp4)，其余全删
 ./cleanup_resampled_pairs.sh data/multicam_multiimu cam1_imu1 cam2_imu2 cam3_imu1:mp4
 ```
+
+### 把小段录制合并成每小时一份
+
+`--loop` 循环录制（比如每段1分钟一直循环）会产生大量小段的 `{前缀}_YYYYMMDD_HHMMSS_camX_imuY_resampled{HZ}hz.mp4/.csv`，文件太多不好管理，用 `merge_hourly_segments.sh` 按文件名里的时间戳（日期+小时）把同一小时内、同一个 camX_imuY 组合的所有小段合并成一份：
+
+```bash
+# 合并 data/multicam_multiimu 目录下所有能识别的小段文件（按小时+camX_imuY分组）
+./merge_hourly_segments.sh data/multicam_multiimu
+
+# 合并成功后自动删除参与合并的原始小段文件（默认不删，只生成合并后的新文件）
+./merge_hourly_segments.sh data/multicam_multiimu --delete-originals
+```
+
+mp4 用 `ffmpeg` 的 concat demuxer + `-c copy` 无损拼接（不重新编码，速度快），csv 按文件名时间顺序拼接、只保留一份表头。合并后的文件名去掉了具体的"分:秒"，只保留到小时：`{前缀}_YYYYMMDDHH_camX_imuY_resampled{HZ}hz.mp4/.csv`（比如 `19:43:50`、`19:44:51`、`19:45:51` 这三段会被合并成 `..._2026071619_...`，代表2026-07-16 19点这一小时）。
 
 每个"保留关键字"默认同时保留 mp4 和 csv；只想留其中一种时加后缀 `:mp4` 或 `:csv`。关键字按文件名子串匹配（不用写完整文件名，`camX_imuY` 这段就够）。运行后会先列出打算删除的文件清单，输入 `y` 确认后才会真正删除，避免手滑删错。
 
