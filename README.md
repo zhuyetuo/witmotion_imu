@@ -649,11 +649,17 @@ N路摄像头 x M个设备会生成 N×M 组 `{base}_camX_imuY_resampled{HZ}hz.m
 
 ```bash
 # 合并 data/multicam_multiimu 目录下所有能识别的小段文件（按小时+camX_imuY分组）
+# 默认不改动、不删除原始文件，合并结果存到 data/multicam_multiimu/merged/ 子目录
 ./merge_hourly_segments.sh data/multicam_multiimu
 
-# 合并成功后自动删除参与合并的原始小段文件（默认不删，只生成合并后的新文件）
+# 指定合并结果存到别的目录
+./merge_hourly_segments.sh data/multicam_multiimu --out-dir data/multicam_multiimu_merged
+
+# 确认合并结果没问题之后，再单独加这个参数删除原始小段文件（默认不删）
 ./merge_hourly_segments.sh data/multicam_multiimu --delete-originals
 ```
+
+**默认绝对不会碰原始数据**：脚本只读取源目录里的文件，合并结果默认存到源目录下新建的 `merged/` 子目录（可以用 `--out-dir` 指定别的路径），不会覆盖、不会删除任何原始小段文件——即使合并逻辑有问题，最多是 `merged/` 目录里的结果不对，删掉重跑就行，原始数据始终完好。只有显式加了 `--delete-originals` 才会在合并成功后删除参与合并的原始小段。
 
 mp4 用 `ffmpeg` 的 concat demuxer + `-c copy` 无损拼接（不重新编码，速度快），csv 按文件名时间顺序拼接、只保留一份表头。合并后的文件名去掉了具体的"分:秒"，只保留到小时：`{前缀}_YYYYMMDDHH_camX_imuY_resampled{HZ}hz.mp4/.csv`（比如 `19:43:50`、`19:44:51`、`19:45:51` 这三段会被合并成 `..._2026071619_...`，代表2026-07-16 19点这一小时）。
 

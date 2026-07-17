@@ -9,31 +9,58 @@
 #   {前缀}_{YYYYMMDD}{HH}_{camX_imuY}_resampled{HZ}hz.mp4/.csv
 #
 # 用法:
-#   ./merge_hourly_segments.sh <目录> [--delete-originals]
+#   ./merge_hourly_segments.sh <目录> [--out-dir <输出目录>] [--delete-originals]
 #
-#   --delete-originals   合并成功后删除参与合并的原始小段文件（默认保留，
-#                         只生成合并后的新文件，不删源文件，更安全）
+#   --out-dir <目录>     合并结果存到这个目录，不指定默认是 <目录>/merged
+#                        （新建一个子目录，绝不会往源目录里写文件、也不会碰
+#                        原始小段文件本身——即使合并逻辑有问题，原始数据也
+#                        完全不受影响，最多是 merged 目录里的结果不对，删掉
+#                        重跑就行）
+#   --delete-originals   合并完成后删除参与合并的原始小段文件（默认不删，
+#                        只在 --out-dir 目录里生成合并后的新文件）
 #
 # 依赖: ffmpeg（合并mp4用 concat demuxer + -c copy，不重新编码，速度快、无损）
 
 set -euo pipefail
 
 if [ "$#" -lt 1 ]; then
-    echo "用法: $0 <目录> [--delete-originals]"
+    echo "用法: $0 <目录> [--out-dir <输出目录>] [--delete-originals]"
     exit 1
 fi
 
 DIR="$1"
 shift
+OUT_DIR=""
 DELETE_ORIGINALS=0
-if [ "${1:-}" == "--delete-originals" ]; then
-    DELETE_ORIGINALS=1
-fi
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --out-dir)
+            OUT_DIR="$2"
+            shift 2
+            ;;
+        --delete-originals)
+            DELETE_ORIGINALS=1
+            shift
+            ;;
+        *)
+            echo "未知参数: $1"
+            exit 1
+            ;;
+    esac
+done
 
 if [ ! -d "$DIR" ]; then
     echo "目录不存在: $DIR"
     exit 1
 fi
+
+if [ -z "$OUT_DIR" ]; then
+    OUT_DIR="$DIR/merged"
+fi
+mkdir -p "$OUT_DIR"
+echo "原始数据目录: $DIR（只读，不会修改）"
+echo "合并结果输出目录: $OUT_DIR"
+echo
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
     echo "错误: 未找到 ffmpeg，合并mp4需要它（csv本身不需要，但为保持逻辑一致这里统一要求）。"
@@ -80,7 +107,7 @@ cut -f1-5 "$INDEX" | sort -u | while IFS="$TAB" read -r prefix datehour combo hz
         continue
     fi
 
-    out="$DIR/${prefix}_${datehour}_${combo}_resampled${hz}hz.${ext}"
+    out="$OUT_DIR/${prefix}_${datehour}_${combo}_resampled${hz}hz.${ext}"
     echo "── ${combo} (${datehour}, .${ext}) ── 合并 ${n} 个文件 → $(basename "$out")"
 
     if [ "$ext" == "mp4" ]; then
