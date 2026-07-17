@@ -24,7 +24,8 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `check_multi_imu_quality.py` | 统计 `imu_camera_sync_multi.py` 生成的 `_meta.csv` 里各设备的 lag/missing/hz 质量 |
 | `check_alignment.py` | 校验录制的视频与 CSV 是否严格对齐（帧数/时长/起止时间）；`imu_camera_sync.py` 录制结束会自动调用 |
 | `cleanup_resampled_pairs.sh` | 清理 multicam 系列脚本生成的 `{base}_camX_imuY_resampled{HZ}hz.mp4/.csv` 配对文件，只保留指定的几组组合，其余全删 |
-| `merge_hourly_segments.sh` | 把 `--loop` 循环录制产生的一堆按小段切分的 resampled mp4/csv，按文件名时间戳合并成每小时一份 |
+| `merge_hourly_segments.py` | 把 `--loop` 循环录制产生的一堆按小段切分的 resampled mp4/csv，按文件名时间戳合并成每小时一份，合并前逐段诊断视频/CSV时长是否一致，带进度条（推荐用这个） |
+| `merge_hourly_segments.sh` | 同上功能的 shell 版，逻辑更简单（没有逐段诊断），依然保留可用 |
 | `data/` | 采集输出文件目录（CSV、MP4） |
 
 ### 模块依赖关系
@@ -645,21 +646,39 @@ N路摄像头 x M个设备会生成 N×M 组 `{base}_camX_imuY_resampled{HZ}hz.m
 
 ### 把小段录制合并成每小时一份
 
-`--loop` 循环录制（比如每段1分钟一直循环）会产生大量小段的 `{前缀}_YYYYMMDD_HHMMSS_camX_imuY_resampled{HZ}hz.mp4/.csv`，文件太多不好管理，用 `merge_hourly_segments.sh` 按文件名里的时间戳（日期+小时）把同一小时内、同一个 camX_imuY 组合的所有小段合并成一份：
+`--loop` 循环录制（比如每段1分钟一直循环）会产生大量小段的 `{前缀}_YYYYMMDD_HHMMSS_camX_imuY_resampled{HZ}hz.mp4/.csv`，文件太多不好管理。有两个版本，**推荐用 Python 版** `merge_hourly_segments.py`：
 
 ```bash
 # 合并 data/multicam_multiimu 目录下所有能识别的小段文件（按小时+camX_imuY分组）
 # 默认不改动、不删除原始文件，合并结果存到 data/multicam_multiimu/merged/ 子目录
-./merge_hourly_segments.sh data/multicam_multiimu
+python merge_hourly_segments.py data/multicam_multiimu
 
 # 指定合并结果存到别的目录
-./merge_hourly_segments.sh data/multicam_multiimu --out-dir data/multicam_multiimu_merged
+python merge_hourly_segments.py data/multicam_multiimu --out-dir data/multicam_multiimu_merged
 
 # 确认合并结果没问题之后，再单独加这个参数删除原始小段文件（默认不删）
-./merge_hourly_segments.sh data/multicam_multiimu --delete-originals
+python merge_hourly_segments.py data/multicam_multiimu --delete-originals
+
+# 只看诊断表，不做合并——先排查哪些1分钟小段本身视频/CSV时长就对不上
+python merge_hourly_segments.py data/multicam_multiimu --mismatch-only
 ```
 
-**默认绝对不会碰原始数据**：脚本只读取源目录里的文件，合并结果默认存到源目录下新建的 `merged/` 子目录（可以用 `--out-dir` 指定别的路径），不会覆盖、不会删除任何原始小段文件——即使合并逻辑有问题，最多是 `merged/` 目录里的结果不对，删掉重跑就行，原始数据始终完好。只有显式加了 `--delete-originals` 才会在合并成功后删除参与合并的原始小段。
+**Python 版比 shell 版多做的事**：
+
+1. **合并前逐段诊断**：用 opencv 读每个视频段的实际帧数/fps算出真实时长，跟对应CSV的时间跨度做对比，打印一张表。如果合并后"视频比CSV短很多"，通常不是合并脚本的问题，而是某一分钟的原始录制本身视频就比CSV短（比如那一分钟摄像头掉帧/被截断了）——这张诊断表能直接标出是哪一段（打✘的那行），不用合并完了才发现问题、还得反推是哪段导致的。
+2. **合并后校验**：对比合并后的视频总时长 vs CSV总时长，明显不一致会打印警告。
+3. **进度条**：按段数显示总体处理进度。
+4. **不会有 Windows 路径问题**：shell 版在 Git Bash 下用 `pwd` 拼路径喂给 ffmpeg concat 列表，实测会因为 `/c/Users/...` 这种 POSIX 路径被 ffmpeg.exe 解析出 `C:/c/Users/...` 双重盘符报错（已在 shell 版里修复过一次，但 Python 版从设计上就用 Python 自带的 `os.path.abspath`，不走 shell 的 `pwd`，天然不会有这个问题）。
+
+依赖 `opencv-python`（可选，没装的话跳过诊断表直接合并，不影响功能）。
+
+shell 版 `merge_hourly_segments.sh` 逻辑更简单（没有逐段诊断/校验），依然保留可用，用法一样：
+
+```bash
+./merge_hourly_segments.sh data/multicam_multiimu --out-dir data/multicam_multiimu_merged
+```
+
+**默认绝对不会碰原始数据（两个版本都一样）**：只读取源目录里的文件，合并结果默认存到源目录下新建的 `merged/` 子目录（可以用 `--out-dir` 指定别的路径），不会覆盖、不会删除任何原始小段文件——即使合并逻辑有问题，最多是 `merged/` 目录里的结果不对，删掉重跑就行，原始数据始终完好。只有显式加了 `--delete-originals` 才会在合并成功后删除参与合并的原始小段。
 
 mp4 用 `ffmpeg` 的 concat demuxer + `-c copy` 无损拼接（不重新编码，速度快），csv 按文件名时间顺序拼接、只保留一份表头。合并后的文件名去掉了具体的"分:秒"，只保留到小时：`{前缀}_YYYYMMDDHH_camX_imuY_resampled{HZ}hz.mp4/.csv`（比如 `19:43:50`、`19:44:51`、`19:45:51` 这三段会被合并成 `..._2026071619_...`，代表2026-07-16 19点这一小时）。
 
