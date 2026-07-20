@@ -100,20 +100,18 @@ class CameraStream:
 
 
 def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame_idx):
-    h, w = frame.shape[:2]
-    overlay = frame.copy()
-    box_h = 30 + 26 * (len(imu_info) + 1)
-    cv2.rectangle(overlay, (0, 0), (w, box_h), (0, 0, 0), -1)
-    cv2.addWeighted(overlay, 0.45, frame, 0.55, 0, frame)
-
+    # 不再画半透明底框——纯文字叠加，字体带描边（先画黑色粗一点当描边、
+    # 再画正常颜色）保证在任意背景色的画面上都看得清，不遮挡画面内容。
     def put(text, row, color=(200, 255, 200)):
-        cv2.putText(frame, text, (12, 28 + row * 26),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
+        pos = (12, 28 + row * 26)
+        cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
 
     ts = datetime.now().strftime('%H:%M:%S.%f')[:12]
     put(f'{ts}  [{cam_label}]  #{frame_idx}  t={elapsed:.1f}s  {cam_fps:.1f}/{target_fps}fps', 0, (255, 255, 100))
-    for i, (device, hz, lag_ms, missing) in enumerate(imu_info):
-        if missing:
+    row = 1
+    for device, hz, lag_ms, missing, imu_row in imu_info:
+        if missing or imu_row is None:
             color = (80, 80, 255)
             text = f'[{device.label}] MISSING'
         elif lag_ms < 50:
@@ -125,7 +123,19 @@ def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame
         else:
             color = (80, 80, 255)
             text = f'[{device.label}] {hz:.1f}Hz  lag={lag_ms:.0f}ms !'
-        put(text, i + 1, color)
+        put(text, row, color)
+        row += 1
+        # 6轴实时数值：方便肉眼判断设备是不是静置在桌上没戴（加速度接近
+        # (0,0,1g)、角速度接近0）还是真的戴在狗身上有动作。
+        if not missing and imu_row is not None:
+            acc_text = (f'  Acc  X={imu_row["acc_x"]:+.3f} Y={imu_row["acc_y"]:+.3f} '
+                        f'Z={imu_row["acc_z"]:+.3f} g')
+            gyro_text = (f'  Gyro X={imu_row["gyro_x"]:+7.2f} Y={imu_row["gyro_y"]:+7.2f} '
+                         f'Z={imu_row["gyro_z"]:+7.2f} °/s')
+            put(acc_text, row, (200, 200, 200))
+            row += 1
+            put(gyro_text, row, (200, 200, 200))
+            row += 1
     return frame
 
 
@@ -303,7 +313,7 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                     missing_flag = 0
                 csv_row += acc + gyro
                 meta_row += [imu_ts_str, lag_str, missing_flag, f'{hz:.1f}', *acc, *gyro]
-                imu_info.append((d, hz, lag_ms, missing))
+                imu_info.append((d, hz, lag_ms, missing, imu_row))
 
             if csv_writer:
                 csv_writer.writerow(csv_row)
