@@ -764,7 +764,9 @@ def _run_one_segment(args, cap, actual_w, actual_h, target_fps, frame_interval,
     """
     should_stop = [False]
 
-    ts_tag  = datetime.now().strftime('%Y%m%d_%H%M%S')
+    # 精确到毫秒（不只是秒），避免 --loop 循环录制时如果两段起始时间落在同一秒
+    # 内（或者不小心同时跑了多个实例往同一个目录写），文件名撞车互相覆盖。
+    ts_tag  = datetime.now().strftime('%Y%m%d_%H%M%S%f')[:-3]
     dev_tag = args.device
     mac_tag = ble_mac[0].replace(':', '').lower()
     os.makedirs(args.out_dir, exist_ok=True)

@@ -67,6 +67,8 @@ pip install matplotlib           # 可选，用于 *_drift_analysis.py --plot
 | 摄像头同步视频 | `data/hicc_eacb3ecf001b_20260626_143000.mp4` |
 | 摄像头同步 IMU | `data/hicc_eacb3ecf001b_20260626_143000.csv` |
 
+**时间戳精度到毫秒**：`imu_camera_sync*.py` 系列脚本（含 multicam/rtsp 版本）文件名里的时间戳精确到毫秒（`YYYYMMDD_HHMMSSmmm`，比如 `20260716_171421489`），不是只到秒——`--loop` 循环录制如果两段起始时间恰好落在同一秒内，只到秒级精度会导致文件名撞车、后一段覆盖前一段。`merge_hourly_segments.py`/`.sh`、`check_alignment.py` 都同时兼容旧的6位秒级格式和新的9位毫秒级格式，不用担心历史数据处理不了。
+
 MAC 地址中的冒号会被去掉并转为小写，例如 `EA:CB:3E:CF:00:1B` → `eacb3ecf001b`。
 
 ## 使用说明

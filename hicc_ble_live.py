@@ -304,7 +304,7 @@ async def run(args):
               f'文件名 YYYYMMDDHH_6axis.csv / _env.csv（当前: {csv_writer.path_6axis}  {csv_writer.path_env}）')
     elif args.output:
         mac_tag = args.address.replace(':', '').lower()
-        ts_tag = datetime.now(TZ_CST).strftime('%Y%m%d_%H%M%S')
+        ts_tag = datetime.now(TZ_CST).strftime('%Y%m%d_%H%M%S%f')[:-3]
         path_6axis = f'data/hicc_{mac_tag}_{ts_tag}_6axis.csv'
         path_env   = f'data/hicc_{mac_tag}_{ts_tag}_env.csv'
         csv_writer = CsvWriter(path_6axis, path_env)

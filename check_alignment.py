@@ -33,7 +33,9 @@ except ImportError:
     sys.exit(1)
 
 TS_FMT = '%Y-%m-%d %H:%M:%S.%f'
-FNAME_TS_RE = re.compile(r'(\d{8}_\d{6})$')
+# 兼容两种精度：旧文件名时间戳是6位秒级 HHMMSS，新文件名是9位毫秒级
+# HHMMSSmmm（避免 --loop 循环录制文件名撞车）。
+FNAME_TS_RE = re.compile(r'(\d{8}_\d{6}(?:\d{3})?)$')
 
 
 def _resolve_base(arg: str) -> str:
@@ -86,7 +88,12 @@ def resolve_video_start_end(base: str, video_duration: float, meta_base: str = N
 
     m = FNAME_TS_RE.search(base)
     if m:
-        start = datetime.strptime(m.group(1), '%Y%m%d_%H%M%S')
+        raw = m.group(1)
+        date_part, time_part = raw.split('_')
+        hhmmss, ms = time_part[:6], time_part[6:9]
+        start = datetime.strptime(date_part + hhmmss, '%Y%m%d%H%M%S')
+        if ms:
+            start = start.replace(microsecond=int(ms) * 1000)
         end = start + timedelta(seconds=video_duration)
         return start, end, '文件名时间戳 + 视频时长推算（仅供参考，精度较低）'
 

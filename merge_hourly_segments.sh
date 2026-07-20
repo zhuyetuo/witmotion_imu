@@ -78,8 +78,10 @@ for f in "$DIR"/*_resampled*hz.mp4 "$DIR"/*_resampled*hz.csv; do
     fname=$(basename "$f")
     ext="${fname##*.}"
     stem="${fname%.*}"
-    # 匹配: 前缀_YYYYMMDD_HHMMSS_camX_imuY_resampledHZhz
-    if [[ "$stem" =~ ^(.+)_([0-9]{8})_([0-9]{6})_(cam[0-9]+_imu[0-9]+)_resampled([0-9.]+)hz$ ]]; then
+    # 匹配: 前缀_YYYYMMDD_HHMMSS[mmm]_camX_imuY_resampledHZhz
+    # 时间字段兼容两种精度：旧文件是6位秒级 HHMMSS，新文件是9位毫秒级
+    # HHMMSSmmm（避免 --loop 循环录制文件名撞车）。
+    if [[ "$stem" =~ ^(.+)_([0-9]{8})_([0-9]{6,9})_(cam[0-9]+_imu[0-9]+)_resampled([0-9.]+)hz$ ]]; then
         prefix="${BASH_REMATCH[1]}"
         date="${BASH_REMATCH[2]}"
         time="${BASH_REMATCH[3]}"

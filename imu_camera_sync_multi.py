@@ -388,7 +388,8 @@ def _run_one_segment(args, devices: list[ImuDevice], cap, actual_w, actual_h, ta
     save_overlay = not args.no_save_overlay
     imu_sync = not args.no_imu_sync
 
-    ts_tag = datetime.now().strftime('%Y%m%d_%H%M%S')
+    # 精确到毫秒，避免 --loop 循环录制时文件名撞车互相覆盖。
+    ts_tag = datetime.now().strftime('%Y%m%d_%H%M%S%f')[:-3]
     os.makedirs(args.out_dir, exist_ok=True)
     base = os.path.join(args.out_dir, f'multi_{ts_tag}')
 

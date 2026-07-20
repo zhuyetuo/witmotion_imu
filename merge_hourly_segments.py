@@ -50,8 +50,10 @@ try:
 except ImportError:
     cv2 = None
 
+# 时间字段兼容两种精度：旧文件是 HHMMSS（6位，秒级），新文件是 HHMMSSmmm
+# （9位，精确到毫秒，避免 --loop 循环录制文件名撞车）。
 FNAME_RE = re.compile(
-    r'^(?P<prefix>.+)_(?P<date>\d{8})_(?P<time>\d{6})_(?P<combo>cam\d+_imu\d+)_resampled(?P<hz>[\d.]+)hz$'
+    r'^(?P<prefix>.+)_(?P<date>\d{8})_(?P<time>\d{6}(?:\d{3})?)_(?P<combo>cam\d+_imu\d+)_resampled(?P<hz>[\d.]+)hz$'
 )
 _TS_FMT_CANDIDATES = ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S')
 
@@ -120,8 +122,11 @@ def scan_groups(directory: str):
             continue
         date, time_, combo, hz, prefix = m['date'], m['time'], m['combo'], m['hz'], m['prefix']
         key = (prefix, date + time_[:2], combo, hz)
+        hhmmss, ms = time_[:6], time_[6:9]
         try:
-            dt = datetime.strptime(date + time_, '%Y%m%d%H%M%S')
+            dt = datetime.strptime(date + hhmmss, '%Y%m%d%H%M%S')
+            if ms:
+                dt = dt.replace(microsecond=int(ms) * 1000)
         except ValueError:
             continue
         groups[key][ext].append((dt, os.path.join(directory, fname)))
