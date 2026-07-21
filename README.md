@@ -26,6 +26,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `cleanup_resampled_pairs.sh` | 清理 multicam 系列脚本生成的 `{base}_camX_imuY_resampled{HZ}hz.mp4/.csv` 配对文件，只保留指定的几组组合，其余全删 |
 | `merge_hourly_segments.py` | 把 `--loop` 循环录制产生的一堆按小段切分的 resampled mp4/csv，按文件名时间戳合并成每小时一份，合并前逐段诊断视频/CSV时长是否一致，带进度条（推荐用这个） |
 | `merge_hourly_segments.sh` | 同上功能的 shell 版，逻辑更简单（没有逐段诊断），依然保留可用 |
+| `clip_scratch_segments.py` | 把 [imu_train](https://github.com/zhuyetuo/imu_train) 的 `infer_csv_scratch.py` 识别出来的抓挠时间段从对应视频里剪出来，方便人工复核 |
 | `data/` | 采集输出文件目录（CSV、MP4） |
 
 ### 模块依赖关系
@@ -690,6 +691,28 @@ shell 版 `merge_hourly_segments.sh` 逻辑更简单（没有逐段诊断/校验
 mp4 用 `ffmpeg` 的 concat demuxer + `-c copy` 无损拼接（不重新编码，速度快），csv 按文件名时间顺序拼接、只保留一份表头。合并后的文件名去掉了具体的"分:秒"，只保留到小时：`{前缀}_YYYYMMDDHH_camX_imuY_resampled{HZ}hz.mp4/.csv`（比如 `19:43:50`、`19:44:51`、`19:45:51` 这三段会被合并成 `..._2026071619_...`，代表2026-07-16 19点这一小时）。
 
 每个"保留关键字"默认同时保留 mp4 和 csv；只想留其中一种时加后缀 `:mp4` 或 `:csv`。关键字按文件名子串匹配（不用写完整文件名，`camX_imuY` 这段就够）。运行后会先列出打算删除的文件清单，输入 `y` 确认后才会真正删除，避免手滑删错。
+
+### 把识别出来的抓挠片段剪出来复核
+
+配合 [imu_train](https://github.com/zhuyetuo/imu_train) 项目的 `src/infer_csv_scratch.py`——它批量推理 resampled CSV 识别抓挠行为，会在终端打印每个文件识别到的时间段（"【合并】" 那一行）。`clip_scratch_segments.py` 把这些终端输出保存下来的日志解析一遍，从对应的视频里把每一段抓挠时间剪出来，方便人工过一遍确认模型判断得准不准，不用自己找时间点手动拖进度条。
+
+```bash
+# 第一步：把 infer_csv_scratch.py 的输出保存成文件（在 imu_train 项目里跑）
+python src/infer_csv_scratch.py --csv_dir data/raw_wit/ --pattern "*.csv" \
+    --model results/processed_merged_all/16hz/ml_rf.pkl --device_hz 16 \
+    --scratch_only --quiet --workers 8 > scratch_log.txt
+
+# 第二步：用这个脚本剪视频（--csv-dir 找CSV读起始时间戳锚点，--video-dir 找配对的mp4）
+python clip_scratch_segments.py scratch_log.txt --csv-dir data/raw_wit --video-dir data/raw_wit --out-dir clips
+
+# 每段前后留5秒上下文（默认2秒）
+python clip_scratch_segments.py scratch_log.txt --csv-dir data/raw_wit --pad-sec 5
+
+# 先看看会剪出哪些片段，不真的跑 ffmpeg
+python clip_scratch_segments.py scratch_log.txt --csv-dir data/raw_wit --dry-run
+```
+
+原理：CSV 和视频是同名配对（`{stem}.csv` / `{stem}.mp4`），CSV 自己第一行的 `timestamp` 就是配对视频的起始时刻锚点（逐帧同步生成的，起始时刻一致），日志里 "【合并】" 那行的 `HH:MM:SS→HH:MM:SS` 结合文件名里的日期换算成完整时间，减去这个锚点就是在视频里的偏移量，再用 `ffmpeg` 剪出来。默认重新编码保证切点精确，加 `--copy` 可以用 `-c copy` 快速裁剪（不重新编码，但切点会吸附到最近的关键帧，可能有几秒误差）。
 
 ### 时间漂移分析
 
