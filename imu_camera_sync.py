@@ -761,7 +761,16 @@ def run_camera(args):
 
     autofocus = {'on': True, 'off': False}.get(args.autofocus)
     auto_wb = {'on': True, 'off': False}.get(args.auto_wb)
-    cap = open_camera(args.camera, args.width, args.height, target_fps,
+    # --capture-width/--capture-height：向摄像头请求的原生采集分辨率（比如广角
+    # 摄像头的完整2K传感器画幅），跟 --width/--height（最终写进视频/CSV参考的
+    # 输出分辨率）分开。很多广角摄像头直接向驱动请求较低分辨率（比如720p）时，
+    # 驱动给的是传感器中间裁切出来的一小块画面（视野变窄），而不是把完整画幅
+    # 等比缩小；先按原生高分辨率采集、再用软件把每一帧缩小到目标输出分辨率，
+    # 才能保住完整广角视野。不指定的话默认等于 --width/--height，行为和之前
+    # 完全一样（不需要这个功能的摄像头不受影响）。
+    capture_w = args.capture_width or args.width
+    capture_h = args.capture_height or args.height
+    cap = open_camera(args.camera, capture_w, capture_h, target_fps,
                        backend=args.backend, fourcc=args.fourcc,
                        autofocus=autofocus, auto_wb=auto_wb)
     if not cap.isOpened():
@@ -769,14 +778,18 @@ def run_camera(args):
         stop_event.set()
         return
 
-    actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    if (actual_w, actual_h) != (args.width, args.height):
-        print(f'警告: 请求分辨率 {args.width}x{args.height}，摄像头驱动实际给出 {actual_w}x{actual_h}'
+    driver_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    driver_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if (driver_w, driver_h) != (capture_w, capture_h):
+        print(f'警告: 请求采集分辨率 {capture_w}x{capture_h}，摄像头驱动实际给出 {driver_w}x{driver_h}'
               '（驱动不支持请求的分辨率，自动退化到最接近的档位；如果画面看起来是裁切/不完整的，'
               '试试 --backend dshow 或确认 --fourcc MJPG 是否已生效）。')
+
+    actual_w, actual_h = args.width, args.height  # 最终输出/写入视频的分辨率
+    need_resize = (driver_w, driver_h) != (actual_w, actual_h)
+    resize_note = f'  采集{driver_w}x{driver_h}→缩放输出{actual_w}x{actual_h}' if need_resize else ''
     print(f'摄像头分辨率: {actual_w}x{actual_h}  摄像头目标帧率: {target_fps} fps  '
-          f'backend={args.backend}  fourcc={args.fourcc}（不影响 IMU 采样率，IMU 由设备自身配置）')
+          f'backend={args.backend}  fourcc={args.fourcc}{resize_note}（不影响 IMU 采样率，IMU 由设备自身配置）')
 
     record_mode = args.duration and args.duration > 0
     loop_mode = args.loop and record_mode
@@ -803,7 +816,7 @@ def run_camera(args):
                 print(f'\n════ 第 {segment_no} 段录制开始 ════')
             should_stop = _run_one_segment(
                 args, cap, actual_w, actual_h, target_fps, frame_interval,
-                record_mode, save_overlay,
+                record_mode, save_overlay, need_resize,
             )
             if not loop_mode or should_stop or stop_event.is_set():
                 break
@@ -819,7 +832,7 @@ def run_camera(args):
 
 
 def _run_one_segment(args, cap, actual_w, actual_h, target_fps, frame_interval,
-                      record_mode, save_overlay) -> bool:
+                      record_mode, save_overlay, need_resize: bool = False) -> bool:
     """
     录制一段（--duration 秒），返回是否应该整体停止（True=用户按 q/ESC 或
     出错/BLE断开，False=正常到时结束，--loop 时会继续录下一段）。
@@ -921,6 +934,12 @@ def _run_one_segment(args, cap, actual_w, actual_h, target_fps, frame_interval,
                 print('摄像头读取失败，退出。')
                 should_stop[0] = True
                 break
+
+            if need_resize:
+                # 采集分辨率（比如原生2K）跟输出分辨率不一样时，在这里用软件
+                # 缩放到目标输出尺寸——保住 --capture-width/--capture-height
+                # 采到的完整广角视野，而不是直接向驱动请求低分辨率导致的画面裁切。
+                frame = cv2.resize(frame, (actual_w, actual_h))
 
             cam_ts    = time.time()
             cam_ts_ms = cam_ts * 1000.0
@@ -1074,8 +1093,17 @@ def main():
                     help='手动指定 WitMotion Notify UUID')
     ap.add_argument('--camera', type=int, default=0,
                     help='摄像头编号，默认 0')
-    ap.add_argument('--width', type=int, default=1280, help='摄像头请求分辨率宽，默认 1280（720p）')
-    ap.add_argument('--height', type=int, default=720, help='摄像头请求分辨率高，默认 720（720p）')
+    ap.add_argument('--width', type=int, default=1280, help='最终输出/写入视频的分辨率宽，默认 1280（720p）')
+    ap.add_argument('--height', type=int, default=720, help='最终输出/写入视频的分辨率高，默认 720（720p）')
+    ap.add_argument('--capture-width', type=int, default=0,
+                    help='向摄像头请求的原生采集分辨率宽，默认0=跟--width一样（不做额外缩放）。'
+                         '广角摄像头直接请求较低分辨率（比如720p）时，驱动给的往往是传感器中间'
+                         '裁切出来的一小块画面（视野变窄），而不是完整画幅等比缩小；想保住完整'
+                         '广角视野的话，这里填摄像头的原生高分辨率（比如2K是2560），配合'
+                         '--capture-height 一起用，脚本会按这个分辨率采集，再用软件缩放到'
+                         '--width/--height 输出，兼顾广角和目标分辨率/文件大小。')
+    ap.add_argument('--capture-height', type=int, default=0,
+                    help='向摄像头请求的原生采集分辨率高，默认0=跟--height一样。见 --capture-width 说明。')
     ap.add_argument('--backend', choices=['auto', 'dshow', 'msmf', 'any'], default='auto',
                     help='OpenCV 打开摄像头用的后端，默认 auto（Windows上自动用DSHOW，其它系统用默认）。'
                          '部分高分辨率/广角UVC摄像头（比如海康威视U64 Pro）在Windows默认的MSMF后端下'

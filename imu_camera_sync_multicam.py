@@ -66,20 +66,35 @@ class CameraStream:
     """一路摄像头的独立状态：VideoCapture、视频写入、fps 统计。"""
 
     def __init__(self, index: int, label: str, width: int, height: int, target_fps: int,
-                 backend: str = 'auto', fourcc: str = 'MJPG', autofocus=None, auto_wb=None):
+                 backend: str = 'auto', fourcc: str = 'MJPG', autofocus=None, auto_wb=None,
+                 capture_width: int = 0, capture_height: int = 0):
         self.index = index
         self.label = label
-        self.cap = open_camera(index, width, height, target_fps, backend=backend,
+        # 采集分辨率（比如广角摄像头的原生2K）跟最终输出分辨率分开：直接向驱动
+        # 请求较低分辨率时，很多广角摄像头给的是传感器中间裁切出来的一小块画面
+        # （视野变窄），不是完整画幅等比缩小；按原生高分辨率采集、软件缩放到
+        # 输出分辨率，才能保住完整广角视野。不指定 capture_width/height 时
+        # 两者相同，行为和之前完全一样。
+        cap_w = capture_width or width
+        cap_h = capture_height or height
+        self.cap = open_camera(index, cap_w, cap_h, target_fps, backend=backend,
                                 fourcc=fourcc, autofocus=autofocus, auto_wb=auto_wb)
         if not self.cap.isOpened():
             raise RuntimeError(f'无法打开摄像头 {index}（{label}），可以试试 --backend dshow/msmf')
-        self.actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        driver_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        driver_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.actual_w, self.actual_h = width, height  # 最终输出/写入视频的分辨率
+        self.need_resize = (driver_w, driver_h) != (width, height)
+        if self.need_resize:
+            print(f'{label}: 采集 {driver_w}x{driver_h} → 缩放输出 {width}x{height}')
         self.video_writer = None
         self.ts_window: list[float] = []
 
     def read(self):
-        return self.cap.read()
+        ret, frame = self.cap.read()
+        if ret and self.need_resize:
+            frame = cv2.resize(frame, (self.actual_w, self.actual_h))
+        return ret, frame
 
     def fps_tick(self, now: float) -> float:
         cutoff = now - 1.0
@@ -458,8 +473,15 @@ def main():
                     help='摄像头编号，可重复传多个，例如 --camera 0 --camera 1')
     ap.add_argument('--imu', action='append', required=True,
                     help='IMU 设备，格式 类型=标识，可重复传多个。见 imu_camera_sync_multi.py 说明。')
-    ap.add_argument('--width', type=int, default=1280, help='摄像头请求分辨率宽，默认 1280（720p）')
-    ap.add_argument('--height', type=int, default=720, help='摄像头请求分辨率高，默认 720（720p）')
+    ap.add_argument('--width', type=int, default=1280, help='最终输出/写入视频的分辨率宽，默认 1280（720p）')
+    ap.add_argument('--height', type=int, default=720, help='最终输出/写入视频的分辨率高，默认 720（720p）')
+    ap.add_argument('--capture-width', type=int, default=0,
+                    help='向摄像头请求的原生采集分辨率宽，默认0=跟--width一样。广角摄像头直接请求'
+                         '较低分辨率时驱动常给裁切画面而非等比缩小，想保住完整广角视野就填原生高'
+                         '分辨率（比如2K是2560），配合--capture-height，脚本采集后会用软件缩放到'
+                         '--width/--height 输出。')
+    ap.add_argument('--capture-height', type=int, default=0,
+                    help='向摄像头请求的原生采集分辨率高，默认0=跟--height一样。见 --capture-width。')
     ap.add_argument('--backend', choices=['auto', 'dshow', 'msmf', 'any'], default='auto',
                     help='OpenCV 打开摄像头用的后端，默认 auto（Windows上自动用DSHOW）。部分高分辨率/'
                          '广角UVC摄像头在默认MSMF后端下会画面裁切不全、自动对焦/白平衡失灵，改用 dshow'
@@ -507,7 +529,8 @@ def main():
         try:
             cameras.append(CameraStream(cam_idx, f'cam{i}', args.width, args.height, args.cam_fps,
                                          backend=args.backend, fourcc=args.fourcc,
-                                         autofocus=autofocus, auto_wb=auto_wb))
+                                         autofocus=autofocus, auto_wb=auto_wb,
+                                         capture_width=args.capture_width, capture_height=args.capture_height))
         except RuntimeError as e:
             print(e)
             sys.exit(1)
