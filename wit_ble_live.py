@@ -304,7 +304,7 @@ async def run(args):
         print('提示: 在 Label Studio 的 Time Series 标注配置里，timeFormat 请填: %Y-%m-%d %H:%M:%S.%L')
     else:
         mac_tag = device.address.replace(':', '').lower()
-        ts_tag = datetime.now().strftime('%Y%m%d_%H%M%S')
+        ts_tag = datetime.now().strftime('%Y%m%d_%H%M%S%f')[:-3]
         output_path = f'data/wit_{mac_tag}_{ts_tag}.csv'
         writer = LiveCsvWriter(output_path, keep_bad_frames=args.keep_bad_frames)
         print(f'实时数据将写入: {output_path}')
