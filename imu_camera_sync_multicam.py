@@ -55,7 +55,7 @@ except ImportError:
     sys.exit(1)
 
 from imu_camera_sync import (
-    _FfmpegVfrSink, _Cv2CfrSink, _measure_actual_fps, probe_camera, resample_raw_imu,
+    _FfmpegVfrSink, _Cv2CfrSink, _measure_actual_fps, probe_camera, resample_raw_imu, open_camera,
 )
 from imu_camera_sync_multi import (
     ImuDevice, ble_thread_main, parse_imu_spec, stop_event, _new_sample_event,
@@ -65,15 +65,14 @@ from imu_camera_sync_multi import (
 class CameraStream:
     """一路摄像头的独立状态：VideoCapture、视频写入、fps 统计。"""
 
-    def __init__(self, index: int, label: str, width: int, height: int, target_fps: int):
+    def __init__(self, index: int, label: str, width: int, height: int, target_fps: int,
+                 backend: str = 'auto', fourcc: str = 'MJPG', autofocus=None, auto_wb=None):
         self.index = index
         self.label = label
-        self.cap = cv2.VideoCapture(index)
+        self.cap = open_camera(index, width, height, target_fps, backend=backend,
+                                fourcc=fourcc, autofocus=autofocus, auto_wb=auto_wb)
         if not self.cap.isOpened():
-            raise RuntimeError(f'无法打开摄像头 {index}（{label}）')
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        self.cap.set(cv2.CAP_PROP_FPS, target_fps)
+            raise RuntimeError(f'无法打开摄像头 {index}（{label}），可以试试 --backend dshow/msmf')
         self.actual_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         self.actual_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         self.video_writer = None
@@ -438,7 +437,7 @@ def run_probe(args, cam_indices: list[int], devices: list[ImuDevice], probe_seco
     """探测每路摄像头能力 + 短暂连接所有 IMU 设备测量各自实际输出频率，不录制。"""
     for i, cam_idx in enumerate(cam_indices, start=1):
         print(f'── cam{i} (摄像头 {cam_idx}) ──')
-        probe_camera(cam_idx)
+        probe_camera(cam_idx, backend=args.backend, fourcc=args.fourcc)
 
     print(f'── IMU 设备能力探测（连接 {probe_seconds:.0f} 秒测量各设备实际频率）──')
     t = threading.Thread(target=ble_thread_main, args=(devices, args.scan_timeout), daemon=True)
@@ -461,6 +460,15 @@ def main():
                     help='IMU 设备，格式 类型=标识，可重复传多个。见 imu_camera_sync_multi.py 说明。')
     ap.add_argument('--width', type=int, default=1280, help='摄像头请求分辨率宽，默认 1280（720p）')
     ap.add_argument('--height', type=int, default=720, help='摄像头请求分辨率高，默认 720（720p）')
+    ap.add_argument('--backend', choices=['auto', 'dshow', 'msmf', 'any'], default='auto',
+                    help='OpenCV 打开摄像头用的后端，默认 auto（Windows上自动用DSHOW）。部分高分辨率/'
+                         '广角UVC摄像头在默认MSMF后端下会画面裁切不全、自动对焦/白平衡失灵，改用 dshow'
+                         ' 通常能解决，所有摄像头统一用这一个设置。')
+    ap.add_argument('--fourcc', default='MJPG',
+                    help='摄像头像素格式，默认 MJPG（高分辨率下大多数USB2.0摄像头只支持MJPG，'
+                         '不显式指定可能导致OpenCV协商到裁切/不完整画面的格式）')
+    ap.add_argument('--autofocus', choices=['on', 'off'], default='on', help='是否开启自动对焦（默认on）')
+    ap.add_argument('--auto-wb', choices=['on', 'off'], default='on', help='是否开启自动白平衡（默认on）')
     ap.add_argument('--cam-fps', type=int, default=20, help='摄像头目标帧率，默认 20')
     ap.add_argument('--duration', type=float, default=0, help='录制时长（秒），0=实时模式不保存')
     ap.add_argument('--warmup-sec', type=float, default=5.0, help='预热时长（秒），默认 5，设 0 关闭')
@@ -492,10 +500,14 @@ def main():
         run_probe(args, args.camera, devices)
         return
 
+    autofocus = {'on': True, 'off': False}.get(args.autofocus)
+    auto_wb = {'on': True, 'off': False}.get(args.auto_wb)
     cameras = []
     for i, cam_idx in enumerate(args.camera, start=1):
         try:
-            cameras.append(CameraStream(cam_idx, f'cam{i}', args.width, args.height, args.cam_fps))
+            cameras.append(CameraStream(cam_idx, f'cam{i}', args.width, args.height, args.cam_fps,
+                                         backend=args.backend, fourcc=args.fourcc,
+                                         autofocus=autofocus, auto_wb=auto_wb))
         except RuntimeError as e:
             print(e)
             sys.exit(1)
