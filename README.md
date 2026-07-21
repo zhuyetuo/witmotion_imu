@@ -26,7 +26,8 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `cleanup_resampled_pairs.sh` | 清理 multicam 系列脚本生成的 `{base}_camX_imuY_resampled{HZ}hz.mp4/.csv` 配对文件，只保留指定的几组组合，其余全删 |
 | `merge_hourly_segments.py` | 把 `--loop` 循环录制产生的一堆按小段切分的 resampled mp4/csv，按文件名时间戳合并成每小时一份，合并前逐段诊断视频/CSV时长是否一致，带进度条（推荐用这个） |
 | `merge_hourly_segments.sh` | 同上功能的 shell 版，逻辑更简单（没有逐段诊断），依然保留可用 |
-| `clip_scratch_segments.py` | 把 [imu_train](https://github.com/zhuyetuo/imu_train) 的 `infer_csv_scratch.py` 识别出来的抓挠时间段从对应视频里剪出来，方便人工复核 |
+| `infer_scratch.py` | 独立版"抓挠"行为离线推理，不依赖 imu_train 项目本身，把训练好的模型（`.pkl`+`.json`）拷过来就能跑，输出格式跟 imu_train 一致，可以直接接 `clip_scratch_segments.py` |
+| `clip_scratch_segments.py` | 把 [imu_train](https://github.com/zhuyetuo/imu_train)（或 `infer_scratch.py`）识别出来的抓挠时间段从对应视频里剪出来，方便人工复核 |
 | `data/` | 采集输出文件目录（CSV、MP4） |
 
 ### 模块依赖关系
@@ -692,9 +693,28 @@ mp4 用 `ffmpeg` 的 concat demuxer + `-c copy` 无损拼接（不重新编码�
 
 每个"保留关键字"默认同时保留 mp4 和 csv；只想留其中一种时加后缀 `:mp4` 或 `:csv`。关键字按文件名子串匹配（不用写完整文件名，`camX_imuY` 这段就够）。运行后会先列出打算删除的文件清单，输入 `y` 确认后才会真正删除，避免手滑删错。
 
+### 独立离线推理（不依赖 imu_train 项目本身）
+
+`infer_scratch.py` 是 [imu_train](https://github.com/zhuyetuo/imu_train) `src/infer_csv_scratch.py` 的独立移植版：特征提取（时域+频域）和重力对齐算法跟原版逐行一致，预测结果不是"看起来差不多"的近似实现，而是完全一致。只需要把训练好的模型文件拷过来，不用装 imu_train 那一整套项目依赖/目录结构。
+
+```bash
+pip install numpy pandas scipy scikit-learn joblib tqdm
+
+# 把 imu_train 训练出来的模型文件拷过来（.pkl 和同名 .json 都要拷，json 存了训练时的
+# 采样率/窗口/步长/类别/是否重力对齐，没有的话会用默认值，预测可能跟原版对不上）
+cp /path/to/imu_train/results/processed_merged_all/16hz/ml_rf.pkl .
+cp /path/to/imu_train/results/processed_merged_all/16hz/ml_rf.json .
+
+# 用法参数跟 imu_train 的 infer_csv_scratch.py 保持一致，命令可以直接照抄
+python infer_scratch.py --csv_dir data/multicam_multiimu --pattern "*_resampled16hz.csv" \
+    --model ml_rf.pkl --device_hz 16 --confidence_threshold 0.7 --scratch_only --quiet --workers 8
+```
+
+输出格式（"── 文件名 ──"、"【汇总】"、"【片段】"、"【合并】"）保持一致，可以直接接下面的 `clip_scratch_segments.py` 去剪视频，不用额外转换。
+
 ### 把识别出来的抓挠片段剪出来复核
 
-配合 [imu_train](https://github.com/zhuyetuo/imu_train) 项目的 `src/infer_csv_scratch.py`——它批量推理 resampled CSV 识别抓挠行为，会在终端打印每个文件识别到的时间段（"【合并】" 那一行）。`clip_scratch_segments.py` 把这些终端输出保存下来的日志解析一遍，从对应的视频里把每一段抓挠时间剪出来，方便人工过一遍确认模型判断得准不准，不用自己找时间点手动拖进度条。
+配合 [imu_train](https://github.com/zhuyetuo/imu_train) 项目的 `src/infer_csv_scratch.py`（或者上面的独立版 `infer_scratch.py`）——批量推理 resampled CSV 识别抓挠行为，会在终端打印每个文件识别到的时间段（"【合并】" 那一行）。`clip_scratch_segments.py` 把这些终端输出保存下来的日志解析一遍，从对应的视频里把每一段抓挠时间剪出来，方便人工过一遍确认模型判断得准不准，不用自己找时间点手动拖进度条。
 
 ```bash
 # 第一步：把 infer_csv_scratch.py 的输出保存成文件（在 imu_train 项目里跑）
