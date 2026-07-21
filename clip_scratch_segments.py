@@ -104,6 +104,22 @@ def csv_first_timestamp(csv_path: str):
     return None
 
 
+def _read_lines_any_encoding(path: str):
+    """Windows 上把命令行输出重定向到文件（> log.txt）时，Python 控制台默认
+    按系统代码页编码（中文Windows是 GBK/CP936），不是 UTF-8——日志里的中文
+    "【合并】"这些内容用 UTF-8 解码会直接报 UnicodeDecodeError。这里按
+    utf-8 -> utf-8-sig -> gbk 依次尝试，都不行最后用 utf-8 + errors='replace'
+    兜底（不会因为编码问题直接崩溃，最多个别乱码字符不影响正则匹配时间戳）。"""
+    for enc in ('utf-8', 'utf-8-sig', 'gbk'):
+        try:
+            with open(path, encoding=enc) as f:
+                return f.readlines()
+        except UnicodeDecodeError:
+            continue
+    with open(path, encoding='utf-8', errors='replace') as f:
+        return f.readlines()
+
+
 def combine_date_time(date_str: str, t) -> datetime:
     """date_str: 'YYYYMMDD'；t: datetime.time。日期+时分秒拼成完整 datetime。"""
     base = datetime.strptime(date_str, '%Y%m%d')
@@ -155,8 +171,7 @@ def main():
         if not os.path.isfile(args.log):
             print(f'日志文件不存在: {args.log}')
             sys.exit(1)
-        with open(args.log, encoding='utf-8') as f:
-            lines = f.readlines()
+        lines = _read_lines_any_encoding(args.log)
 
     segments_by_file = parse_log(lines)
     if not segments_by_file:
