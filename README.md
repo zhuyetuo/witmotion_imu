@@ -752,3 +752,16 @@ python hicc_drift_analysis.py --address EA:CB:3E:CF:00:1B --duration 120 --plot
 - **WitMotion 校时**：芯片时间需用官方上位机软件校准，本工具不提供写入校时的功能（WT901 系列协议只读）。未校时的设备芯片时间字段无效（`wit_ble_live.py --print-only` 里"片上="会显示空白），`imu_camera_sync.py` 完全不依赖芯片时间（只用电脑时间做时间戳），未校时也能正常采集；但 `wit_ble_live.py` 写 CSV 时默认会丢弃芯片时间无效的帧（`--keep-bad-frames` 可保留，此时时间戳仍用电脑时间，只是不做"时间戳必须递增"的过滤）。
 - **HICC 校时**：连接后会自动下发当前北京时间，无需手动操作。`--no-timesync` 可跳过（设备时钟已准确时使用）。
 - **Label Studio 时间戳**：`timeFormat` 必须填 `%Y-%m-%d %H:%M:%S.%L`，用 `.` 分隔毫秒而非 `:`，否则 Label Studio 会报解析错误。
+- **高分辨率/广角USB摄像头在OpenCV下画面裁切、自动对焦/白平衡失灵**（比如海康威视U64 Pro这类2K广角摄像头，用Windows自带相机App/原生驱动看画面完整、白平衡对焦都正常，但用OpenCV打开却只显示画面的一部分）：常见原因是（1）没有显式指定FOURCC，很多摄像头在1080p/2K这种高分辨率下USB2.0带宽只够传MJPG压缩格式，不够传YUY2未压缩格式，不设置FOURCC的话OpenCV可能协商到一个驱动没法给出完整画面的格式，静默退化成裁切画面而不是报错；（2）Windows上OpenCV新版本默认用MSMF后端，对不少UVC摄像头的曝光/白平衡/对焦控制支持不好，改用DSHOW后端通常能解决。`imu_camera_sync.py`/`imu_camera_sync_multicam.py` 已经内置了这两个修复，默认就会：Windows上自动用 `--backend dshow`，默认 `--fourcc MJPG`，默认开启 `--autofocus on`/`--auto-wb on`。如果还是有问题，可以显式试试 `--backend msmf` 或 `--backend any` 对比效果。
+
+  **即使 FOURCC/后端都对了，直接向驱动请求较低分辨率（比如720p）本身还是可能画面裁切**——因为不少广角摄像头的720p模式，是传感器中间裁切出来的一小块画面（视野变窄），不是完整2K画幅等比缩小下来的。想同时保住广角视野和目标输出分辨率/文件大小，用 `--capture-width`/`--capture-height` 让脚本按摄像头的原生高分辨率采集，再用软件缩放到 `--width`/`--height` 输出：
+
+  ```bash
+  # 按原生2K（2560x1440）采集保住完整广角视野，缩放到720p输出/写入视频，文件大小接近正常720p
+  python imu_camera_sync_multicam.py --imu wit=WT901BLE68 --imu wit=WTSDCL --duration 600 \
+      --resample-hz 16 --camera 0 --camera 1 --width 1280 --height 720 \
+      --capture-width 2560 --capture-height 1440 \
+      --loop --resample-only --out-dir data/multicam_multiimu --warmup-sec 10 --cam-fps 60
+  ```
+
+  `--capture-width`/`--capture-height` 具体填多少要看你摄像头实际的原生分辨率档位（可以先用 `--probe` 探测确认，比如海康这款2K摄像头常见原生分辨率是 2560x1440 或 2688x1520，以 `--probe` 探测结果为准）。不填的话默认等于 `--width`/`--height`，行为和之前完全一样。

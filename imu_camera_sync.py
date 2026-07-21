@@ -601,6 +601,69 @@ class _Cv2CfrSink:
         self.writer.release()
 
 
+# ── 摄像头打开（统一走这里，兼容 UVC 摄像头在 OpenCV 下的常见坑） ──────────
+
+def _resolve_backend(name: str):
+    """把 --backend 参数名转成 cv2 的后端常量。'auto' 在 Windows 上用 DSHOW
+    （见下方 open_camera 说明），其它平台用默认后端（返回 None，调用方就不传
+    显式后端）。"""
+    name = (name or 'auto').lower()
+    if name == 'any':
+        return cv2.CAP_ANY
+    if name == 'dshow':
+        return cv2.CAP_DSHOW
+    if name == 'msmf':
+        return cv2.CAP_MSMF
+    if name == 'auto':
+        return cv2.CAP_DSHOW if sys.platform.startswith('win') else None
+    return None
+
+
+def open_camera(index: int, width: int, height: int, fps: float,
+                 backend: str = 'auto', fourcc: str = 'MJPG',
+                 autofocus=None, auto_wb=None):
+    """
+    统一的摄像头打开逻辑，专门解决一类常见问题：某些高分辨率/广角 UVC 摄像头
+    （比如海康威视 U64 Pro 这种2K广角）用 Windows 自带相机App/原生驱动看画面
+    完整、白平衡自动对焦都正常，但用 OpenCV 打开却出现"画面只显示一部分
+    （裁切）"、白平衡/自动对焦失灵的问题。常见原因有两个：
+
+    1. 没有显式指定 FOURCC 就直接设分辨率：很多摄像头在 2K/1080p 这种高分辨率
+       下只支持 MJPG（压缩）格式，不支持 YUY2（未压缩，USB带宽扛不住这么高
+       分辨率）。OpenCV 默认可能协商到 YUY2，驱动这时候没法真的给到你请求的
+       完整分辨率画面，往往会静默退化成"只给传感器裁切出来的一部分画面"，
+       而不是报错——所以必须先把 FOURCC 设成 MJPG，再设分辨率，两者要匹配
+       驱动实际支持的组合。
+    2. 后端选择：OpenCV-Python 在 Windows 上新版本默认用 MSMF (Media
+       Foundation) 后端，这个后端对不少 UVC 摄像头的曝光/白平衡/对焦控制
+       支持得不好（属性设置经常被忽略或者报的值不对）；改用 DSHOW
+       (DirectShow) 后端通常能正常读写这些控制属性，这也是网上遇到类似问题
+       时最常见的解决办法。默认 backend='auto' 在 Windows 上会自动选 DSHOW，
+       其它系统（Linux/Mac）用 OpenCV 默认后端（DSHOW/MSMF是Windows专属，
+       在其它系统上传这两个值会直接打不开摄像头）。
+
+    autofocus/auto_wb: None=不设置（用摄像头当前状态），True/False=显式打开
+    /关闭自动对焦、自动白平衡（对应 cv2.CAP_PROP_AUTOFOCUS /
+    cv2.CAP_PROP_AUTO_WB，不是所有摄像头驱动都支持这两个属性，设置了没反应
+    也不会报错，是 OpenCV/UVC 驱动这一层的限制，不是脚本的问题）。
+    """
+    backend_flag = _resolve_backend(backend)
+    cap = cv2.VideoCapture(index, backend_flag) if backend_flag is not None else cv2.VideoCapture(index)
+    if not cap.isOpened():
+        return cap
+
+    if fourcc:
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    cap.set(cv2.CAP_PROP_FPS, fps)
+    if autofocus is not None:
+        cap.set(cv2.CAP_PROP_AUTOFOCUS, 1 if autofocus else 0)
+    if auto_wb is not None:
+        cap.set(cv2.CAP_PROP_AUTO_WB, 1 if auto_wb else 0)
+    return cap
+
+
 # ── 硬件能力探测（--probe） ───────────────────────────────────────────────
 
 def _measure_actual_fps(cap, warmup=5, sample=30) -> float:
@@ -618,18 +681,16 @@ def _measure_actual_fps(cap, warmup=5, sample=30) -> float:
     return got / dt if dt > 0 else 0.0
 
 
-def probe_camera(camera_idx: int):
+def probe_camera(camera_idx: int, backend: str = 'auto', fourcc: str = 'MJPG'):
     """探测摄像头支持的最大分辨率，以及在该分辨率下驱动声称的 fps 与实测能跑的真实 fps。"""
-    print(f'── 摄像头 {camera_idx} 能力探测 ──')
+    print(f'── 摄像头 {camera_idx} 能力探测 ──（backend={backend}  fourcc={fourcc}）')
     candidate_resolutions = [(3840, 2160), (1920, 1080), (1280, 720), (640, 480)]
     best_res = None
     for w, h in candidate_resolutions:
-        cap = cv2.VideoCapture(camera_idx)
+        cap = open_camera(camera_idx, w, h, 30, backend=backend, fourcc=fourcc)
         if not cap.isOpened():
             print(f'无法打开摄像头 {camera_idx}')
             return None
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
         actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         cap.release()
@@ -643,9 +704,7 @@ def probe_camera(camera_idx: int):
 
     print(f'  最大可用分辨率（约）: {best_res[0]}x{best_res[1]}')
 
-    cap = cv2.VideoCapture(camera_idx)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  best_res[0])
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, best_res[1])
+    cap = open_camera(camera_idx, best_res[0], best_res[1], 30, backend=backend, fourcc=fourcc)
     for target in [60, 30, 25, 20, 16, 15, 10]:
         cap.set(cv2.CAP_PROP_FPS, target)
         declared = cap.get(cv2.CAP_PROP_FPS)
@@ -680,7 +739,7 @@ async def probe_imu(args, seconds: float = 5.0):
 
 
 def run_probe(args):
-    probe_camera(args.camera)
+    probe_camera(args.camera, backend=args.backend, fourcc=args.fourcc)
     if args.name or args.address:
         stop_event.clear()
         loop = asyncio.new_event_loop()
@@ -700,21 +759,37 @@ def run_camera(args):
     frame_interval = 1.0 / target_fps
     save_overlay  = not args.no_save_overlay
 
-    cap = cv2.VideoCapture(args.camera)
+    autofocus = {'on': True, 'off': False}.get(args.autofocus)
+    auto_wb = {'on': True, 'off': False}.get(args.auto_wb)
+    # --capture-width/--capture-height：向摄像头请求的原生采集分辨率（比如广角
+    # 摄像头的完整2K传感器画幅），跟 --width/--height（最终写进视频/CSV参考的
+    # 输出分辨率）分开。很多广角摄像头直接向驱动请求较低分辨率（比如720p）时，
+    # 驱动给的是传感器中间裁切出来的一小块画面（视野变窄），而不是把完整画幅
+    # 等比缩小；先按原生高分辨率采集、再用软件把每一帧缩小到目标输出分辨率，
+    # 才能保住完整广角视野。不指定的话默认等于 --width/--height，行为和之前
+    # 完全一样（不需要这个功能的摄像头不受影响）。
+    capture_w = args.capture_width or args.width
+    capture_h = args.capture_height or args.height
+    cap = open_camera(args.camera, capture_w, capture_h, target_fps,
+                       backend=args.backend, fourcc=args.fourcc,
+                       autofocus=autofocus, auto_wb=auto_wb)
     if not cap.isOpened():
-        print(f'无法打开摄像头 {args.camera}，请检查 --camera 参数。')
+        print(f'无法打开摄像头 {args.camera}，请检查 --camera 参数（或试试 --backend dshow/msmf）。')
         stop_event.set()
         return
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  args.width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
-    cap.set(cv2.CAP_PROP_FPS, target_fps)
-    actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    if (actual_w, actual_h) != (args.width, args.height):
-        print(f'警告: 请求分辨率 {args.width}x{args.height}，摄像头驱动实际给出 {actual_w}x{actual_h}'
-              '（驱动不支持请求的分辨率，自动退化到最接近的档位）。')
-    print(f'摄像头分辨率: {actual_w}x{actual_h}  摄像头目标帧率: {target_fps} fps（不影响 IMU 采样率，IMU 由设备自身配置）')
+    driver_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    driver_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if (driver_w, driver_h) != (capture_w, capture_h):
+        print(f'警告: 请求采集分辨率 {capture_w}x{capture_h}，摄像头驱动实际给出 {driver_w}x{driver_h}'
+              '（驱动不支持请求的分辨率，自动退化到最接近的档位；如果画面看起来是裁切/不完整的，'
+              '试试 --backend dshow 或确认 --fourcc MJPG 是否已生效）。')
+
+    actual_w, actual_h = args.width, args.height  # 最终输出/写入视频的分辨率
+    need_resize = (driver_w, driver_h) != (actual_w, actual_h)
+    resize_note = f'  采集{driver_w}x{driver_h}→缩放输出{actual_w}x{actual_h}' if need_resize else ''
+    print(f'摄像头分辨率: {actual_w}x{actual_h}  摄像头目标帧率: {target_fps} fps  '
+          f'backend={args.backend}  fourcc={args.fourcc}{resize_note}（不影响 IMU 采样率，IMU 由设备自身配置）')
 
     record_mode = args.duration and args.duration > 0
     loop_mode = args.loop and record_mode
@@ -741,7 +816,7 @@ def run_camera(args):
                 print(f'\n════ 第 {segment_no} 段录制开始 ════')
             should_stop = _run_one_segment(
                 args, cap, actual_w, actual_h, target_fps, frame_interval,
-                record_mode, save_overlay,
+                record_mode, save_overlay, need_resize,
             )
             if not loop_mode or should_stop or stop_event.is_set():
                 break
@@ -757,7 +832,7 @@ def run_camera(args):
 
 
 def _run_one_segment(args, cap, actual_w, actual_h, target_fps, frame_interval,
-                      record_mode, save_overlay) -> bool:
+                      record_mode, save_overlay, need_resize: bool = False) -> bool:
     """
     录制一段（--duration 秒），返回是否应该整体停止（True=用户按 q/ESC 或
     出错/BLE断开，False=正常到时结束，--loop 时会继续录下一段）。
@@ -859,6 +934,12 @@ def _run_one_segment(args, cap, actual_w, actual_h, target_fps, frame_interval,
                 print('摄像头读取失败，退出。')
                 should_stop[0] = True
                 break
+
+            if need_resize:
+                # 采集分辨率（比如原生2K）跟输出分辨率不一样时，在这里用软件
+                # 缩放到目标输出尺寸——保住 --capture-width/--capture-height
+                # 采到的完整广角视野，而不是直接向驱动请求低分辨率导致的画面裁切。
+                frame = cv2.resize(frame, (actual_w, actual_h))
 
             cam_ts    = time.time()
             cam_ts_ms = cam_ts * 1000.0
@@ -1012,8 +1093,30 @@ def main():
                     help='手动指定 WitMotion Notify UUID')
     ap.add_argument('--camera', type=int, default=0,
                     help='摄像头编号，默认 0')
-    ap.add_argument('--width', type=int, default=1280, help='摄像头请求分辨率宽，默认 1280（720p）')
-    ap.add_argument('--height', type=int, default=720, help='摄像头请求分辨率高，默认 720（720p）')
+    ap.add_argument('--width', type=int, default=1280, help='最终输出/写入视频的分辨率宽，默认 1280（720p）')
+    ap.add_argument('--height', type=int, default=720, help='最终输出/写入视频的分辨率高，默认 720（720p）')
+    ap.add_argument('--capture-width', type=int, default=0,
+                    help='向摄像头请求的原生采集分辨率宽，默认0=跟--width一样（不做额外缩放）。'
+                         '广角摄像头直接请求较低分辨率（比如720p）时，驱动给的往往是传感器中间'
+                         '裁切出来的一小块画面（视野变窄），而不是完整画幅等比缩小；想保住完整'
+                         '广角视野的话，这里填摄像头的原生高分辨率（比如2K是2560），配合'
+                         '--capture-height 一起用，脚本会按这个分辨率采集，再用软件缩放到'
+                         '--width/--height 输出，兼顾广角和目标分辨率/文件大小。')
+    ap.add_argument('--capture-height', type=int, default=0,
+                    help='向摄像头请求的原生采集分辨率高，默认0=跟--height一样。见 --capture-width 说明。')
+    ap.add_argument('--backend', choices=['auto', 'dshow', 'msmf', 'any'], default='auto',
+                    help='OpenCV 打开摄像头用的后端，默认 auto（Windows上自动用DSHOW，其它系统用默认）。'
+                         '部分高分辨率/广角UVC摄像头（比如海康威视U64 Pro）在Windows默认的MSMF后端下'
+                         '会出现画面裁切不全、自动对焦/白平衡失灵的问题，改用 dshow 通常能解决。')
+    ap.add_argument('--fourcc', default='MJPG',
+                    help='摄像头像素格式，默认 MJPG（大多数USB2.0摄像头在1080p/2K这种高分辨率下'
+                         '只支持MJPG压缩格式，不支持YUY2未压缩格式——不显式指定的话OpenCV可能协商'
+                         '到驱动不支持完整分辨率的格式，导致画面只显示传感器裁切出来的一部分）')
+    ap.add_argument('--autofocus', choices=['on', 'off'], default='on',
+                    help='是否开启自动对焦（默认on）。部分摄像头需要显式设置这个属性才会生效'
+                         '（不设置的话可能停留在驱动默认状态，跟Windows原生App里的效果不一致）')
+    ap.add_argument('--auto-wb', choices=['on', 'off'], default='on',
+                    help='是否开启自动白平衡（默认on），原因同 --autofocus')
     ap.add_argument('--cam-fps', '--fps', dest='fps', type=int, default=20,
                     choices=range(1, 61), metavar='N',
                     help='摄像头目标帧率（1-60，默认 20）。IMU 采样率由设备自身配置决定，与此参数无关。'
