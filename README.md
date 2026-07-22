@@ -28,6 +28,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `merge_hourly_segments.sh` | 同上功能的 shell 版，逻辑更简单（没有逐段诊断），依然保留可用 |
 | `infer_scratch.py` | 独立版"抓挠"行为离线推理，不依赖 imu_train 项目本身，把训练好的模型（`.pkl`+`.json`）拷过来就能跑，输出格式跟 imu_train 一致，可以直接接 `clip_scratch_segments.py` |
 | `clip_scratch_segments.py` | 把 [imu_train](https://github.com/zhuyetuo/imu_train)（或 `infer_scratch.py`）识别出来的抓挠时间段从对应视频里剪出来，方便人工复核 |
+| `run_review_bins.sh` | 一键跑完一批 `--review_min`/`--review_max` 置信度区间的推理+剪辑，不用一个个手动敲命令 |
 | `data/` | 采集输出文件目录（CSV、MP4） |
 
 ### 模块依赖关系
@@ -748,6 +749,15 @@ python clip_scratch_segments.py scratch_log.txt --csv-dir data/raw_wit --no-mult
 ```
 
 **默认自动剪出多视角**：如果CSV文件名是 multicam 系列脚本的 `{session}_camX_imuY_resampled{HZ}hz` 命名格式，脚本会自动去同一个 `--video-dir` 目录里找同一次录制（同一个session前缀）下的**其它摄像头**视频，把同一段时间也一起剪出来——比如日志里识别到的是 `cam2_imu2` 那一路，会连 `cam1`（不管配的是哪个imu）在同一时间段的画面也剪一份，方便多视角对照复核同一个动作。这是因为 multicam 脚本里所有摄像头是在同一个tick循环里同步抓帧的，起始时刻完全一致，同一个时间段可以直接套用到每一路摄像头，不需要分别去读每路摄像头自己的CSV时间戳。不想要这个行为就加 `--no-multi-view`，只剪日志里那个文件本身对应的那一路。
+
+**一键跑完一批置信度区间**：想一次性把好几个 `--review_min`/`--review_max` 区间（比如 0.0~0.3、0.3~0.4...一路到 0.9~1.0）全部推理+剪辑出来，不用一个个手动敲两条命令，用 `run_review_bins.sh`：
+
+```bash
+# 先在脚本里改好 CSV_DIR/MODEL 这些变量（或者用环境变量覆盖，不用改文件）
+CSV_DIR=data/multicam_multiimu3 MODEL=ml_rf.pkl WORKERS=16 CONF_THRESHOLD=0.7 ./run_review_bins.sh
+```
+
+会依次跑完脚本里 `BINS` 数组列出的每一个区间，每个区间自动生成一份日志（`scratch_log_review_<下限>-<上限>.txt`）和一份剪辑输出目录（`clips_<下限>-<上限>/`）。区间列表在脚本开头直接改数组就行，按需增删。注意：每个区间都是重新跑一遍完整推理（不复用其它区间已经算好的结果），区间越多总耗时越长，跟"单次推理耗时 × 区间数"差不多。
 
 原理：CSV 和视频是同名配对（`{stem}.csv` / `{stem}.mp4`），CSV 自己第一行的 `timestamp` 就是配对视频的起始时刻锚点（逐帧同步生成的，起始时刻一致），日志里 "【合并】" 那行的 `HH:MM:SS→HH:MM:SS` 结合文件名里的日期换算成完整时间，减去这个锚点就是在视频里的偏移量，再用 `ffmpeg` 剪出来。默认重新编码保证切点精确，加 `--copy` 可以用 `-c copy` 快速裁剪（不重新编码，但切点会吸附到最近的关键帧，可能有几秒误差）。
 
