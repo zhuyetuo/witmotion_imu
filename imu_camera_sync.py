@@ -621,7 +621,7 @@ def _resolve_backend(name: str):
 
 def open_camera(index: int, width: int, height: int, fps: float,
                  backend: str = 'auto', fourcc: str = 'MJPG',
-                 autofocus=None, auto_wb=None):
+                 autofocus=None, auto_wb=None, show_settings_dialog: bool = False):
     """
     统一的摄像头打开逻辑，专门解决一类常见问题：某些高分辨率/广角 UVC 摄像头
     （比如海康威视 U64 Pro 这种2K广角）用 Windows 自带相机App/原生驱动看画面
@@ -644,8 +644,19 @@ def open_camera(index: int, width: int, height: int, fps: float,
 
     autofocus/auto_wb: None=不设置（用摄像头当前状态），True/False=显式打开
     /关闭自动对焦、自动白平衡（对应 cv2.CAP_PROP_AUTOFOCUS /
-    cv2.CAP_PROP_AUTO_WB，不是所有摄像头驱动都支持这两个属性，设置了没反应
-    也不会报错，是 OpenCV/UVC 驱动这一层的限制，不是脚本的问题）。
+    cv2.CAP_PROP_AUTO_WB）。**这两个属性在不少摄像头驱动上通过 OpenCV/DSHOW
+    这条路径设置其实并不生效**——OpenCV 对 UVC 控制属性的支持一直比较有限，
+    驱动直接忽略这个 set() 调用、不报错也不生效是很常见的情况，不是脚本的
+    bug。如果 --auto-wb on 之后白平衡表现还是跟 Windows 原生 App 不一样，
+    用 show_settings_dialog=True（CLI 是 --show-settings-dialog）。
+
+    show_settings_dialog: True 时会调出摄像头驱动原生的属性设置对话框
+    （cv2.CAP_PROP_SETTINGS，仅 Windows + DSHOW 后端支持）——这就是 Windows
+    相机App/设备管理器底层用的同一个 DirectShow 属性面板，在这个对话框里调
+    白平衡/曝光/对焦，效果必然跟原生App一致（本来就是同一份驱动控制，不是
+    OpenCV 转发的）。对话框是模态的，弹出后会卡住直到你关掉它，适合在真正
+    开始录制前手动调一次；很多UVC摄像头的这类设置会保存在驱动/固件里，调好
+    一次之后，以后不加这个参数也可能保持生效（因人而异，取决于摄像头型号）。
     """
     backend_flag = _resolve_backend(backend)
     cap = cv2.VideoCapture(index, backend_flag) if backend_flag is not None else cv2.VideoCapture(index)
@@ -661,6 +672,12 @@ def open_camera(index: int, width: int, height: int, fps: float,
         cap.set(cv2.CAP_PROP_AUTOFOCUS, 1 if autofocus else 0)
     if auto_wb is not None:
         cap.set(cv2.CAP_PROP_AUTO_WB, 1 if auto_wb else 0)
+    if show_settings_dialog:
+        if sys.platform.startswith('win') and backend_flag == cv2.CAP_DSHOW:
+            cap.set(cv2.CAP_PROP_SETTINGS, 1)
+        else:
+            print('警告: --show-settings-dialog 只在 Windows + DSHOW 后端下有效'
+                  '（当前 backend 不是 dshow，或不在Windows上），已忽略。')
     return cap
 
 
@@ -772,7 +789,8 @@ def run_camera(args):
     capture_h = args.capture_height or args.height
     cap = open_camera(args.camera, capture_w, capture_h, target_fps,
                        backend=args.backend, fourcc=args.fourcc,
-                       autofocus=autofocus, auto_wb=auto_wb)
+                       autofocus=autofocus, auto_wb=auto_wb,
+                       show_settings_dialog=args.show_settings_dialog)
     if not cap.isOpened():
         print(f'无法打开摄像头 {args.camera}，请检查 --camera 参数（或试试 --backend dshow/msmf）。')
         stop_event.set()
@@ -1117,6 +1135,12 @@ def main():
                          '（不设置的话可能停留在驱动默认状态，跟Windows原生App里的效果不一致）')
     ap.add_argument('--auto-wb', choices=['on', 'off'], default='on',
                     help='是否开启自动白平衡（默认on），原因同 --autofocus')
+    ap.add_argument('--show-settings-dialog', action='store_true',
+                    help='打开摄像头驱动原生的属性设置对话框（仅 Windows + --backend dshow 有效），'
+                         '跟 Windows 相机App底层是同一个控制面板，--auto-wb/--autofocus 这些属性'
+                         '如果通过OpenCV设置没反应（部分摄像头驱动不支持OpenCV转发这些控制），'
+                         '在这个对话框里手动调白平衡/曝光/对焦，效果必然跟原生App一致。'
+                         '对话框是模态的，弹出后程序会卡住直到你关掉它，适合录制前手动调一次。')
     ap.add_argument('--cam-fps', '--fps', dest='fps', type=int, default=20,
                     choices=range(1, 61), metavar='N',
                     help='摄像头目标帧率（1-60，默认 20）。IMU 采样率由设备自身配置决定，与此参数无关。'
