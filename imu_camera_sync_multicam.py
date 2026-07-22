@@ -46,7 +46,7 @@ import shutil
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 try:
     import cv2
@@ -154,16 +154,21 @@ def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame
     return frame
 
 
+def _seconds_to_next_hour(now: datetime) -> float:
+    next_hour = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+    return (next_hour - now).total_seconds()
+
+
 def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice]):
     target_fps = args.cam_fps
 
     for cam in cameras:
         print(f'{cam.label} ({cam.index}): {cam.actual_w}x{cam.actual_h}  目标帧率: {target_fps}fps')
 
-    record_mode = args.duration and args.duration > 0
+    record_mode = (args.duration and args.duration > 0) or args.align_hourly
     loop_mode = args.loop and record_mode
     if args.loop and not record_mode:
-        print('警告: --loop 需要配合 --duration 使用，已忽略 --loop。')
+        print('警告: --loop 需要配合 --duration 或 --align-hourly 使用，已忽略 --loop。')
 
     if record_mode and args.warmup_sec > 0:
         print(f'预热 {args.warmup_sec:.1f}s...')
@@ -181,9 +186,17 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice]):
         segment_no = 0
         while True:
             segment_no += 1
+            if args.align_hourly:
+                duration_seconds = _seconds_to_next_hour(datetime.now())
+            else:
+                duration_seconds = args.duration
             if loop_mode:
-                print(f'\n════ 第 {segment_no} 段录制开始 ════')
-            should_stop = _run_one_segment(args, cameras, devices, target_fps, record_mode)
+                if args.align_hourly:
+                    end_at = (datetime.now() + timedelta(seconds=duration_seconds)).strftime('%H:%M:%S')
+                    print(f'\n════ 第 {segment_no} 段录制开始（本段到 {end_at} 整点结束）════')
+                else:
+                    print(f'\n════ 第 {segment_no} 段录制开始 ════')
+            should_stop = _run_one_segment(args, cameras, devices, target_fps, record_mode, duration_seconds)
             if not loop_mode or should_stop or stop_event.is_set():
                 break
     except KeyboardInterrupt:
@@ -199,17 +212,25 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice]):
 
 
 def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice],
-                      target_fps: int, record_mode: bool) -> bool:
-    """录制一段，返回是否应该整体停止（True=用户退出/出错，False=正常到时结束）。"""
+                      target_fps: int, record_mode: bool, duration_seconds: float = 0) -> bool:
+    """录制一段，返回是否应该整体停止（True=用户退出/出错，False=正常到时结束）。
+    duration_seconds: 这一段实际要录多久——普通模式下就是 --duration；
+    --align-hourly 模式下是"到下一个整点还剩多少秒"（每段都重新算一次，
+    所以第一段可能不足一小时，后面每段都是整整一小时）。"""
     should_stop = [False]
     frame_interval = 1.0 / target_fps
     save_overlay = not args.no_save_overlay
     imu_sync = not args.no_imu_sync
 
     # 精确到毫秒，避免 --loop 循环录制时文件名撞车互相覆盖。
-    ts_tag = datetime.now().strftime('%Y%m%d_%H%M%S%f')[:-3]
-    os.makedirs(args.out_dir, exist_ok=True)
-    base = os.path.join(args.out_dir, f'multicam_{ts_tag}')
+    now_dt = datetime.now()
+    ts_tag = now_dt.strftime('%Y%m%d_%H%M%S%f')[:-3]
+    # 按录制开始那天新建一个日期子文件夹（2026_7_18 这种格式，不补零），
+    # 方便按天整理/归档，不用每天手动建目录或者在一堆文件里翻日期。
+    day_dir = f'{now_dt.year}_{now_dt.month}_{now_dt.day}'
+    out_dir = os.path.join(args.out_dir, day_dir)
+    os.makedirs(out_dir, exist_ok=True)
+    base = os.path.join(out_dir, f'multicam_{ts_tag}')
 
     csv_file = meta_file = None
     csv_writer = meta_writer = None
@@ -251,7 +272,7 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
             d.set_raw_writer(raw_writer)
             d._raw_file = raw_file
 
-        print(f'录制模式: {args.duration}s  组合CSV→{base}.csv  对齐信息→{base}_meta.csv')
+        print(f'录制模式: {duration_seconds:.0f}s  组合CSV→{base}.csv  对齐信息→{base}_meta.csv')
         for d in devices:
             print(f'  {d.label} 原始流水→{base}_{d.label}_raw.csv')
     else:
@@ -351,8 +372,8 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
             if read_failed:
                 break
 
-            if record_mode and elapsed >= args.duration:
-                print(f'\n已达到录制时长 {args.duration}s，停止。')
+            if record_mode and elapsed >= duration_seconds:
+                print(f'\n已达到录制时长 {duration_seconds:.0f}s，停止。')
                 break
 
             try:
@@ -510,6 +531,12 @@ def main():
                     help='只保留各摄像头x设备的降采样版文件，删除原始的 {base}_camN.mp4/.csv/_meta.csv/_raw.csv')
     ap.add_argument('--loop', action='store_true',
                     help='循环录制模式：每段 --duration 秒，录完自动开始下一段，直到按 Q/ESC 或 Ctrl+C 才停止')
+    ap.add_argument('--align-hourly', action='store_true',
+                    help='按整点对齐分段，不用 --duration 固定秒数：不管什么时候开始录制，第一段只录到'
+                         '下一个整点为止（比如11:23开始，第一段到12:00:00结束），之后每段整整一小时'
+                         '（12:00→13:00→14:00...），配合 --loop 就能一直按小时切文件。跟 --duration 是'
+                         '二选一：加了这个参数 --duration 会被忽略；不加这个参数，--duration 的固定秒数'
+                         '用法完全不受影响。')
     ap.add_argument('--probe', action='store_true',
                     help='只探测硬件能力（每路摄像头 + 各IMU设备当前实际输出频率），不录制，探测完直接退出')
     args = ap.parse_args()
