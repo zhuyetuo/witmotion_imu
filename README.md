@@ -742,7 +742,12 @@ python clip_scratch_segments.py scratch_log.txt --csv-dir data/raw_wit --pad-sec
 
 # 先看看会剪出哪些片段，不真的跑 ffmpeg
 python clip_scratch_segments.py scratch_log.txt --csv-dir data/raw_wit --dry-run
+
+# 只想剪识别到的那一路摄像头，不要其它视角
+python clip_scratch_segments.py scratch_log.txt --csv-dir data/raw_wit --no-multi-view
 ```
+
+**默认自动剪出多视角**：如果CSV文件名是 multicam 系列脚本的 `{session}_camX_imuY_resampled{HZ}hz` 命名格式，脚本会自动去同一个 `--video-dir` 目录里找同一次录制（同一个session前缀）下的**其它摄像头**视频，把同一段时间也一起剪出来——比如日志里识别到的是 `cam2_imu2` 那一路，会连 `cam1`（不管配的是哪个imu）在同一时间段的画面也剪一份，方便多视角对照复核同一个动作。这是因为 multicam 脚本里所有摄像头是在同一个tick循环里同步抓帧的，起始时刻完全一致，同一个时间段可以直接套用到每一路摄像头，不需要分别去读每路摄像头自己的CSV时间戳。不想要这个行为就加 `--no-multi-view`，只剪日志里那个文件本身对应的那一路。
 
 原理：CSV 和视频是同名配对（`{stem}.csv` / `{stem}.mp4`），CSV 自己第一行的 `timestamp` 就是配对视频的起始时刻锚点（逐帧同步生成的，起始时刻一致），日志里 "【合并】" 那行的 `HH:MM:SS→HH:MM:SS` 结合文件名里的日期换算成完整时间，减去这个锚点就是在视频里的偏移量，再用 `ffmpeg` 剪出来。默认重新编码保证切点精确，加 `--copy` 可以用 `-c copy` 快速裁剪（不重新编码，但切点会吸附到最近的关键帧，可能有几秒误差）。
 

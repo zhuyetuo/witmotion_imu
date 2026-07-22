@@ -55,6 +55,11 @@ PAIR_RE = re.compile(r'(\d{2}:\d{2}:\d{2})→(\d{2}:\d{2}:\d{2})')
 DATE_IN_FNAME_RE = re.compile(r'_(\d{8})_\d{6}(?:\d{3})?_')
 TS_FMT_CANDIDATES = ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S')
 
+# multicam 系列脚本的降采样配对文件名格式: {session前缀}_camX_imuY_resampled{HZ}hz
+# session前缀通常是 {设备/前缀}_{日期}_{时间}，同一次录制里不同摄像头/设备的
+# 配对文件共用同一个 session前缀，只有 camX_imuY 不一样。
+SESSION_CAM_RE = re.compile(r'^(?P<session>.+)_(?P<cam>cam\d+)_(?P<imu>imu\d+)_resampled(?P<hz>[\d.]+)hz$')
+
 
 def parse_log(lines):
     """解析 infer_csv_scratch.py 的终端输出（进度条那些行会被忽略），
@@ -120,6 +125,35 @@ def _read_lines_any_encoding(path: str):
         return f.readlines()
 
 
+def find_sibling_camera_videos(video_dir: str, session: str, hz: str, primary_cam: str, primary_video: str):
+    """
+    同一次多摄像头录制里，所有摄像头是在同一个"tick"事件驱动循环里同步抓帧的
+    （imu_camera_sync_multicam.py / imu_camera_sync_rtsp_multicam.py 的设计），
+    所以同一个 session 前缀下，不同 camX 的视频起始时刻是同一时刻，共用同一个
+    时间锚点——不需要分别去读每个摄像头自己的CSV，识别出来的时间段直接对
+    所有摄像头视频生效，这样多视角复核同一个动作会方便很多。
+
+    返回 { camX: 视频路径 }，包含 primary_cam 自己。同一个 camX 可能因为配了
+    多个IMU设备而存在好几份内容完全相同的视频拷贝（camX_imu1/camX_imu2...），
+    每个camX只取找到的第一份即可。
+    """
+    result = {primary_cam: primary_video}
+    prefix = f'{session}_cam'
+    suffix = f'_resampled{hz}hz.mp4'
+    for root, _, files in os.walk(video_dir):
+        for fname in files:
+            if not (fname.startswith(prefix) and fname.endswith(suffix)):
+                continue
+            stem = fname[:-len('.mp4')]
+            m = SESSION_CAM_RE.match(stem)
+            if not m or m['session'] != session or m['hz'] != hz:
+                continue
+            cam = m['cam']
+            if cam not in result:
+                result[cam] = os.path.join(root, fname)
+    return result
+
+
 def combine_date_time(date_str: str, t) -> datetime:
     """date_str: 'YYYYMMDD'；t: datetime.time。日期+时分秒拼成完整 datetime。"""
     base = datetime.strptime(date_str, '%Y%m%d')
@@ -161,6 +195,10 @@ def main():
                      help='用 -c copy 快速裁剪（不重新编码，速度快，但切点会被吸附到最近的关键帧，'
                           '实际起止时间可能有0~几秒误差）；默认重新编码，切点精确，速度慢一些')
     ap.add_argument('--dry-run', action='store_true', help='只打印会剪出哪些片段，不真的跑 ffmpeg')
+    ap.add_argument('--no-multi-view', action='store_true',
+                     help='默认会把同一次录制里其它摄像头（camX）在同一时间段的画面也一起剪出来，'
+                          '方便多视角复核同一个动作；加这个参数关掉，只剪日志里那个文件本身对应的'
+                          '那一路摄像头。')
     args = ap.parse_args()
 
     video_dir = args.video_dir or args.csv_dir
@@ -199,13 +237,31 @@ def main():
             print(f'⚠ 跳过 {fname}：读不到CSV第一行的时间戳')
             continue
 
-        video_name = os.path.splitext(fname)[0] + '.mp4'
+        stem = os.path.splitext(fname)[0]
+        video_name = stem + '.mp4'
         video_path = find_file(video_dir, video_name)
         if not video_path:
             print(f'⚠ 跳过 {fname}：在 {video_dir} 里找不到配对视频 {video_name}')
             continue
 
-        stem = os.path.splitext(fname)[0]
+        # 默认还会把同一次录制里其它摄像头的画面也一起剪出来（多视角复核）——
+        # 同一个 session 下所有摄像头是在同一个tick循环里同步抓帧的，起始时刻
+        # 相同，识别出来的时间段可以直接套用到每一路摄像头，不用分别读各自的
+        # CSV时间戳。cams_to_clip: {camX: (视频路径, 用于命名的文件stem)}
+        session_m = SESSION_CAM_RE.match(stem)
+        if session_m and not args.no_multi_view:
+            sibling_map = find_sibling_camera_videos(
+                video_dir, session_m['session'], session_m['hz'], session_m['cam'], video_path)
+            cams_to_clip = {}
+            for cam, path in sibling_map.items():
+                sib_stem = os.path.splitext(os.path.basename(path))[0]
+                cams_to_clip[cam] = (path, sib_stem)
+            if len(cams_to_clip) > 1:
+                other_cams = [c for c in cams_to_clip if c != session_m['cam']]
+                print(f'  （多视角：同一session下还找到 {", ".join(other_cams)} 的视频，会一起剪）')
+        else:
+            cams_to_clip = {'': (video_path, stem)}
+
         print(f'── {fname} ── {len(segs)} 段')
         for i, (t_start, t_end) in enumerate(segs, start=1):
             seg_start = combine_date_time(date_str, t_start)
@@ -224,21 +280,22 @@ def main():
                       f'duration={duration:.1f}s），跳过，检查CSV起始时间戳是否正确')
                 continue
 
-            out_name = f'{stem}_clip{i:02d}_{t_start.strftime("%H%M%S")}-{t_end.strftime("%H%M%S")}.mp4'
-            out_path = os.path.join(args.out_dir, out_name)
-            total_clips += 1
+            for cam, (cam_video_path, cam_stem) in cams_to_clip.items():
+                out_name = f'{cam_stem}_clip{i:02d}_{t_start.strftime("%H%M%S")}-{t_end.strftime("%H%M%S")}.mp4'
+                out_path = os.path.join(args.out_dir, out_name)
+                total_clips += 1
 
-            if args.dry_run:
-                print(f'  [{i}] {t_start}→{t_end}  offset={offset:.1f}s  duration={duration:.1f}s  '
-                      f'→ {out_name}（--dry-run，未真正剪辑）')
-                continue
+                if args.dry_run:
+                    print(f'  [{i}] {t_start}→{t_end}  offset={offset:.1f}s  duration={duration:.1f}s  '
+                          f'→ {out_name}（--dry-run，未真正剪辑）')
+                    continue
 
-            ok, err = cut_clip(video_path, out_path, offset, duration, args.copy)
-            if ok:
-                total_ok += 1
-                print(f'  [{i}] {t_start}→{t_end}  ✔ {out_name}')
-            else:
-                print(f'  [{i}] {t_start}→{t_end}  ✘ 剪辑失败: {err.strip()}')
+                ok, err = cut_clip(cam_video_path, out_path, offset, duration, args.copy)
+                if ok:
+                    total_ok += 1
+                    print(f'  [{i}] {t_start}→{t_end}  ✔ {out_name}')
+                else:
+                    print(f'  [{i}] {t_start}→{t_end}  ✘ 剪辑失败: {err.strip()}')
 
     print()
     if args.dry_run:
