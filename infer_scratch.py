@@ -21,6 +21,15 @@ src/data/gravity_align.py::gravity_align），这样预测结果才会跟 imu_tr
     python infer_scratch.py --csv_dir data/multicam_multiimu --pattern "*_resampled16hz.csv" \\
         --model ml_rf.pkl --device_hz 16 --confidence_threshold 0.7 --scratch_only --quiet --workers 8
 
+    # 一次推理、同时对多个"待复核"置信度区间分别出报告（避免每个区间都重新跑
+    # 一遍特征提取+预测——这是最耗时的部分，只算一次，区间越多省得越多）：
+    python infer_scratch.py --csv_dir data/xxx --pattern "*_resampled16hz.csv" \\
+        --model ml_rf.pkl --device_hz 16 --confidence_threshold 0.7 --scratch_only --quiet \\
+        --review_bins 0.0-0.3 0.3-0.4 0.4-0.5 0.5-0.6 0.6-0.7 0.7-0.8 0.8-0.9 0.9-1.0 \\
+        --out_dir .
+    # 会生成 scratch_log_review_<lo>-<hi>.txt（每个区间一份，格式跟单独跑一样，
+    # clip_scratch_segments.py 可以直接读）。
+
 模型文件要求:
     --model 指向的 {name}.pkl 用 joblib.load 能直接读出一个有 predict_proba 的
     sklearn 分类器（imu_train 训练出来的模型就是这种格式）。同目录如果有同名
@@ -216,21 +225,18 @@ def sliding_windows(data, window_size, stride):
     return np.stack(windows) if windows else np.empty((0, window_size, data.shape[1])), indices
 
 
-def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
-               confidence_threshold=0.0, quiet=False, scratch_only=False, merge_gap_s=10,
-               review_min=None, review_max=None):
+def compute_predictions(path, model, classes, window_size, stride, device_hz, model_hz,
+                         gravity_aligned, show_feature_progress=True):
+    """
+    只做一次（最耗时的）计算：加载 CSV → 降采样 → 滑窗 → 重力对齐 → 特征提取 →
+    model.predict_proba。返回的都是普通可 pickle 的数据（numpy 数组/list/
+    pandas Series），可以直接跨进程传回（配合 joblib 的 loky 后端），后面按不同
+    的 --review_min/--review_max 区间生成报告时不用重新算这些。
+    返回 None 表示这个文件没有任何有效窗口（比如全部缺失或行数不够一个窗口）。
+    """
     display_name = os.path.basename(path).split('?')[0]
 
-    if not scratch_only:
-        print(f'\n── {display_name} ──')
-
     acc, gyro, ts, valid_mask, null_ratio = load_csv(path)
-
-    if not scratch_only:
-        print(f' 行数={len(acc)} device_hz={device_hz} model_hz={model_hz}')
-
-    if null_ratio > 0.1:
-        print(f' [警告] 数据缺失率={null_ratio*100:.1f}%（蓝牙断联？），将跳过含缺失的窗口')
 
     acc_ds = downsample(acc, device_hz, model_hz)
     gyro_ds = downsample(gyro, device_hz, model_hz)
@@ -239,13 +245,10 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
 
     ratio = device_hz / model_hz
 
-    def idx_to_ts(i):
-        orig = min(int(i * ratio), len(ts) - 1) if ts is not None else -1
-        return ts.iloc[orig] if ts is not None and orig >= 0 else None
-
     data6 = np.concatenate([acc_ds, gyro_ds], axis=1)
     X, start_indices = sliding_windows(data6, window_size, stride)
 
+    n_skipped = 0
     if len(X) > 0:
         valid_windows = [
             valid_mask_ds[s:s + window_size].mean() >= 0.7
@@ -253,30 +256,69 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
         ]
         X = X[valid_windows]
         start_indices = [s for s, v in zip(start_indices, valid_windows) if v]
-
         n_skipped = sum(not v for v in valid_windows)
-        if n_skipped and not scratch_only:
-            print(f' [过滤] 跳过 {n_skipped} 个缺失率>30% 的窗口')
 
     if len(X) == 0:
-        return None
+        return {
+            'display_name': display_name, 'n_rows': len(acc), 'null_ratio': null_ratio,
+            'n_skipped': n_skipped, 'ts': ts, 'ratio': ratio, 'window_size': window_size,
+            'start_indices': [], 'preds': np.array([]), 'probs': np.empty((0, len(classes))),
+            'confs': np.array([]),
+        }
 
     if gravity_aligned:
         X_aligned = np.stack([gravity_align(X[i]) for i in range(len(X))])
     else:
         X_aligned = X
 
-    feats = extract_features(X_aligned, model_hz, show_progress=not quiet and not scratch_only)
+    feats = extract_features(X_aligned, model_hz, show_progress=show_feature_progress)
     probs = model.predict_proba(feats)
     preds = np.argmax(probs, axis=1)
     confs = np.max(probs, axis=1)
 
-    # 待复核窗口："抓挠"这个类别的预测概率（不管最终argmax判成哪一类）落在
-    # [review_min, review_max] 区间内的窗口——这些是模型自己也不太确定的
-    # "模糊地带"，很适合人工挑出来复核：argmax判成"抓挠"但概率在区间下限附近
-    # 的，可能是误识别（该排除）；argmax判成别的类但"抓挠"概率在区间上限附近
-    # 的，可能是漏识别（该补进训练数据）。跟 --confidence_threshold（决定
-    # 最终"抓挠"判定是否采信）是两件独立的事，不冲突。
+    return {
+        'display_name': display_name, 'n_rows': len(acc), 'null_ratio': null_ratio,
+        'n_skipped': n_skipped, 'ts': ts, 'ratio': ratio, 'window_size': window_size,
+        'start_indices': start_indices, 'preds': preds, 'probs': probs, 'confs': confs,
+    }
+
+
+def generate_report(computed, classes, device_hz, model_hz, confidence_threshold=0.0,
+                     quiet=False, scratch_only=False, merge_gap_s=10,
+                     review_min=None, review_max=None, emit=print):
+    """
+    用 compute_predictions() 算好的数据，针对某一组参数（置信度阈值 + 待复核区间）
+    生成人类可读的报告，通过 emit() 逐行输出（默认 print，多区间批量跑时可以传
+    一个往文件里写的函数）。这里不做任何重新计算，纯格式化，所以同一份 computed
+    可以反复调用不同的 (review_min, review_max) 组合，而不用重跑推理。
+    返回值：(preds, n_scratch) 供上层汇总用。
+    """
+    display_name = computed['display_name']
+    ts = computed['ts']
+    ratio = computed['ratio']
+    window_size = computed['window_size']
+    start_indices = computed['start_indices']
+    preds = computed['preds']
+    probs = computed['probs']
+    confs = computed['confs']
+
+    if not scratch_only:
+        emit(f'\n── {display_name} ──')
+        emit(f" 行数={computed['n_rows']} device_hz={device_hz} model_hz={model_hz}")
+
+    if computed['null_ratio'] > 0.1:
+        emit(f" [警告] 数据缺失率={computed['null_ratio']*100:.1f}%（蓝牙断联？），将跳过含缺失的窗口")
+
+    if computed['n_skipped'] and not scratch_only:
+        emit(f" [过滤] 跳过 {computed['n_skipped']} 个缺失率>30% 的窗口")
+
+    if len(preds) == 0:
+        return preds, 0
+
+    def idx_to_ts(i):
+        orig = min(int(i * ratio), len(ts) - 1) if ts is not None else -1
+        return ts.iloc[orig] if ts is not None and orig >= 0 else None
+
     scratch_idx = classes.index('抓挠') if '抓挠' in classes else None
     do_review = scratch_idx is not None and (review_min is not None or review_max is not None)
     review_lo = review_min if review_min is not None else 0.0
@@ -297,8 +339,8 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
         header = f" {'时间':<22} {'预测':<6} {'置信度':>6}"
         if do_review:
             header += f"  {'P(抓挠)':>8}"
-        print(header)
-        print(f" {'-'*38}")
+        emit(header)
+        emit(f" {'-'*38}")
 
     for i, (pred_id, conf, start_i) in enumerate(zip(preds, confs, start_indices)):
         label = classes[pred_id]
@@ -317,7 +359,7 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
                 line += f'  {scratch_probs[i]:>8.2f}'
                 if is_review:
                     line += '  ★待复核'
-            print(line)
+            emit(line)
 
         if label == '抓挠' and not in_scratch:
             in_scratch = True
@@ -347,7 +389,7 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
     n_scratch = int((preds == classes.index('抓挠')).sum()) if '抓挠' in classes else 0
 
     if scratch_only and not scratch_segs and not review_segs:
-        return preds, classes, scratch_segs
+        return preds, n_scratch
 
     def _merge(segs):
         merged = []
@@ -374,14 +416,19 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
         if review_merged else '无'
 
     if scratch_only:
-        print(f'\n── {display_name} ──')
-        print(f' 【汇总】总窗口={len(preds)} 抓挠窗口={n_scratch} ({n_scratch/len(preds)*100:.1f}%)')
-        print(f' 【片段】{seg_str}')
-        print(f' 【合并】{merged_str}')
+        emit(f'\n── {display_name} ──')
+        emit(f' 【汇总】总窗口={len(preds)} 抓挠窗口={n_scratch} ({n_scratch/len(preds)*100:.1f}%)')
+        emit(f' 【片段】{seg_str}')
+        emit(f' 【合并】{merged_str}')
         if do_review:
-            print(f' 【待复核 P(抓挠)∈[{review_lo:.2f},{review_hi:.2f}]】{review_str}')
+            emit(f' 【待复核 P(抓挠)∈[{review_lo:.2f},{review_hi:.2f}]】{review_str}')
 
-    return preds, classes, scratch_segs
+    return preds, n_scratch
+
+
+def parse_bin(s):
+    lo, hi = s.split('-')
+    return float(lo), float(hi)
 
 
 def main():
@@ -404,6 +451,12 @@ def main():
                           '比如 --review_min 0.7 --review_max 0.8')
     ap.add_argument('--review_max', type=float, default=None,
                      help='见 --review_min 说明；只设一个的话另一个默认取 0.0/1.0（即单边界限）')
+    ap.add_argument('--review_bins', nargs='+', default=None, metavar='LO-HI',
+                     help='一次推理、同时对多个待复核区间分别出报告，每个区间写一个'
+                          'scratch_log_review_<lo>-<hi>.txt（配合 --out_dir）。跟 '
+                          '--review_min/--review_max 二选一，比如: '
+                          '--review_bins 0.0-0.3 0.3-0.4 0.5-0.6 0.9-1.0')
+    ap.add_argument('--out_dir', default='.', help='--review_bins 时报告文件的输出目录（默认当前目录）')
     ap.add_argument('--quiet', action='store_true', help='只输出每个文件的汇总行，不打印逐窗口详情')
     ap.add_argument('--scratch_only', action='store_true', help='只输出检测到抓挠的文件，忽略无抓挠的文件')
     ap.add_argument('--merge_gap', type=float, default=10.0, help='合并相邻抓挠片段的最大间隔秒数（默认10s）')
@@ -460,39 +513,54 @@ def main():
     from tqdm import tqdm
     from joblib import Parallel, delayed
 
-    def _run_one(path):
+    def _compute_one(path):
         try:
-            return infer_file(path, model, classes, window_size, stride,
-                               device_hz, model_hz, gravity_aligned,
-                               confidence_threshold=args.confidence_threshold,
-                               quiet=args.quiet,
-                               scratch_only=args.scratch_only,
-                               merge_gap_s=args.merge_gap,
-                               review_min=args.review_min,
-                               review_max=args.review_max)
+            return compute_predictions(path, model, classes, window_size, stride,
+                                        device_hz, model_hz, gravity_aligned,
+                                        show_feature_progress=not args.quiet and not args.scratch_only
+                                        and args.review_bins is None)
         except Exception as e:
             tqdm.write(f' [错误] {os.path.basename(path)}: {e}')
             return None
 
     n_jobs = args.workers if args.workers > 0 else -1
-    results = Parallel(n_jobs=n_jobs, backend='loky')(
-        delayed(_run_one)(p) for p in tqdm(files, desc='推理进度', unit='文件')
+    computed_list = Parallel(n_jobs=n_jobs, backend='loky')(
+        delayed(_compute_one)(p) for p in tqdm(files, desc='推理进度', unit='文件')
     )
 
-    all_scratch = 0
-    all_total = 0
-    for result in results:
-        if result:
-            preds, _, _ = result
-            all_scratch += int((np.array(preds) == classes.index('抓挠')).sum()) if '抓挠' in classes else 0
+    def _run_bin(review_min, review_max, emit):
+        all_scratch = 0
+        all_total = 0
+        for computed in computed_list:
+            if computed is None:
+                continue
+            preds, n_scratch = generate_report(
+                computed, classes, device_hz, model_hz,
+                confidence_threshold=args.confidence_threshold,
+                quiet=args.quiet, scratch_only=args.scratch_only,
+                merge_gap_s=args.merge_gap,
+                review_min=review_min, review_max=review_max, emit=emit)
+            all_scratch += n_scratch
             all_total += len(preds)
+        if len(files) > 1:
+            emit(f"\n{'='*50}")
+            if all_total:
+                emit(f'批量汇总: 总窗口={all_total} 抓挠窗口={all_scratch} ({all_scratch/all_total*100:.1f}%)')
+            else:
+                emit('无有效数据')
 
-    if len(files) > 1:
-        print(f"\n{'='*50}")
-        if all_total:
-            print(f'批量汇总: 总窗口={all_total} 抓挠窗口={all_scratch} ({all_scratch/all_total*100:.1f}%)')
-        else:
-            print('无有效数据')
+    if args.review_bins:
+        os.makedirs(args.out_dir, exist_ok=True)
+        for bin_str in args.review_bins:
+            lo, hi = parse_bin(bin_str)
+            out_path = os.path.join(args.out_dir, f'scratch_log_review_{lo}-{hi}.txt')
+            print(f'════ 生成阈值段 {lo}~{hi} → {out_path} ════')
+            with open(out_path, 'w', encoding='utf-8') as f:
+                def emit(line, _f=f):
+                    _f.write(str(line) + '\n')
+                _run_bin(lo, hi, emit)
+    else:
+        _run_bin(args.review_min, args.review_max, print)
 
 
 if __name__ == '__main__':
