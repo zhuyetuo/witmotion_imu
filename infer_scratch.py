@@ -330,10 +330,14 @@ def generate_report(computed, classes, device_hz, model_hz, confidence_threshold
     seg_start_ts = None
     seg_start_i = None
 
-    review_segs = []
-    in_review = False
-    review_start_ts = None
-    review_start_i = None
+    # raw_segs: 跟 scratch_segs 的划分依据不一样——不受 confidence_threshold
+    # 影响，只要 argmax 判成"抓挠"就算这一段的一部分，同时记录段内每个窗口的
+    # P(抓挠)，供后面按平均置信度分到某个区间用（见 review_min/review_max）。
+    raw_segs = []
+    in_raw = False
+    raw_start_ts = None
+    raw_start_i = None
+    raw_probs = []
 
     if not quiet:
         header = f" {'时间':<22} {'预测':<6} {'置信度':>6}"
@@ -343,13 +347,13 @@ def generate_report(computed, classes, device_hz, model_hz, confidence_threshold
         emit(f" {'-'*38}")
 
     for i, (pred_id, conf, start_i) in enumerate(zip(preds, confs, start_indices)):
-        label = classes[pred_id]
+        raw_label = classes[pred_id]
+        label = raw_label
 
         if label == '抓挠' and conf < confidence_threshold:
             label = f'({classes[pred_id]}?)'
 
         t = idx_to_ts(start_i)
-        is_review = do_review and (review_lo <= scratch_probs[i] <= review_hi)
 
         if not quiet:
             t_str = t.strftime('%Y-%m-%d %H:%M:%S') if t is not None else f'帧{start_i}'
@@ -357,8 +361,6 @@ def generate_report(computed, classes, device_hz, model_hz, confidence_threshold
             line = f' {t_str:<22} {label:<6} {conf:>6.2f}{marker}'
             if do_review:
                 line += f'  {scratch_probs[i]:>8.2f}'
-                if is_review:
-                    line += '  ★待复核'
             emit(line)
 
         if label == '抓挠' and not in_scratch:
@@ -370,26 +372,27 @@ def generate_report(computed, classes, device_hz, model_hz, confidence_threshold
             seg_end_ts = idx_to_ts(start_i)
             scratch_segs.append((seg_start_ts, seg_end_ts, seg_start_i, start_i))
 
-        if is_review and not in_review:
-            in_review = True
-            review_start_ts = t
-            review_start_i = start_i
-        elif not is_review and in_review:
-            in_review = False
-            review_end_ts = idx_to_ts(start_i)
-            review_segs.append((review_start_ts, review_end_ts, review_start_i, start_i))
+        if raw_label == '抓挠':
+            if not in_raw:
+                in_raw = True
+                raw_start_ts = t
+                raw_start_i = start_i
+                raw_probs = []
+            if scratch_probs is not None:
+                raw_probs.append(float(scratch_probs[i]))
+        elif in_raw:
+            in_raw = False
+            raw_end_ts = idx_to_ts(start_i)
+            raw_segs.append([raw_start_ts, raw_end_ts, raw_start_i, start_i, raw_probs])
 
     if in_scratch:
         seg_end_ts = idx_to_ts(start_indices[-1] + window_size)
         scratch_segs.append((seg_start_ts, seg_end_ts, seg_start_i, start_indices[-1]))
-    if in_review:
-        review_end_ts = idx_to_ts(start_indices[-1] + window_size)
-        review_segs.append((review_start_ts, review_end_ts, review_start_i, start_indices[-1]))
+    if in_raw:
+        raw_end_ts = idx_to_ts(start_indices[-1] + window_size)
+        raw_segs.append([raw_start_ts, raw_end_ts, raw_start_i, start_indices[-1], raw_probs])
 
     n_scratch = int((preds == classes.index('抓挠')).sum()) if '抓挠' in classes else 0
-
-    if scratch_only and not scratch_segs and not review_segs:
-        return preds, n_scratch
 
     def _merge(segs):
         merged = []
@@ -402,26 +405,62 @@ def generate_report(computed, classes, device_hz, model_hz, confidence_threshold
             merged.append([t0, t1, i0, i1])
         return merged
 
-    merged = _merge(scratch_segs)
-    review_merged = _merge(review_segs)
+    def _merge_with_probs(segs):
+        merged = []
+        for t0, t1, i0, i1, probs in segs:
+            if merged and t0 is not None and merged[-1][1] is not None:
+                gap = (t0 - merged[-1][1]).total_seconds()
+                if gap <= merge_gap_s:
+                    merged[-1][1] = t1
+                    merged[-1][3] = i1
+                    merged[-1][4].extend(probs)
+                    continue
+            merged.append([t0, t1, i0, i1, list(probs)])
+        return merged
 
     def fmt(t, i):
         return t.strftime('%H:%M:%S') if t else f'帧{i}'
 
-    seg_str = ' '.join(fmt(t0, i0) + '→' + fmt(t1, i1) for t0, t1, i0, i1 in scratch_segs) \
-        if scratch_segs else '未检测到抓挠'
-    merged_str = ' '.join(fmt(t0, i0) + '→' + fmt(t1, i1) for t0, t1, i0, i1 in merged) \
-        if merged else '未检测到抓挠'
-    review_str = ' '.join(fmt(t0, i0) + '→' + fmt(t1, i1) for t0, t1, i0, i1 in review_merged) \
-        if review_merged else '无'
+    raw_merged = _merge_with_probs(raw_segs)
+    raw_merged_avg = [(t0, t1, i0, i1, (sum(probs) / len(probs)) if probs else 0.0)
+                      for t0, t1, i0, i1, probs in raw_merged]
+
+    if do_review:
+        # 按"整段"的平均 P(抓挠) 落在 [review_lo, review_hi] 才算这一段属于
+        # 这个区间——不再是逐窗口零散命中再拼起来，避免同一次连续抓挠事件
+        # 因为帧与帧之间置信度抖动，被拆成到处都是、每个区间目录看起来都差不多。
+        review_final = [(t0, t1, i0, i1, avg) for t0, t1, i0, i1, avg in raw_merged_avg
+                         if review_lo <= avg <= review_hi]
+    else:
+        review_final = []
 
     if scratch_only:
+        has_content = review_final if do_review else scratch_segs
+        if not has_content:
+            return preds, n_scratch
+
         emit(f'\n── {display_name} ──')
         emit(f' 【汇总】总窗口={len(preds)} 抓挠窗口={n_scratch} ({n_scratch/len(preds)*100:.1f}%)')
-        emit(f' 【片段】{seg_str}')
-        emit(f' 【合并】{merged_str}')
+
         if do_review:
-            emit(f' 【待复核 P(抓挠)∈[{review_lo:.2f},{review_hi:.2f}]】{review_str}')
+            seg_str = ' '.join(
+                f'{fmt(t0, i0)}→{fmt(t1, i1)}(avg={avg:.2f})' for t0, t1, i0, i1, avg in review_final
+            ) if review_final else '无'
+            emit(f' 【片段 P(抓挠)均值∈[{review_lo:.2f},{review_hi:.2f}]】{seg_str}')
+            emit(f' 【合并】{seg_str}')
+        else:
+            merged = _merge(scratch_segs)
+            seg_str = ' '.join(fmt(t0, i0) + '→' + fmt(t1, i1) for t0, t1, i0, i1 in scratch_segs) \
+                if scratch_segs else '未检测到抓挠'
+            merged_str = ' '.join(fmt(t0, i0) + '→' + fmt(t1, i1) for t0, t1, i0, i1 in merged) \
+                if merged else '未检测到抓挠'
+            emit(f' 【片段】{seg_str}')
+            emit(f' 【合并】{merged_str}')
+    elif do_review:
+        review_str = ' '.join(
+            f'{fmt(t0, i0)}→{fmt(t1, i1)}(avg={avg:.2f})' for t0, t1, i0, i1, avg in raw_merged_avg
+        ) if raw_merged_avg else '无'
+        emit(f' 【待复核 P(抓挠)∈[{review_lo:.2f},{review_hi:.2f}]】{review_str}')
 
     return preds, n_scratch
 
