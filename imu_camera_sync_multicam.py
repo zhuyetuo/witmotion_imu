@@ -67,7 +67,7 @@ class CameraStream:
 
     def __init__(self, index: int, label: str, width: int, height: int, target_fps: int,
                  backend: str = 'auto', fourcc: str = 'MJPG', autofocus=None, auto_wb=None,
-                 capture_width: int = 0, capture_height: int = 0):
+                 capture_width: int = 0, capture_height: int = 0, show_settings_dialog: bool = False):
         self.index = index
         self.label = label
         # 采集分辨率（比如广角摄像头的原生2K）跟最终输出分辨率分开：直接向驱动
@@ -78,7 +78,8 @@ class CameraStream:
         cap_w = capture_width or width
         cap_h = capture_height or height
         self.cap = open_camera(index, cap_w, cap_h, target_fps, backend=backend,
-                                fourcc=fourcc, autofocus=autofocus, auto_wb=auto_wb)
+                                fourcc=fourcc, autofocus=autofocus, auto_wb=auto_wb,
+                                show_settings_dialog=show_settings_dialog)
         if not self.cap.isOpened():
             raise RuntimeError(f'无法打开摄像头 {index}（{label}），可以试试 --backend dshow/msmf')
         driver_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -491,6 +492,10 @@ def main():
                          '不显式指定可能导致OpenCV协商到裁切/不完整画面的格式）')
     ap.add_argument('--autofocus', choices=['on', 'off'], default='on', help='是否开启自动对焦（默认on）')
     ap.add_argument('--auto-wb', choices=['on', 'off'], default='on', help='是否开启自动白平衡（默认on）')
+    ap.add_argument('--show-settings-dialog', action='store_true',
+                    help='打开摄像头驱动原生的属性设置对话框（仅Windows+dshow有效，会给每一路摄像头'
+                         '各弹一次，模态对话框会卡住直到关掉），效果等同于Windows相机App里调白平衡/'
+                         '曝光/对焦——部分摄像头驱动不支持OpenCV转发这些控制属性时用这个手动调')
     ap.add_argument('--cam-fps', type=int, default=20, help='摄像头目标帧率，默认 20')
     ap.add_argument('--duration', type=float, default=0, help='录制时长（秒），0=实时模式不保存')
     ap.add_argument('--warmup-sec', type=float, default=5.0, help='预热时长（秒），默认 5，设 0 关闭')
@@ -530,7 +535,8 @@ def main():
             cameras.append(CameraStream(cam_idx, f'cam{i}', args.width, args.height, args.cam_fps,
                                          backend=args.backend, fourcc=args.fourcc,
                                          autofocus=autofocus, auto_wb=auto_wb,
-                                         capture_width=args.capture_width, capture_height=args.capture_height))
+                                         capture_width=args.capture_width, capture_height=args.capture_height,
+                                         show_settings_dialog=args.show_settings_dialog))
         except RuntimeError as e:
             print(e)
             sys.exit(1)

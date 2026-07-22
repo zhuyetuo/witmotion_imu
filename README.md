@@ -765,3 +765,14 @@ python hicc_drift_analysis.py --address EA:CB:3E:CF:00:1B --duration 120 --plot
   ```
 
   `--capture-width`/`--capture-height` 具体填多少要看你摄像头实际的原生分辨率档位（可以先用 `--probe` 探测确认，比如海康这款2K摄像头常见原生分辨率是 2560x1440 或 2688x1520，以 `--probe` 探测结果为准）。不填的话默认等于 `--width`/`--height`，行为和之前完全一样。
+
+  **`--auto-wb on` 设置了但白平衡还是跟Windows原生App不一样**：`cv2.CAP_PROP_AUTO_WB` 这个属性在不少摄像头驱动上，通过 OpenCV/DSHOW 这条路径设置其实并不生效——OpenCV 对 UVC 控制属性的支持一直比较有限，驱动直接忽略这个调用、不报错也不生效是常见情况，不是脚本的bug。用 `--show-settings-dialog` 调出摄像头驱动**原生**的属性设置对话框（仅Windows + `--backend dshow` 有效）——这就是 Windows 相机App/设备管理器底层用的同一个 DirectShow 属性面板，在里面调白平衡/曝光/对焦，效果必然跟原生App一致（本来就是同一份驱动控制，不是OpenCV转发的）：
+
+  ```bash
+  python imu_camera_sync_multicam.py --imu wit=WT901BLE68 --imu wit=WTSDCL --duration 600 \
+      --resample-hz 16 --camera 0 --camera 1 --width 1280 --height 720 \
+      --capture-width 2560 --capture-height 1440 --show-settings-dialog \
+      --loop --resample-only --out-dir data/multicam_multiimu --warmup-sec 10 --cam-fps 30
+  ```
+
+  对话框是模态的，每路摄像头各弹一次，程序会卡住直到你关掉它，适合在正式录制前手动调一次；很多UVC摄像头这类设置会保存在驱动/固件里，调好一次之后以后不加这个参数也可能保持生效（因摄像头型号而异）。
