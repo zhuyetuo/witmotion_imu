@@ -217,7 +217,8 @@ def sliding_windows(data, window_size, stride):
 
 
 def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, gravity_aligned,
-               confidence_threshold=0.0, quiet=False, scratch_only=False, merge_gap_s=10):
+               confidence_threshold=0.0, quiet=False, scratch_only=False, merge_gap_s=10,
+               review_min=None, review_max=None):
     display_name = os.path.basename(path).split('?')[0]
 
     if not scratch_only:
@@ -270,27 +271,53 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
     preds = np.argmax(probs, axis=1)
     confs = np.max(probs, axis=1)
 
+    # 待复核窗口："抓挠"这个类别的预测概率（不管最终argmax判成哪一类）落在
+    # [review_min, review_max] 区间内的窗口——这些是模型自己也不太确定的
+    # "模糊地带"，很适合人工挑出来复核：argmax判成"抓挠"但概率在区间下限附近
+    # 的，可能是误识别（该排除）；argmax判成别的类但"抓挠"概率在区间上限附近
+    # 的，可能是漏识别（该补进训练数据）。跟 --confidence_threshold（决定
+    # 最终"抓挠"判定是否采信）是两件独立的事，不冲突。
+    scratch_idx = classes.index('抓挠') if '抓挠' in classes else None
+    do_review = scratch_idx is not None and (review_min is not None or review_max is not None)
+    review_lo = review_min if review_min is not None else 0.0
+    review_hi = review_max if review_max is not None else 1.0
+    scratch_probs = probs[:, scratch_idx] if scratch_idx is not None else None
+
     scratch_segs = []
     in_scratch = False
     seg_start_ts = None
     seg_start_i = None
 
+    review_segs = []
+    in_review = False
+    review_start_ts = None
+    review_start_i = None
+
     if not quiet:
-        print(f" {'时间':<22} {'预测':<6} {'置信度':>6}")
+        header = f" {'时间':<22} {'预测':<6} {'置信度':>6}"
+        if do_review:
+            header += f"  {'P(抓挠)':>8}"
+        print(header)
         print(f" {'-'*38}")
 
-    for pred_id, conf, start_i in zip(preds, confs, start_indices):
+    for i, (pred_id, conf, start_i) in enumerate(zip(preds, confs, start_indices)):
         label = classes[pred_id]
 
         if label == '抓挠' and conf < confidence_threshold:
             label = f'({classes[pred_id]}?)'
 
         t = idx_to_ts(start_i)
+        is_review = do_review and (review_lo <= scratch_probs[i] <= review_hi)
 
         if not quiet:
             t_str = t.strftime('%Y-%m-%d %H:%M:%S') if t is not None else f'帧{start_i}'
             marker = ' ⬅ 抓挠' if label == '抓挠' else ''
-            print(f' {t_str:<22} {label:<6} {conf:>6.2f}{marker}')
+            line = f' {t_str:<22} {label:<6} {conf:>6.2f}{marker}'
+            if do_review:
+                line += f'  {scratch_probs[i]:>8.2f}'
+                if is_review:
+                    line += '  ★待复核'
+            print(line)
 
         if label == '抓挠' and not in_scratch:
             in_scratch = True
@@ -301,23 +328,40 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
             seg_end_ts = idx_to_ts(start_i)
             scratch_segs.append((seg_start_ts, seg_end_ts, seg_start_i, start_i))
 
+        if is_review and not in_review:
+            in_review = True
+            review_start_ts = t
+            review_start_i = start_i
+        elif not is_review and in_review:
+            in_review = False
+            review_end_ts = idx_to_ts(start_i)
+            review_segs.append((review_start_ts, review_end_ts, review_start_i, start_i))
+
     if in_scratch:
         seg_end_ts = idx_to_ts(start_indices[-1] + window_size)
         scratch_segs.append((seg_start_ts, seg_end_ts, seg_start_i, start_indices[-1]))
+    if in_review:
+        review_end_ts = idx_to_ts(start_indices[-1] + window_size)
+        review_segs.append((review_start_ts, review_end_ts, review_start_i, start_indices[-1]))
 
     n_scratch = int((preds == classes.index('抓挠')).sum()) if '抓挠' in classes else 0
 
-    if scratch_only and not scratch_segs:
+    if scratch_only and not scratch_segs and not review_segs:
         return preds, classes, scratch_segs
 
-    merged = []
-    for t0, t1, i0, i1 in scratch_segs:
-        if merged and t0 is not None and merged[-1][1] is not None:
-            gap = (t0 - merged[-1][1]).total_seconds()
-            if gap <= merge_gap_s:
-                merged[-1] = (merged[-1][0], t1, merged[-1][2], i1)
-                continue
-        merged.append([t0, t1, i0, i1])
+    def _merge(segs):
+        merged = []
+        for t0, t1, i0, i1 in segs:
+            if merged and t0 is not None and merged[-1][1] is not None:
+                gap = (t0 - merged[-1][1]).total_seconds()
+                if gap <= merge_gap_s:
+                    merged[-1] = (merged[-1][0], t1, merged[-1][2], i1)
+                    continue
+            merged.append([t0, t1, i0, i1])
+        return merged
+
+    merged = _merge(scratch_segs)
+    review_merged = _merge(review_segs)
 
     def fmt(t, i):
         return t.strftime('%H:%M:%S') if t else f'帧{i}'
@@ -326,12 +370,16 @@ def infer_file(path, model, classes, window_size, stride, device_hz, model_hz, g
         if scratch_segs else '未检测到抓挠'
     merged_str = ' '.join(fmt(t0, i0) + '→' + fmt(t1, i1) for t0, t1, i0, i1 in merged) \
         if merged else '未检测到抓挠'
+    review_str = ' '.join(fmt(t0, i0) + '→' + fmt(t1, i1) for t0, t1, i0, i1 in review_merged) \
+        if review_merged else '无'
 
     if scratch_only:
         print(f'\n── {display_name} ──')
         print(f' 【汇总】总窗口={len(preds)} 抓挠窗口={n_scratch} ({n_scratch/len(preds)*100:.1f}%)')
         print(f' 【片段】{seg_str}')
         print(f' 【合并】{merged_str}')
+        if do_review:
+            print(f' 【待复核 P(抓挠)∈[{review_lo:.2f},{review_hi:.2f}]】{review_str}')
 
     return preds, classes, scratch_segs
 
@@ -348,6 +396,14 @@ def main():
     ap.add_argument('--stride_s', type=float, default=0, help='步长秒数（0=从模型元数据读取，默认1.0）')
     ap.add_argument('--confidence_threshold', type=float, default=0.0,
                      help='置信度阈值，低于此值的抓挠预测视为非抓挠（默认0=不过滤，建议0.65~0.75）')
+    ap.add_argument('--review_min', type=float, default=None,
+                     help='标出"抓挠"预测概率落在 [review_min, review_max] 区间内的窗口，方便人工'
+                          '复核挑错——argmax判成抓挠但概率贴着下限的，可能是误识别；argmax判成'
+                          '别的类但抓挠概率贴着上限的，可能是漏识别，都适合补进训练数据做主动学习。'
+                          '跟 --confidence_threshold 是两回事，不冲突，不影响最终抓挠片段的判定。'
+                          '比如 --review_min 0.7 --review_max 0.8')
+    ap.add_argument('--review_max', type=float, default=None,
+                     help='见 --review_min 说明；只设一个的话另一个默认取 0.0/1.0（即单边界限）')
     ap.add_argument('--quiet', action='store_true', help='只输出每个文件的汇总行，不打印逐窗口详情')
     ap.add_argument('--scratch_only', action='store_true', help='只输出检测到抓挠的文件，忽略无抓挠的文件')
     ap.add_argument('--merge_gap', type=float, default=10.0, help='合并相邻抓挠片段的最大间隔秒数（默认10s）')
@@ -411,7 +467,9 @@ def main():
                                confidence_threshold=args.confidence_threshold,
                                quiet=args.quiet,
                                scratch_only=args.scratch_only,
-                               merge_gap_s=args.merge_gap)
+                               merge_gap_s=args.merge_gap,
+                               review_min=args.review_min,
+                               review_max=args.review_max)
         except Exception as e:
             tqdm.write(f' [错误] {os.path.basename(path)}: {e}')
             return None

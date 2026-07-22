@@ -712,6 +712,18 @@ python infer_scratch.py --csv_dir data/multicam_multiimu --pattern "*_resampled1
 
 输出格式（"── 文件名 ──"、"【汇总】"、"【片段】"、"【合并】"）保持一致，可以直接接下面的 `clip_scratch_segments.py` 去剪视频，不用额外转换。
 
+**挑"模糊地带"窗口做主动学习**：`--confidence_threshold` 决定的是"最终判定为抓挠"的门槛，跟"哪些窗口模型自己也不太确定、适合人工挑出来复核"是两回事。用 `--review_min`/`--review_max` 划一个区间，脚本会额外算出每个窗口"抓挠"这个类别的预测概率（不管最终argmax判成哪一类），标出概率落在这个区间内的窗口：
+
+```bash
+# 挑出"抓挠"概率在0.15~0.5之间的窗口——这些argmax大概率被判成别的类（漏识别候选），
+# 也可能argmax判成抓挠但概率不高（误识别候选），人工看一眼画面确认要不要补进训练数据
+python infer_scratch.py --csv_dir data/multicam_multiimu --pattern "*_resampled16hz.csv" \
+    --model ml_rf.pkl --device_hz 16 --confidence_threshold 0.8 --scratch_only --quiet \
+    --review_min 0.15 --review_max 0.5 --workers 16 > scratch_log_review.txt
+```
+
+输出会多一行 `【待复核 P(抓挠)∈[0.15,0.50]】16:07:30→16:07:39`，就算这个文件"总抓挠窗口=0"（argmax全没判成抓挠，`clip_scratch_segments.py` 平时不会剪出这段），只要落在复核区间内也会单独列出来，不会被漏掉。这一行目前只是打印展示，`clip_scratch_segments.py` 暂时只解析"【合并】"那一行；如果确认某个复核片段该补进训练数据，人工看一眼视频、去对应CSV上标注一下就行。
+
 ### 把识别出来的抓挠片段剪出来复核
 
 配合 [imu_train](https://github.com/zhuyetuo/imu_train) 项目的 `src/infer_csv_scratch.py`（或者上面的独立版 `infer_scratch.py`）——批量推理 resampled CSV 识别抓挠行为，会在终端打印每个文件识别到的时间段（"【合并】" 那一行）。`clip_scratch_segments.py` 把这些终端输出保存下来的日志解析一遍，从对应的视频里把每一段抓挠时间剪出来，方便人工过一遍确认模型判断得准不准，不用自己找时间点手动拖进度条。
