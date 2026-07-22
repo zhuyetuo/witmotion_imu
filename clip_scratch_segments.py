@@ -160,6 +160,40 @@ def combine_date_time(date_str: str, t) -> datetime:
     return base.replace(hour=t.hour, minute=t.minute, second=t.second)
 
 
+def cut_csv_clip(csv_path: str, out_path: str, start_dt: datetime, end_dt: datetime) -> tuple[bool, str]:
+    """按时间范围 [start_dt, end_dt] 过滤 CSV 行（假定第一列是时间戳，跟
+    csv_first_timestamp() 的假设一致），另存成一份跟视频片段同名（换成 .csv
+    后缀）的小 CSV，方便和剪出来的视频片段一起打包传去 label-studio 标注。"""
+    with open(csv_path, newline='', encoding='utf-8-sig') as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        rows = []
+        for row in reader:
+            if not row or not row[0].strip():
+                continue
+            ts = None
+            for fmt in TS_FMT_CANDIDATES:
+                try:
+                    ts = datetime.strptime(row[0].strip(), fmt)
+                    break
+                except ValueError:
+                    continue
+            if ts is None:
+                continue
+            if start_dt <= ts <= end_dt:
+                rows.append(row)
+
+    if not rows:
+        return False, '时间范围内 CSV 里没有找到任何数据行'
+
+    with open(out_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        if header:
+            writer.writerow(header)
+        writer.writerows(rows)
+    return True, ''
+
+
 def cut_clip(video_path: str, out_path: str, offset_sec: float, duration_sec: float,
              use_copy: bool) -> tuple[bool, str]:
     if use_copy:
@@ -199,6 +233,14 @@ def main():
                      help='默认会把同一次录制里其它摄像头（camX）在同一时间段的画面也一起剪出来，'
                           '方便多视角复核同一个动作；加这个参数关掉，只剪日志里那个文件本身对应的'
                           '那一路摄像头。')
+    ap.add_argument('--no-csv-clip', action='store_true',
+                     help='默认每段还会把对应的 IMU CSV 也按同样的时间范围剪一份出来（文件名跟'
+                          '这一段主视角的视频片段同名，只是后缀是 .csv），方便"2个视频+1个csv"'
+                          '一起打包传去 label-studio 标注；加这个参数关掉，只剪视频。')
+    ap.add_argument('--workers', type=int, default=4,
+                     help='并行剪辑的线程数（默认4）。每段剪辑都是单独调用一次 ffmpeg 子进程，'
+                          '互相之间没有依赖，多开几个线程可以让多个 ffmpeg 进程同时跑，明显'
+                          '提速；--dry-run 不受影响（本来就不会真的剪）。')
     args = ap.parse_args()
 
     video_dir = args.video_dir or args.csv_dir
@@ -219,8 +261,11 @@ def main():
     if not args.dry_run:
         os.makedirs(args.out_dir, exist_ok=True)
 
+    # 先把所有要剪的片段（视频+CSV）都收集成任务列表，最后统一交给线程池并发
+    # 执行——每段剪辑都是独立调用一次 ffmpeg 子进程（或者独立读写一份CSV），
+    # 互相没有依赖，不用等上一段剪完再剪下一段，--workers 越大、总耗时越短。
+    jobs = []  # 每项: {'i','t_start','t_end','out_name','fn','args'}
     total_clips = 0
-    total_ok = 0
     for fname, segs in segments_by_file.items():
         m = DATE_IN_FNAME_RE.search(fname)
         if not m:
@@ -290,18 +335,54 @@ def main():
                           f'→ {out_name}（--dry-run，未真正剪辑）')
                     continue
 
-                ok, err = cut_clip(cam_video_path, out_path, offset, duration, args.copy)
-                if ok:
-                    total_ok += 1
-                    print(f'  [{i}] {t_start}→{t_end}  ✔ {out_name}')
-                else:
-                    print(f'  [{i}] {t_start}→{t_end}  ✘ 剪辑失败: {err.strip()}')
+                jobs.append({
+                    'i': i, 't_start': t_start, 't_end': t_end, 'out_name': out_name,
+                    'fn': cut_clip, 'args': (cam_video_path, out_path, offset, duration, args.copy),
+                    'kind': '剪辑',
+                })
+
+            if not args.no_csv_clip:
+                # CSV 片段跟这一段的"主视角"视频（即日志里检测到这段的那个
+                # camX_imuY，也就是 stem 本身）同名，只是后缀换成 .csv——
+                # 这样 label-studio 那边"2个视频+1个csv"三个文件一看文件名
+                # 就知道是同一段。
+                csv_out_name = f'{stem}_clip{i:02d}_{t_start.strftime("%H%M%S")}-{t_end.strftime("%H%M%S")}.csv'
+                csv_out_path = os.path.join(args.out_dir, csv_out_name)
+                total_clips += 1
+
+                if args.dry_run:
+                    print(f'  [{i}] {t_start}→{t_end}  → {csv_out_name}（--dry-run，未真正剪辑）')
+                    continue
+
+                jobs.append({
+                    'i': i, 't_start': t_start, 't_end': t_end, 'out_name': csv_out_name,
+                    'fn': cut_csv_clip, 'args': (csv_path, csv_out_path, padded_start, padded_end),
+                    'kind': '剪CSV',
+                })
 
     print()
     if args.dry_run:
         print(f'共 {total_clips} 段（--dry-run，未真正剪辑）')
-    else:
-        print(f'共 {total_clips} 段，成功剪出 {total_ok} 段 → {args.out_dir}/')
+        return
+
+    total_ok = 0
+    if jobs:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+            futures = {executor.submit(job['fn'], *job['args']): job for job in jobs}
+            for future in concurrent.futures.as_completed(futures):
+                job = futures[future]
+                try:
+                    ok, err = future.result()
+                except Exception as e:
+                    ok, err = False, str(e)
+                if ok:
+                    total_ok += 1
+                    print(f"  [{job['i']}] {job['t_start']}→{job['t_end']}  ✔ {job['out_name']}")
+                else:
+                    print(f"  [{job['i']}] {job['t_start']}→{job['t_end']}  ✘ {job['kind']}失败: {err.strip()}")
+
+    print(f'共 {total_clips} 段，成功剪出 {total_ok} 段 → {args.out_dir}/')
 
 
 if __name__ == '__main__':
