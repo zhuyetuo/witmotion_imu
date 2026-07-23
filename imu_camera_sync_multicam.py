@@ -575,16 +575,22 @@ def main():
             print(e)
             sys.exit(1)
 
-    t = threading.Thread(target=ble_thread_main, args=(devices, args.scan_timeout), daemon=True)
-    t.start()
-
-    print('等待 BLE 连接中...')
-    time.sleep(2.0)
+    t = None
+    if devices:
+        # 没有 IMU 设备时（纯摄像头预览模式）不启动这个线程——它的
+        # run_all() 在设备列表为空时会立刻 gather() 完，finally 里的
+        # stop_event.set() 会跟着马上触发，导致摄像头主循环还没真正开始
+        # 就被当成"该停止了"，一tick都抓不到就退出。
+        t = threading.Thread(target=ble_thread_main, args=(devices, args.scan_timeout), daemon=True)
+        t.start()
+        print('等待 BLE 连接中...')
+        time.sleep(2.0)
 
     run_cameras(args, cameras, devices)
 
     stop_event.set()
-    t.join(timeout=3.0)
+    if t is not None:
+        t.join(timeout=3.0)
 
 
 if __name__ == '__main__':
