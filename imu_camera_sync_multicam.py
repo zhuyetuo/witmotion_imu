@@ -114,7 +114,8 @@ class CameraStream:
         self.close_writer()
 
 
-def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame_idx):
+def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame_idx,
+                  show_imu_values: bool = False):
     # 不再画半透明底框——纯文字叠加，字体带描边（先画黑色粗一点当描边、
     # 再画正常颜色）保证在任意背景色的画面上都看得清，不遮挡画面内容。
     def put(text, row, color=(200, 255, 200)):
@@ -141,8 +142,9 @@ def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame
         put(text, row, color)
         row += 1
         # 6轴实时数值：方便肉眼判断设备是不是静置在桌上没戴（加速度接近
-        # (0,0,1g)、角速度接近0）还是真的戴在狗身上有动作。
-        if not missing and imu_row is not None:
+        # (0,0,1g)、角速度接近0）还是真的戴在狗身上有动作。默认不显示（太占
+        # 画面），需要看的时候加 --show-imu-values 打开。
+        if show_imu_values and not missing and imu_row is not None:
             acc_text = (f'  Acc  X={imu_row["acc_x"]:+.3f} Y={imu_row["acc_y"]:+.3f} '
                         f'Z={imu_row["acc_z"]:+.3f} g')
             gyro_text = (f'  Gyro X={imu_row["gyro_x"]:+7.2f} Y={imu_row["gyro_y"]:+7.2f} '
@@ -358,7 +360,8 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 meta_writer.writerow(meta_row)
 
             for cam, frame, cam_fps in zip(cameras, frames, cam_fps_list):
-                display = draw_overlay(frame.copy(), cam.label, cam_fps, target_fps, imu_info, elapsed, frame_idx)
+                display = draw_overlay(frame.copy(), cam.label, cam_fps, target_fps, imu_info, elapsed, frame_idx,
+                                        show_imu_values=args.show_imu_values)
                 if cam.video_writer:
                     cam.video_writer.write(display if save_overlay else frame)
                 try:
@@ -525,6 +528,9 @@ def main():
     ap.add_argument('--scan-timeout', type=float, default=8.0, help='BLE 扫描超时（秒），默认 8')
     ap.add_argument('--no-save-overlay', action='store_true', help='保存干净视频（不含叠加信息）')
     ap.add_argument('--no-imu-sync', action='store_true', help='关闭事件驱动同步，改用固定定时器抓帧')
+    ap.add_argument('--show-imu-values', action='store_true',
+                    help='画面上显示每个IMU设备的实时6轴数值（加速度+角速度），默认不显示（比较占'
+                         '画面）；只在需要肉眼确认设备有没有戴好、是不是在动的时候临时打开。')
     ap.add_argument('--resample-hz', type=float, default=25.0,
                     help='录制结束后把每个设备的原始IMU流水降采样到该频率，默认25Hz')
     ap.add_argument('--resample-only', action='store_true',
