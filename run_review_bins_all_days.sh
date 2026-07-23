@@ -17,6 +17,10 @@
 #   DATA_ROOT=data DAYS="2026_7_18 2026_7_19" ./run_review_bins_all_days.sh
 # 不指定 DAYS 就跑 DATA_ROOT 下所有子目录。
 #
+# 天数多的时候（比如60天），想全部跑但排除个别文件夹（比如 test），用
+# EXCLUDE_DAYS 指定要排除的名字（空格分隔），不用把剩下几十天名字全列出来：
+#   DATA_ROOT=data EXCLUDE_DAYS="test" ./run_review_bins_all_days.sh
+#
 # 某一天处理失败（比如那天目录里没有CSV、模型加载出错）不会中断整批，会跳到
 # 下一天继续跑，最后汇总打印哪几天失败。
 
@@ -35,8 +39,21 @@ else
     done
 fi
 
+if [ -n "${EXCLUDE_DAYS:-}" ]; then
+    read -ra exclude_names <<< "$EXCLUDE_DAYS"
+    filtered=()
+    for day in "${day_names[@]}"; do
+        skip=0
+        for ex in "${exclude_names[@]}"; do
+            [ "$day" = "$ex" ] && skip=1 && break
+        done
+        [ "$skip" -eq 0 ] && filtered+=("$day")
+    done
+    day_names=("${filtered[@]}")
+fi
+
 if [ ${#day_names[@]} -eq 0 ]; then
-    echo "在 ${DATA_ROOT} 下没找到任何子目录，检查 DATA_ROOT 是否传对了。"
+    echo "在 ${DATA_ROOT} 下没找到任何子目录，检查 DATA_ROOT/EXCLUDE_DAYS 是否传对了。"
     exit 1
 fi
 
