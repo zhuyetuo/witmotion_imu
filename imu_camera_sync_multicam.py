@@ -295,12 +295,16 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
     try:
         while not stop_event.is_set():
             if imu_sync:
-                _new_sample_event.wait(timeout=frame_interval * 3)
+                # 事件驱动：等任意一个设备来了新样本再抓帧，但等待时间不超过
+                # 到下一个预定tick还剩多少（而不是固定的frame_interval*3）——
+                # 否则IMU一直没有新样本送达时（比如断联、还没连上），每次都会
+                # 傻等满这个固定超时，把实际fps拖到远低于目标fps，即使非
+                # --imu-sync模式本可以跑到目标fps。
+                remaining = next_tick - time.time()
+                if remaining > 0:
+                    _new_sample_event.wait(timeout=remaining)
                 _new_sample_event.clear()
-                now = time.time()
-                if now < next_tick:
-                    time.sleep(next_tick - now)
-                next_tick = time.time() + frame_interval
+                next_tick += frame_interval
             else:
                 now = time.time()
                 sleep_s = next_tick - now
