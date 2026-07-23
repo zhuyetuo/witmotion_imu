@@ -496,8 +496,9 @@ def main():
     ap = argparse.ArgumentParser(description='多个摄像头 + 多个 IMU 设备同步采集')
     ap.add_argument('--camera', action='append', type=int, required=True,
                     help='摄像头编号，可重复传多个，例如 --camera 0 --camera 1')
-    ap.add_argument('--imu', action='append', required=True,
-                    help='IMU 设备，格式 类型=标识，可重复传多个。见 imu_camera_sync_multi.py 说明。')
+    ap.add_argument('--imu', action='append', default=[],
+                    help='IMU 设备，格式 类型=标识，可重复传多个。见 imu_camera_sync_multi.py 说明。'
+                         '不传就是纯摄像头预览模式，不连IMU（组合CSV里就不会有对应的acc/gyro列）。')
     ap.add_argument('--width', type=int, default=1280, help='最终输出/写入视频的分辨率宽，默认 1280（720p）')
     ap.add_argument('--height', type=int, default=720, help='最终输出/写入视频的分辨率高，默认 720（720p）')
     ap.add_argument('--capture-width', type=int, default=0,
