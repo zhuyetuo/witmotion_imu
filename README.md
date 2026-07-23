@@ -508,7 +508,27 @@ python imu_camera_sync_multicam.py --camera 0 --camera 1 --imu wit=WTSDCL --imu 
 
 # 常用组合：2路摄像头 + WitMotion + HICC，降采样到16Hz，只保留降采样文件，预热10秒，循环录制每段1分钟，指定保存目录
 python imu_camera_sync_multicam.py --imu wit=WT901BLE68 --imu hicc=EA:CB:3E:CF:00:1A --duration 60 --resample-hz 16 --camera 0 --camera 1 --width 1280 --height 720 --loop --resample-only --out-dir data/multicam_multiimu --warmup-sec 10
+
+# 生产环境长期采集（3只狗，其中两个IMU设备名重复用MAC地址区分，见下方"--imu"说明）：
+# 2路摄像头原生2560x1440采集再缩放到1280x720输出（--capture-width/--capture-height，
+# 避免低分辨率下驱动直接裁切画面），--show-settings-dialog 手动调一次原生对焦/白平衡，
+# --align-hourly 按整点切文件（不管什么时候启动，第一段到下一个整点结束，之后每段一小时）
+python imu_camera_sync_multicam.py \
+    --imu wit=XX:XX:XX:XX:XX:01 --imu wit=XX:XX:XX:XX:XX:02 --imu wit=WTSDCL \
+    --align-hourly --resample-hz 16 --camera 0 --camera 1 --width 1280 --height 720 \
+    --capture-width 2560 --capture-height 1440 --show-settings-dialog \
+    --loop --resample-only --out-dir data/multicam_multiimu --warmup-sec 10 --cam-fps 30
 ```
+
+`--imu` 不是必填的：不传就是纯摄像头预览模式（不连IMU，先看画面调焦距/白平衡，按 Q 退出），确认好了再把 `--imu ...` 加回去正式采集。
+
+**多个同型号 IMU 设备重名怎么区分**：比如同时有两个 `WT901BLE68`（型号/名字一样），`--imu` 的标识（`=` 后面那部分）既可以填名称关键字，也可以直接填 MAC 地址（自动识别格式）——先用 `python wit_ble_live.py --scan` 扫一遍拿到每个设备各自的 MAC 地址（建议一次只开一个设备扫，避免混淆），再把对应的 `wit=WT901BLE68` 换成 `wit=XX:XX:XX:XX:XX:01` 这样的 MAC 地址，就不会连错设备了；名字本来就唯一的设备（比如 `WTSDCL`）继续用名称即可。
+
+**按整点切分（`--align-hourly`）**：跟 `--duration` 二选一，不用再掐着表算固定秒数——不管什么时候启动录制，第一段只录到下一个整点为止，之后每段整整一小时，配合 `--loop` 就能一直按小时自动切文件，方便按小时/按天归档。加了 `--align-hourly`，`--duration` 会被忽略；不加则 `--duration` 用法完全不变。
+
+**输出按天自动分文件夹**：`--out-dir` 下面现在会按录制开始那天自动建一个 `2026_7_18` 这样的日期子文件夹（不补零），当天所有段的文件都存进去，长期 `--loop` 挂机录制不会把几十天的文件全堆在一个目录里。注意 `merge_hourly_segments.py`/`check_alignment.py` 这些下游脚本要指到具体的日期子文件夹（比如 `data/multicam_multiimu/2026_7_18`），它们不会自动递归子目录。
+
+**画面上的实时6轴数值默认不显示了**（比较占画面），需要肉眼确认设备是不是戴好、有没有在动的时候，加 `--show-imu-values` 临时打开。
 
 `--camera` 可重复传，第一个对应 `cam1`，第二个对应 `cam2`，以此类推。
 
