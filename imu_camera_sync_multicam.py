@@ -222,7 +222,11 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
     should_stop = [False]
     frame_interval = 1.0 / target_fps
     save_overlay = not args.no_save_overlay
-    imu_sync = not args.no_imu_sync
+    # 事件驱动同步依赖IMU来新样本时唤醒 _new_sample_event；没有任何IMU设备时
+    # （纯摄像头预览模式）这个事件永远不会被触发，每个tick都会傻等满
+    # frame_interval*3 的超时才继续，把实际fps拖到远低于 --cam-fps 的水平
+    # ——这种情况下没有IMU可同步，直接退化成固定定时器抓帧。
+    imu_sync = not args.no_imu_sync and bool(devices)
 
     # 精确到毫秒，避免 --loop 循环录制时文件名撞车互相覆盖。
     now_dt = datetime.now()
