@@ -699,10 +699,14 @@ def _measure_actual_fps(cap, warmup=5, sample=30) -> float:
 
 
 def probe_camera(camera_idx: int, backend: str = 'auto', fourcc: str = 'MJPG'):
-    """探测摄像头支持的最大分辨率，以及在该分辨率下驱动声称的 fps 与实测能跑的真实 fps。"""
+    """探测摄像头支持的最大分辨率，以及每个实际能拿到的分辨率下驱动声称的 fps
+    与实测能跑的真实 fps（很多摄像头分辨率越高、受USB带宽/传感器读出速度限制，
+    实际能跑的fps越低，光看驱动最大分辨率参数看不出来，得实测）。"""
     print(f'── 摄像头 {camera_idx} 能力探测 ──（backend={backend}  fourcc={fourcc}）')
     candidate_resolutions = [(3840, 2160), (1920, 1080), (1280, 720), (640, 480)]
-    best_res = None
+    tested_res = []  # 实际拿到的分辨率，按候选顺序去重（驱动经常把超出能力的
+                      # 请求钳到某个更低的实际分辨率，多个候选可能落到同一档）
+    seen = set()
     for w, h in candidate_resolutions:
         cap = open_camera(camera_idx, w, h, 30, backend=backend, fourcc=fourcc)
         if not cap.isOpened():
@@ -712,22 +716,26 @@ def probe_camera(camera_idx: int, backend: str = 'auto', fourcc: str = 'MJPG'):
         actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         cap.release()
         print(f'  请求 {w}x{h}  →  实际 {actual_w}x{actual_h}')
-        if best_res is None and actual_w > 0 and actual_h > 0:
-            best_res = (actual_w, actual_h)
+        if actual_w > 0 and actual_h > 0 and (actual_w, actual_h) not in seen:
+            seen.add((actual_w, actual_h))
+            tested_res.append((actual_w, actual_h))
 
-    if best_res is None:
+    if not tested_res:
         print('未能探测到有效分辨率。')
         return None
 
+    best_res = tested_res[0]
     print(f'  最大可用分辨率（约）: {best_res[0]}x{best_res[1]}')
-
-    cap = open_camera(camera_idx, best_res[0], best_res[1], 30, backend=backend, fourcc=fourcc)
-    for target in [60, 30, 25, 20, 16, 15, 10]:
-        cap.set(cv2.CAP_PROP_FPS, target)
-        declared = cap.get(cv2.CAP_PROP_FPS)
-        actual = _measure_actual_fps(cap)
-        print(f'  请求 {target:3d}fps  →  驱动声称 {declared:5.1f}fps  实测真实 {actual:5.1f}fps')
-    cap.release()
+    print(f'  各实际可用分辨率下的真实fps（分别用60/30fps测一遍，判断这个分辨率能不能跑满）:')
+    for w, h in tested_res:
+        cap = open_camera(camera_idx, w, h, 30, backend=backend, fourcc=fourcc)
+        for target in (60, 30):
+            cap.set(cv2.CAP_PROP_FPS, target)
+            declared = cap.get(cv2.CAP_PROP_FPS)
+            actual = _measure_actual_fps(cap)
+            print(f'    {w}x{h}  请求 {target:3d}fps  →  驱动声称 {declared:5.1f}fps  '
+                  f'实测真实 {actual:5.1f}fps')
+        cap.release()
     print()
     return best_res
 
