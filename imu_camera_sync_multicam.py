@@ -509,9 +509,11 @@ def main():
     ap.add_argument('--capture-height', type=int, default=0,
                     help='向摄像头请求的原生采集分辨率高，默认0=跟--height一样。见 --capture-width。')
     ap.add_argument('--backend', choices=['auto', 'dshow', 'msmf', 'any'], default='auto',
-                    help='OpenCV 打开摄像头用的后端，默认 auto（Windows上自动用DSHOW）。部分高分辨率/'
-                         '广角UVC摄像头在默认MSMF后端下会画面裁切不全、自动对焦/白平衡失灵，改用 dshow'
-                         ' 通常能解决，所有摄像头统一用这一个设置。')
+                    help='OpenCV 打开摄像头用的后端，默认 auto（Windows上自动用MSMF），所有摄像头统一'
+                         '用这一个设置。MSMF 在实测中1080p/720p的真实fps比DSHOW准确得多（DSHOW有的'
+                         '分辨率下请求的30/60fps实际只能跑5~10fps）；如果某台摄像头在MSMF下自动对焦/'
+                         '白平衡等UVC控制属性不生效，改用 --backend dshow 单独调一次（--show-settings'
+                         '-dialog 也只支持dshow），调好之后驱动通常会记住，换回默认MSMF往往还生效。')
     ap.add_argument('--fourcc', default='MJPG',
                     help='摄像头像素格式，默认 MJPG（高分辨率下大多数USB2.0摄像头只支持MJPG，'
                          '不显式指定可能导致OpenCV协商到裁切/不完整画面的格式）')

@@ -799,7 +799,14 @@ python hicc_drift_analysis.py --address EA:CB:3E:CF:00:1B --duration 120 --plot
 - **WitMotion 校时**：芯片时间需用官方上位机软件校准，本工具不提供写入校时的功能（WT901 系列协议只读）。未校时的设备芯片时间字段无效（`wit_ble_live.py --print-only` 里"片上="会显示空白），`imu_camera_sync.py` 完全不依赖芯片时间（只用电脑时间做时间戳），未校时也能正常采集；但 `wit_ble_live.py` 写 CSV 时默认会丢弃芯片时间无效的帧（`--keep-bad-frames` 可保留，此时时间戳仍用电脑时间，只是不做"时间戳必须递增"的过滤）。
 - **HICC 校时**：连接后会自动下发当前北京时间，无需手动操作。`--no-timesync` 可跳过（设备时钟已准确时使用）。
 - **Label Studio 时间戳**：`timeFormat` 必须填 `%Y-%m-%d %H:%M:%S.%L`，用 `.` 分隔毫秒而非 `:`，否则 Label Studio 会报解析错误。
-- **高分辨率/广角USB摄像头在OpenCV下画面裁切、自动对焦/白平衡失灵**（比如海康威视U64 Pro这类2K广角摄像头，用Windows自带相机App/原生驱动看画面完整、白平衡对焦都正常，但用OpenCV打开却只显示画面的一部分）：常见原因是（1）没有显式指定FOURCC，很多摄像头在1080p/2K这种高分辨率下USB2.0带宽只够传MJPG压缩格式，不够传YUY2未压缩格式，不设置FOURCC的话OpenCV可能协商到一个驱动没法给出完整画面的格式，静默退化成裁切画面而不是报错；（2）Windows上OpenCV新版本默认用MSMF后端，对不少UVC摄像头的曝光/白平衡/对焦控制支持不好，改用DSHOW后端通常能解决。`imu_camera_sync.py`/`imu_camera_sync_multicam.py` 已经内置了这两个修复，默认就会：Windows上自动用 `--backend dshow`，默认 `--fourcc MJPG`，默认开启 `--autofocus on`/`--auto-wb on`。如果还是有问题，可以显式试试 `--backend msmf` 或 `--backend any` 对比效果。
+- **高分辨率/广角USB摄像头在OpenCV下画面裁切**（比如海康威视U64 Pro这类2K广角摄像头，用Windows自带相机App/原生驱动看画面完整，但用OpenCV打开却只显示画面的一部分）：常见原因是没有显式指定FOURCC——很多摄像头在1080p/2K这种高分辨率下USB2.0带宽只够传MJPG压缩格式，不够传YUY2未压缩格式，不设置FOURCC的话OpenCV可能协商到一个驱动没法给出完整画面的格式，静默退化成裁切画面而不是报错。`imu_camera_sync.py`/`imu_camera_sync_multicam.py` 默认 `--fourcc MJPG` 已经处理了这个问题。
+
+  **后端选择（`--backend`，默认 auto）**：Windows 上 `auto` 现在会自动用 **MSMF**（Media Foundation），不是 DSHOW——实测某2K广角摄像头在 DSHOW 后端下，1080p/720p 这两档请求30/60fps实际只能跑5~10fps（明显不对，Windows相机App里这两档是能到60fps的），换成 MSMF 后端跑出来的fps就跟Windows相机App一致了；2K档两个后端都封顶30fps，这是真实硬件上限（Windows相机App里1440p也只有30fps一个选项），不是bug。如果某台摄像头在 MSMF 下自动对焦/白平衡这类UVC控制属性设置不生效，可以临时加 `--backend dshow` 单独调一次（配合下面的 `--show-settings-dialog`），调好之后驱动通常会把设置记在固件里，换回默认的 MSMF 往往也还生效。想对比两个后端在你摄像头上的实测fps差异，用 `--probe`：
+
+  ```bash
+  python imu_camera_sync_multicam.py --camera 0 --camera 1 --probe                # 默认 auto=msmf
+  python imu_camera_sync_multicam.py --camera 0 --camera 1 --backend dshow --probe
+  ```
 
   **即使 FOURCC/后端都对了，直接向驱动请求较低分辨率（比如720p）本身还是可能画面裁切**——因为不少广角摄像头的720p模式，是传感器中间裁切出来的一小块画面（视野变窄），不是完整2K画幅等比缩小下来的。想同时保住广角视野和目标输出分辨率/文件大小，用 `--capture-width`/`--capture-height` 让脚本按摄像头的原生高分辨率采集，再用软件缩放到 `--width`/`--height` 输出：
 

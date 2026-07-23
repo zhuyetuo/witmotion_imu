@@ -604,9 +604,19 @@ class _Cv2CfrSink:
 # ── 摄像头打开（统一走这里，兼容 UVC 摄像头在 OpenCV 下的常见坑） ──────────
 
 def _resolve_backend(name: str):
-    """把 --backend 参数名转成 cv2 的后端常量。'auto' 在 Windows 上用 DSHOW
+    """把 --backend 参数名转成 cv2 的后端常量。'auto' 在 Windows 上用 MSMF
     （见下方 open_camera 说明），其它平台用默认后端（返回 None，调用方就不传
-    显式后端）。"""
+    显式后端）。
+
+    实测发现（某海康威视 U64 Pro 2K广角摄像头）：DSHOW 在 1080p/720p 这两档
+    分辨率下，OpenCV 请求 30/60fps 实际只能跑 5~10fps（明显不对，Windows 相机
+    App 里这两档是能到60fps的），换成 MSMF 后端后 1080p/720p 都能正常跑到
+    请求的fps、结果跟 Windows 相机App一致；2K档两个后端都封顶在30fps（这个
+    是真实硬件上限，Windows相机App里1440p档也只有30fps这一个选项，不是bug）。
+    DSHOW 换成 MSMF 之后，可能不同摄像头驱动对 UVC 控制属性（自动对焦/自动
+    白平衡/CAP_PROP_SETTINGS原生设置对话框）的支持程度不一样，如果 MSMF 下这些
+    不生效，加 --backend dshow 临时切换单独调一次（调好的设置很多摄像头驱动会
+    存在固件里，之后换回默认 MSMF 也可能还生效）。"""
     name = (name or 'auto').lower()
     if name == 'any':
         return cv2.CAP_ANY
@@ -615,7 +625,7 @@ def _resolve_backend(name: str):
     if name == 'msmf':
         return cv2.CAP_MSMF
     if name == 'auto':
-        return cv2.CAP_DSHOW if sys.platform.startswith('win') else None
+        return cv2.CAP_MSMF if sys.platform.startswith('win') else None
     return None
 
 
@@ -634,13 +644,15 @@ def open_camera(index: int, width: int, height: int, fps: float,
        完整分辨率画面，往往会静默退化成"只给传感器裁切出来的一部分画面"，
        而不是报错——所以必须先把 FOURCC 设成 MJPG，再设分辨率，两者要匹配
        驱动实际支持的组合。
-    2. 后端选择：OpenCV-Python 在 Windows 上新版本默认用 MSMF (Media
-       Foundation) 后端，这个后端对不少 UVC 摄像头的曝光/白平衡/对焦控制
-       支持得不好（属性设置经常被忽略或者报的值不对）；改用 DSHOW
-       (DirectShow) 后端通常能正常读写这些控制属性，这也是网上遇到类似问题
-       时最常见的解决办法。默认 backend='auto' 在 Windows 上会自动选 DSHOW，
-       其它系统（Linux/Mac）用 OpenCV 默认后端（DSHOW/MSMF是Windows专属，
-       在其它系统上传这两个值会直接打不开摄像头）。
+    2. 后端选择：默认 backend='auto' 在 Windows 上用 MSMF (Media Foundation)
+       ——实测（某2K广角摄像头）DSHOW 在 1080p/720p 这两档分辨率下请求
+       30/60fps 实际只能跑 5~10fps，换 MSMF 后端就能跑到请求的fps、结果
+       跟 Windows 相机App一致，2K档两个后端都封顶30fps（真实硬件上限，不是
+       bug）。如果某个摄像头驱动在 MSMF 下曝光/白平衡/对焦这类控制属性设置
+       不生效，可以临时加 --backend dshow 单独调一次（`_resolve_backend`
+       的说明里有更详细的取舍记录），调好后驱动一般会记住，换回默认 MSMF
+       往往也还生效。其它系统（Linux/Mac）用 OpenCV 默认后端（DSHOW/MSMF是
+       Windows专属，在其它系统上传这两个值会直接打不开摄像头）。
 
     autofocus/auto_wb: None=不设置（用摄像头当前状态），True/False=显式打开
     /关闭自动对焦、自动白平衡（对应 cv2.CAP_PROP_AUTOFOCUS /
@@ -1131,9 +1143,11 @@ def main():
     ap.add_argument('--capture-height', type=int, default=0,
                     help='向摄像头请求的原生采集分辨率高，默认0=跟--height一样。见 --capture-width 说明。')
     ap.add_argument('--backend', choices=['auto', 'dshow', 'msmf', 'any'], default='auto',
-                    help='OpenCV 打开摄像头用的后端，默认 auto（Windows上自动用DSHOW，其它系统用默认）。'
-                         '部分高分辨率/广角UVC摄像头（比如海康威视U64 Pro）在Windows默认的MSMF后端下'
-                         '会出现画面裁切不全、自动对焦/白平衡失灵的问题，改用 dshow 通常能解决。')
+                    help='OpenCV 打开摄像头用的后端，默认 auto（Windows上自动用MSMF，其它系统用默认）。'
+                         'MSMF 在实测中1080p/720p的真实fps比DSHOW准确得多（DSHOW有的分辨率下请求的'
+                         '30/60fps实际只能跑5~10fps）；如果某台摄像头在MSMF下自动对焦/白平衡等UVC'
+                         '控制属性不生效，改用 --backend dshow 单独调一次（--show-settings-dialog 也'
+                         '只支持dshow），调好之后驱动通常会记住，换回默认MSMF往往还生效。')
     ap.add_argument('--fourcc', default='MJPG',
                     help='摄像头像素格式，默认 MJPG（大多数USB2.0摄像头在1080p/2K这种高分辨率下'
                          '只支持MJPG压缩格式，不支持YUY2未压缩格式——不显式指定的话OpenCV可能协商'
