@@ -151,7 +151,7 @@ def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame
         cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
         cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
 
-    ts = datetime.now().strftime('%H:%M:%S.%f')[:12]
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:23]
     put(f'{ts}  [{cam_label}]  #{frame_idx}  t={elapsed:.1f}s  {cam_fps:.1f}/{target_fps}fps'
         f'  lat={latency_ms:+.0f}ms', 0, (255, 255, 100))
     row = 1

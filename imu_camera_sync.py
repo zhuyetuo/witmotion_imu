@@ -479,7 +479,7 @@ def draw_imu_overlay(frame, imu: dict | None, imu_lag_ms: float, imu_missing: bo
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 1, cv2.LINE_AA)
 
     # 行0：时间 + 帧号 + 录制标记
-    ts = datetime.now().strftime('%H:%M:%S.%f')[:12]
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:23]
     rec_tag = '  [REC]' if recording else ''
     put(f'{ts}  #{frame_idx}  t={elapsed:.1f}s{rec_tag}', 0, (255, 255, 100))
 
