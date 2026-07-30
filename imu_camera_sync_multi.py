@@ -313,7 +313,7 @@ def draw_overlay(frame, devices, elapsed, cam_fps, target_fps, frame_idx):
         cv2.putText(frame, text, (12, 28 + row * 26),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
 
-    ts = datetime.now().strftime('%H:%M:%S.%f')[:12]
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:23]
     put(f'{ts}  #{frame_idx}  t={elapsed:.1f}s  CAM {cam_fps:.1f}/{target_fps}fps', 0, (255, 255, 100))
     for i, (device, hz, lag_ms, missing) in enumerate(devices):
         if missing:
