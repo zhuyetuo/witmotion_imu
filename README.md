@@ -522,6 +522,16 @@ python imu_camera_sync_multicam.py \
 
 `--imu` 不是必填的：不传就是纯摄像头预览模式（不连IMU，先看画面调焦距/白平衡，按 Q 退出），确认好了再把 `--imu ...` 加回去正式采集。
 
+**纯视频录制模式（IMU设备没有蓝牙、走TF卡本地存储时）**：不传 `--imu`，配合 `--duration`/`--align-hourly` 照常能录制、落盘保存，不是只能预览——这时候只是没有IMU数据同步进组合CSV（`{base}.csv` 只有 `timestamp` 一列），摄像头照样按 `--align-hourly`/`--loop` 正常分段录制、按天建文件夹，之后拿到TF卡里的IMU数据后可以按时间戳手动对齐：
+
+```bash
+python imu_camera_sync_multicam.py --camera 0 --camera 1 --width 1280 --height 720 \
+    --capture-width 2560 --capture-height 1440 --align-hourly --resample-hz 16 \
+    --loop --out-dir data/multicam_video_only --warmup-sec 10 --cam-fps 30
+```
+
+注意这种模式下**不要加 `--resample-only`**——它假设每个IMU设备都会生成一份 `resampled` 配对文件来替代原始视频，没有IMU设备时不会生成任何配对文件，加了会导致原始视频被删掉、什么都不剩（脚本会自动检测这种情况并忽略 `--resample-only`、保留原始文件，但保险起见命令里就不用加）。
+
 **多个同型号 IMU 设备重名怎么区分**：比如同时有两个 `WT901BLE68`（型号/名字一样），`--imu` 的标识（`=` 后面那部分）既可以填名称关键字，也可以直接填 MAC 地址（自动识别格式）——先用 `python wit_ble_live.py --scan` 扫一遍拿到每个设备各自的 MAC 地址（建议一次只开一个设备扫，避免混淆），再把对应的 `wit=WT901BLE68` 换成 `wit=XX:XX:XX:XX:XX:01` 这样的 MAC 地址，就不会连错设备了；名字本来就唯一的设备（比如 `WTSDCL`）继续用名称即可。
 
 **按整点切分（`--align-hourly`）**：跟 `--duration` 二选一，不用再掐着表算固定秒数——不管什么时候启动录制，第一段只录到下一个整点为止，之后每段整整一小时，配合 `--loop` 就能一直按小时自动切文件，方便按小时/按天归档。加了 `--align-hourly`，`--duration` 会被忽略；不加则 `--duration` 用法完全不变。
