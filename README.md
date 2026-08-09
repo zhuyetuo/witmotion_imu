@@ -548,10 +548,17 @@ python imu_camera_sync_multicam.py --camera 0 --camera 1 --width 1280 --height 7
 python imu_camera_sync_multicam.py --camera 0 --imu wit=WT901BLE68 --imu wit=WTSDCL --probe
 ```
 
-确认摄像头能跑到你想要的帧率后，用 `--cam-fps` 指定目标帧率（默认 20，比如改成 25）：
+确认摄像头能跑到你想要的帧率后，用 `--cam-fps` 指定目标帧率（默认 20，比如改成 25）；下面这条是正式长期录制用的参数（`--align-hourly` 按整点切分、`--capture-width/--capture-height` 按原生1080p采集再缩放到720p输出，而不是直接请求720p导致画面被裁切），先用短 `--duration`/`--warmup-sec` 跑几秒验证参数没问题，再换成 `--align-hourly` 正式跑：
 
 ```bash
-python imu_camera_sync_multicam.py --imu wit=WT901BLE68 --imu wit=WTSDCL --duration 10 --resample-hz 16 --camera 0 --width 1280 --height 720 --cam-fps 25 --loop --resample-only --out-dir data/multicam_multiimu --warmup-sec 1
+# 快速验证参数（10秒一段，验证完就可以Ctrl+C）
+python imu_camera_sync_multicam.py --imu wit=WT901BLE68 --imu wit=WTSDCL --duration 10 --resample-hz 16 --camera 0 --width 1280 --height 720 --capture-width 1920 --capture-height 1080 --cam-fps 25 --loop --resample-only --out-dir data/multicam_multiimu --warmup-sec 1
+
+# 正式长期录制（按整点切分，1080p采集缩放到720p输出）
+python imu_camera_sync_multicam.py --imu wit=WT901BLE68 --imu wit=WTSDCL \
+    --align-hourly --resample-hz 16 --camera 0 --width 1280 --height 720 \
+    --capture-width 1920 --capture-height 1080 \
+    --loop --resample-only --out-dir data/multicam_multiimu --warmup-sec 10 --cam-fps 25
 ```
 
 **输出文件：**
