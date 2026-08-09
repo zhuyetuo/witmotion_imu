@@ -460,7 +460,14 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                     except OSError as e:
                         print(f'生成 {pair_base} 配对文件失败: {e}')
 
-            if args.resample_only:
+            if args.resample_only and not devices:
+                # 没有配置任何IMU设备（纯视频录制模式）时不会生成任何
+                # resampled配对文件——这里如果照常删除原始 {base}_camX.mp4/
+                # .csv，就是把唯一的视频/数据删掉、什么都不剩，所以这种情况
+                # 下 --resample-only 直接忽略，原始文件原样保留。
+                print(f'\n--resample-only: 没有配置IMU设备，没有resampled文件可替代，'
+                      f'已忽略 --resample-only，原始文件保留。')
+            elif args.resample_only:
                 for cam in cameras:
                     try:
                         os.remove(f'{base}_{cam.label}.mp4')
