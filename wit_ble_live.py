@@ -318,10 +318,15 @@ async def run(args):
     # 独立于解析逻辑的原始 BLE notify 计数：用来区分"notify 事件本身到达
     # 速率就不够"还是"notify 到达了但我们解析/写入丢了包"。
     notify_stats = {'count': 0, 'bytes': 0}
+    hexdump_left = [args.hexdump]
 
     def notification_handler(sender, data: bytearray):
         notify_stats['count'] += 1
         notify_stats['bytes'] += len(data)
+        if hexdump_left[0] > 0:
+            hexdump_left[0] -= 1
+            print(f'[hexdump {args.hexdump - hexdump_left[0]}/{args.hexdump}] '
+                  f'{len(data)} 字节: {bytes(data).hex(" ")}')
         packets = buffer.feed(bytes(data))
         for pkt in packets:
             p = parse_one_packet(pkt)
@@ -465,6 +470,11 @@ def main():
                           '之前是每 50 帧打印一次，高频采集（如100Hz）时刷屏太快，改成按时间间隔')
     ap.add_argument('--quiet', action='store_true',
                      help='完全不打印"已接收 N 帧"这类状态提示（仍会打印连接/丢帧/整点切换等关键信息）')
+    ap.add_argument('--hexdump', type=int, default=0, metavar='N',
+                     help='诊断用：打印收到的前N次原始notify字节（十六进制），不做任何解析。'
+                          '主要用来排查设备上位机"内容"勾选项改动后（比如关掉欧拉角）导致帧格式'
+                          '变化、当前0x55 0x61固定28字节的解析假设不再匹配的问题——先用这个把'
+                          '实际字节长度/内容抓出来，再决定怎么改解析逻辑，不盲猜协议。')
     args = ap.parse_args()
 
     try:
