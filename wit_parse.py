@@ -82,6 +82,17 @@ PACKET_LEN = 28
 HEADER = 0x55
 TYPE_61 = 0x61
 
+# 0x55 0x60：设备上位机"内容"只勾选加速度+角速度（关掉欧拉角）时实际发送的
+# 精简帧，14字节 = 包头(1)+类型(1)+AccX/Y/Z+GyroX/Y/Z(6个int16=12字节)，
+# 不含角度、不含芯片时间戳。跟 0x61 的28字节固定帧是两种不同格式，实测
+# hexdump 确认过（十六进制抓包比对：112字节notify里正好是8个连续的14字节
+# 0x55 0x60 包）。只有 BLE 实时接收路径（StreamingByteBuffer/parse_one_packet，
+# 给 wit_ble_live.py / imu_camera_sync*.py 用）识别这个格式；TF卡离线日志文件
+# 解析（parse_packets，给 wit_parse.py CLI 用）目前还是只认 0x61，因为还没有
+# 拿到TF卡在这种"内容"配置下导出的原始日志样本核实格式是否一致。
+TYPE_60 = 0x60
+PACKET_LEN_60 = 14
+
 ACC_RANGE = 16.0       # g
 GYRO_RANGE = 2000.0    # deg/s
 ANGLE_RANGE = 180.0    # deg
@@ -520,7 +531,10 @@ DEFAULT_NOTIFY_CANDIDATES = [
 
 
 class StreamingByteBuffer:
-    """累积 BLE notify 推送的字节，按 0x55 0x61 同步头切出完整28字节包。"""
+    """累积 BLE notify 推送的字节，按同步头切出完整数据包。同时支持两种帧：
+    0x55 0x61（28字节，加速度+角速度+角度+芯片时间——设备"内容"勾了欧拉角时）
+    和 0x55 0x60（14字节，只有加速度+角速度，没有角度和芯片时间——关掉欧拉角
+    之后设备实际发送的精简帧，实测hexdump确认过）。"""
 
     def __init__(self):
         self.buf = bytearray()
@@ -530,10 +544,23 @@ class StreamingByteBuffer:
         packets = []
         i = 0
         n = len(self.buf)
-        while i + PACKET_LEN <= n:
-            if self.buf[i] == HEADER and self.buf[i + 1] == TYPE_61:
+        while i < n:
+            if i + 1 >= n:
+                break
+            if self.buf[i] != HEADER:
+                i += 1
+                continue
+            t = self.buf[i + 1]
+            if t == TYPE_61 and i + PACKET_LEN <= n:
                 packets.append(bytes(self.buf[i:i + PACKET_LEN]))
                 i += PACKET_LEN
+            elif t == TYPE_60 and i + PACKET_LEN_60 <= n:
+                packets.append(bytes(self.buf[i:i + PACKET_LEN_60]))
+                i += PACKET_LEN_60
+            elif t in (TYPE_61, TYPE_60):
+                # 包头匹配但buffer里剩余字节不够凑出一个完整包，等下一次feed()
+                # 再来的数据补齐，这次先不消费这段留在buffer里。
+                break
             else:
                 i += 1
         del self.buf[:i]
@@ -541,7 +568,18 @@ class StreamingByteBuffer:
 
 
 def parse_one_packet(pkt: bytes):
-    """解析单个28字节 0x55 0x61 数据包，返回字典（结构与 parse_packets 一致）。"""
+    """解析单个数据包（0x55 0x61 28字节，或 0x55 0x60 14字节），返回字典。
+    0x60 格式没有角度、没有芯片时间，对应字段返回 None/[0,0,0]。"""
+    if len(pkt) == PACKET_LEN_60 and pkt[0] == HEADER and pkt[1] == TYPE_60:
+        vals = struct.unpack('<6h', pkt[2:14])
+        acc = [v / 32768.0 * ACC_RANGE for v in vals[0:3]]
+        gyro = [v / 32768.0 * GYRO_RANGE for v in vals[3:6]]
+        return {
+            'acc': acc, 'gyro': gyro, 'angle': [0.0, 0.0, 0.0],
+            'year': None, 'month': None, 'day': None,
+            'hour': None, 'minute': None, 'second': None,
+            'ms': None, 'chip_time': None,
+        }
     if len(pkt) != PACKET_LEN or pkt[0] != HEADER or pkt[1] != TYPE_61:
         return None
     vals = struct.unpack('<9h', pkt[2:20])
