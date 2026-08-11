@@ -565,7 +565,7 @@ python imu_camera_sync_multicam.py --imu wit=WT901BLE68 --imu wit=WTSDCL \
 
 | 文件 | 内容 |
 |---|---|
-| `{base}_cam1.mp4`、`{base}_cam2.mp4`... | 每路摄像头各自的视频（VFR，含叠加信息） |
+| `{base}_cam1_raw.mp4`、`{base}_cam2_raw.mp4`... | 每路摄像头各自的原始视频（VFR，含叠加信息；`_raw`后缀跟 `{base}_imu1_raw.csv` 等命名风格一致） |
 | `{base}.csv` | 每个tick一行：`timestamp, imu1_acc_x...imu1_gyro_z, imu2_acc_x...imu2_gyro_z, ...` |
 | `{base}_meta.csv` | 每行的对齐信息：各摄像头的 fps，各IMU设备的 lag_ms/missing/hz |
 | `{base}_imu1_raw.csv`、`{base}_imu2_raw.csv`... | 各 IMU 设备的原始全量流水 |
