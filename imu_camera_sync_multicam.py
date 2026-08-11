@@ -434,31 +434,34 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                     print(f'  [{cam.label}] ✘ 帧数不一致: 视频 {actual_frames} 帧, CSV {frame_idx} 行')
 
             print()
-            print('── 降采样（每路摄像头 x 每个设备各生成一对同名 mp4/csv）──')
             resampled_pairs = []  # (cam_label, device_label, resampled_base)
-            for d in devices:
-                if not cameras:
-                    continue
-                # 每个设备只需要算一次降采样，但要让每一对 mp4/csv 文件名（去掉
-                # 扩展名）完全一致才能直接拖进 Label Studio 配对，所以第一路摄像头
-                # 直接把降采样结果写到配对文件名下，其余摄像头再从这份结果复制过去
-                # （内容完全相同，只是复制成不同文件名，方便按文件名对拖拽上传）。
-                first_pair_base = f'{base}_{cameras[0].label}_{d.label}_resampled{args.resample_hz:g}hz'
-                resample_raw_imu(
-                    f'{base}_{d.label}_raw.csv', f'{first_pair_base}.csv', args.resample_hz,
-                    t_start_ms=first_tick_ts_ms, t_end_ms=last_tick_ts_ms,
-                )
-                for cam in cameras:
-                    pair_base = f'{base}_{cam.label}_{d.label}_resampled{args.resample_hz:g}hz'
-                    try:
-                        shutil.copyfile(f'{base}_{cam.label}.mp4', f'{pair_base}.mp4')
-                        if cam is not cameras[0]:
-                            shutil.copyfile(f'{first_pair_base}.csv', f'{pair_base}.csv')
-                        print(f'  {pair_base}.mp4 / .csv（{cam.label} 视频 + {d.label} 降采样数据，'
-                              f'文件名一致可直接拖拽配对）')
-                        resampled_pairs.append((cam.label, d.label, pair_base))
-                    except OSError as e:
-                        print(f'生成 {pair_base} 配对文件失败: {e}')
+            if args.no_resample:
+                print('── --no-resample：跳过降采样，只保留原始文件 ──')
+            else:
+                print('── 降采样（每路摄像头 x 每个设备各生成一对同名 mp4/csv）──')
+                for d in devices:
+                    if not cameras:
+                        continue
+                    # 每个设备只需要算一次降采样，但要让每一对 mp4/csv 文件名（去掉
+                    # 扩展名）完全一致才能直接拖进 Label Studio 配对，所以第一路摄像头
+                    # 直接把降采样结果写到配对文件名下，其余摄像头再从这份结果复制过去
+                    # （内容完全相同，只是复制成不同文件名，方便按文件名对拖拽上传）。
+                    first_pair_base = f'{base}_{cameras[0].label}_{d.label}_resampled{args.resample_hz:g}hz'
+                    resample_raw_imu(
+                        f'{base}_{d.label}_raw.csv', f'{first_pair_base}.csv', args.resample_hz,
+                        t_start_ms=first_tick_ts_ms, t_end_ms=last_tick_ts_ms,
+                    )
+                    for cam in cameras:
+                        pair_base = f'{base}_{cam.label}_{d.label}_resampled{args.resample_hz:g}hz'
+                        try:
+                            shutil.copyfile(f'{base}_{cam.label}.mp4', f'{pair_base}.mp4')
+                            if cam is not cameras[0]:
+                                shutil.copyfile(f'{first_pair_base}.csv', f'{pair_base}.csv')
+                            print(f'  {pair_base}.mp4 / .csv（{cam.label} 视频 + {d.label} 降采样数据，'
+                                  f'文件名一致可直接拖拽配对）')
+                            resampled_pairs.append((cam.label, d.label, pair_base))
+                        except OSError as e:
+                            print(f'生成 {pair_base} 配对文件失败: {e}')
 
             if args.resample_only and not devices:
                 # 没有配置任何IMU设备（纯视频录制模式）时不会生成任何
@@ -553,6 +556,11 @@ def main():
                     help='录制结束后把每个设备的原始IMU流水降采样到该频率，默认25Hz')
     ap.add_argument('--resample-only', action='store_true',
                     help='只保留各摄像头x设备的降采样版文件，删除原始的 {base}_camN.mp4/.csv/_meta.csv/_raw.csv')
+    ap.add_argument('--no-resample', action='store_true',
+                    help='跟 --resample-only 相反：完全跳过降采样这一步，不生成任何 '
+                         '{base}_camX_imuY_resampled{HZ}hz.mp4/.csv 配对文件，只保留原始的 '
+                         '{base}_camN.mp4/.csv/_meta.csv/_{imu}_raw.csv（想留原始IMU数据、不需要'
+                         '降采样配对文件时用这个）。跟 --resample-only 互斥。')
     ap.add_argument('--loop', action='store_true',
                     help='循环录制模式：每段 --duration 秒，录完自动开始下一段，直到按 Q/ESC 或 Ctrl+C 才停止')
     ap.add_argument('--align-hourly', action='store_true',
@@ -564,6 +572,10 @@ def main():
     ap.add_argument('--probe', action='store_true',
                     help='只探测硬件能力（每路摄像头 + 各IMU设备当前实际输出频率），不录制，探测完直接退出')
     args = ap.parse_args()
+
+    if args.resample_only and args.no_resample:
+        print('--resample-only 和 --no-resample 互斥（一个是"只留降采样版"，一个是"只留原始版"），只能选一个。')
+        sys.exit(1)
 
     devices = []
     for i, spec in enumerate(args.imu, start=1):
