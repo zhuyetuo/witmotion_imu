@@ -29,7 +29,8 @@
 --imu 用法跟 imu_camera_sync_multi.py 完全一样（type=标识，可重复传）。
 
 输出:
-    {base}_cam1.mp4, {base}_cam2.mp4...       每路摄像头各自的视频（VFR，含叠加信息）
+    {base}_cam1_raw.mp4, {base}_cam2_raw.mp4... 每路摄像头各自的原始视频（VFR，含叠加信息，
+                                                跟 {base}_imu1_raw.csv 等同名后缀"_raw"风格一致）
     {base}.csv                                 每个"tick"一行：timestamp, imu1_acc_x...
                                                 （所有 IMU 设备的 acc/gyro，按 --imu 顺序）
     {base}_meta.csv                            每行的对齐信息：各摄像头的 fps，各IMU设备的
@@ -255,7 +256,7 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
     if record_mode:
         use_ffmpeg = shutil.which('ffmpeg') is not None
         for cam in cameras:
-            video_path = f'{base}_{cam.label}.mp4'
+            video_path = f'{base}_{cam.label}_raw.mp4'
             if use_ffmpeg:
                 cam.video_writer = _FfmpegVfrSink(video_path, cam.actual_w, cam.actual_h, crf=args.video_crf)
             else:
@@ -414,7 +415,7 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
         if record_mode:
             print(f'已保存: {base}.csv  {base}_meta.csv')
             for cam in cameras:
-                print(f'       {base}_{cam.label}.mp4')
+                print(f'       {base}_{cam.label}_raw.mp4')
             for d in devices:
                 print(f'       {base}_{d.label}_raw.csv')
             print()
@@ -424,7 +425,7 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
             # 视频和 CSV 同名成对，这里视频是 {base}_{label}.mp4、CSV 是共享的
             # {base}.csv，不满足它的命名假设，所以直接读帧数自己比对，不复用它。
             for cam in cameras:
-                video_path = f'{base}_{cam.label}.mp4'
+                video_path = f'{base}_{cam.label}_raw.mp4'
                 cap_check = cv2.VideoCapture(video_path)
                 actual_frames = int(cap_check.get(cv2.CAP_PROP_FRAME_COUNT))
                 cap_check.release()
@@ -454,7 +455,7 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                     for cam in cameras:
                         pair_base = f'{base}_{cam.label}_{d.label}_resampled{args.resample_hz:g}hz'
                         try:
-                            shutil.copyfile(f'{base}_{cam.label}.mp4', f'{pair_base}.mp4')
+                            shutil.copyfile(f'{base}_{cam.label}_raw.mp4', f'{pair_base}.mp4')
                             if cam is not cameras[0]:
                                 shutil.copyfile(f'{first_pair_base}.csv', f'{pair_base}.csv')
                             print(f'  {pair_base}.mp4 / .csv（{cam.label} 视频 + {d.label} 降采样数据，'
@@ -473,9 +474,9 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
             elif args.resample_only:
                 for cam in cameras:
                     try:
-                        os.remove(f'{base}_{cam.label}.mp4')
+                        os.remove(f'{base}_{cam.label}_raw.mp4')
                     except OSError as e:
-                        print(f'删除 {base}_{cam.label}.mp4 失败: {e}')
+                        print(f'删除 {base}_{cam.label}_raw.mp4 失败: {e}')
                 for p in (f'{base}.csv', f'{base}_meta.csv'):
                     try:
                         os.remove(p)

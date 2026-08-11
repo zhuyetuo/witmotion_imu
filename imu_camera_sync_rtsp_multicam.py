@@ -46,7 +46,8 @@ LatestFrameReader）复用 imu_camera_sync_rtsp.py，都不重复实现。
 imu_camera_sync_multi.py 完全一样。
 
 输出:
-    {base}_cam1.mp4, {base}_cam2.mp4...          每路流各自的视频（VFR，含叠加信息）
+    {base}_cam1_raw.mp4, {base}_cam2_raw.mp4...   每路流各自的原始视频（VFR，含叠加信息，
+                                                   跟 {base}_imu1_raw.csv 等同名后缀"_raw"风格一致）
     {base}.csv                                    每个"tick"一行的组合CSV（未做延迟补偿，仅供调试）
     {base}_meta.csv                                每行的对齐信息
     {base}_imu1_raw.csv...                         各 IMU 设备的原始全量流水
@@ -255,7 +256,7 @@ def _run_one_segment(args, cameras: list, devices: list, target_fps: int, record
     if record_mode:
         use_ffmpeg = shutil.which('ffmpeg') is not None
         for cam in cameras:
-            video_path = f'{base}_{cam.label}.mp4'
+            video_path = f'{base}_{cam.label}_raw.mp4'
             if use_ffmpeg:
                 cam.video_writer = _FfmpegVfrSink(video_path, cam.actual_w, cam.actual_h, crf=args.video_crf)
             else:
@@ -420,13 +421,13 @@ def _run_one_segment(args, cameras: list, devices: list, target_fps: int, record
         if record_mode:
             print(f'已保存: {base}.csv  {base}_meta.csv')
             for cam in cameras:
-                print(f'       {base}_{cam.label}.mp4')
+                print(f'       {base}_{cam.label}_raw.mp4')
             for d in devices:
                 print(f'       {base}_{d.label}_raw.csv')
             print()
             print('── 自动对齐校验（各摄像头帧数 vs 组合CSV行数）──')
             for cam in cameras:
-                video_path = f'{base}_{cam.label}.mp4'
+                video_path = f'{base}_{cam.label}_raw.mp4'
                 cap_check = cv2.VideoCapture(video_path)
                 actual_frames = int(cap_check.get(cv2.CAP_PROP_FRAME_COUNT))
                 cap_check.release()
@@ -450,7 +451,7 @@ def _run_one_segment(args, cameras: list, devices: list, target_fps: int, record
                         latency_ms=cam.latency_ms,
                     )
                     try:
-                        shutil.copyfile(f'{base}_{cam.label}.mp4', f'{pair_base}.mp4')
+                        shutil.copyfile(f'{base}_{cam.label}_raw.mp4', f'{pair_base}.mp4')
                         print(f'  {pair_base}.mp4 / .csv（{cam.label} 视频 + {d.label} 降采样数据，'
                               f'延迟补偿 {cam.latency_ms:+.0f}ms，文件名一致可直接拖拽配对）')
                         resampled_pairs.append((cam.label, d.label, pair_base))
@@ -460,9 +461,9 @@ def _run_one_segment(args, cameras: list, devices: list, target_fps: int, record
             if args.resample_only:
                 for cam in cameras:
                     try:
-                        os.remove(f'{base}_{cam.label}.mp4')
+                        os.remove(f'{base}_{cam.label}_raw.mp4')
                     except OSError as e:
-                        print(f'删除 {base}_{cam.label}.mp4 失败: {e}')
+                        print(f'删除 {base}_{cam.label}_raw.mp4 失败: {e}')
                 for p in (f'{base}.csv', f'{base}_meta.csv'):
                     try:
                         os.remove(p)
