@@ -77,11 +77,12 @@ stop_event = threading.Event()
 # 任意一个设备来了新样本就 set，用于事件驱动抓帧（--no-imu-sync 可关闭改回固定定时器）
 _new_sample_event = threading.Event()
 
-# 原始IMU流水csv的表头：timestamp 是给人看/直接拖进 Label Studio 用的格式化
-# 时间字符串（跟降采样输出的 timestamp 列格式一致，%Y-%m-%d %H:%M:%S.fff）；
-# pc_ms 是同一个时刻的原始 epoch 毫秒数，resample_raw_imu() 内部算法用这一列
-# 做数值计算，两列内容等价，只是给不同用途用。
-RAW_CSV_HEADER = ['timestamp', 'pc_ms', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z']
+# 原始IMU流水csv的表头：timestamp 是格式化时间字符串（跟降采样输出的
+# timestamp 列格式一致，%Y-%m-%d %H:%M:%S.fff），给人看/直接拖进 Label
+# Studio 用。resample_raw_imu() 需要的 epoch 毫秒数改从这一列反解析
+# （datetime.strptime），不再单独存一份 pc_ms 数值列（仍兼容旧版两列都有的
+# raw.csv，见 imu_camera_sync.py 的 resample_raw_imu()）。
+RAW_CSV_HEADER = ['timestamp', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z']
 
 
 def _fmt_pc_ms(pc_ms: float) -> str:
@@ -112,7 +113,7 @@ class ImuDevice:
         with self.raw_lock:
             if self.raw_writer is not None:
                 self.raw_writer.writerow([
-                    _fmt_pc_ms(row['pc_ms']), f"{row['pc_ms']:.3f}",
+                    _fmt_pc_ms(row['pc_ms']),
                     f"{row['acc_x']:.6f}", f"{row['acc_y']:.6f}", f"{row['acc_z']:.6f}",
                     f"{row['gyro_x']:.6f}", f"{row['gyro_y']:.6f}", f"{row['gyro_z']:.6f}",
                 ])

@@ -133,12 +133,12 @@ _imu_new_event = threading.Event()
 _imu_seq_counter = 0
 
 # 原始 IMU 全量流水日志（不受摄像头帧率影响，用于事后独立降采样）
-# timestamp 是给人看/直接拖进 Label Studio 用的格式化时间字符串（跟降采样
-# 输出的 timestamp 列格式一致，%Y-%m-%d %H:%M:%S.fff）；pc_ms 是同一个时刻的
-# 原始 epoch 毫秒数，resample_raw_imu() 内部算法用这一列做数值计算，两列
-# 内容等价，只是给不同用途用，不要因为想"精简"就删掉其中一列。
+# timestamp 是格式化时间字符串（跟降采样输出的 timestamp 列格式一致，
+# %Y-%m-%d %H:%M:%S.fff），给人看/直接拖进 Label Studio 用。
+# resample_raw_imu() 需要的 epoch 毫秒数改从这一列反解析（datetime.strptime），
+# 不再单独存一份 pc_ms 数值列（仍兼容旧版两列都有的 raw.csv）。
 _raw_csv_writer = None
-RAW_CSV_HEADER = ['timestamp', 'pc_ms', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z']
+RAW_CSV_HEADER = ['timestamp', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z']
 
 
 def _fmt_pc_ms(pc_ms: float) -> str:
@@ -162,7 +162,7 @@ def _push_imu(row: dict):
         _imu_buffer.append(row)
         if _raw_csv_writer is not None:
             _raw_csv_writer.writerow([
-                _fmt_pc_ms(row['pc_ms']), f"{row['pc_ms']:.3f}",
+                _fmt_pc_ms(row['pc_ms']),
                 f"{row['acc_x']:.6f}", f"{row['acc_y']:.6f}", f"{row['acc_z']:.6f}",
                 f"{row['gyro_x']:.6f}", f"{row['gyro_y']:.6f}", f"{row['gyro_z']:.6f}",
             ])
@@ -414,7 +414,16 @@ def resample_raw_imu(raw_path: str, out_path: str, target_hz: float,
         print(f'原始 IMU 样本太少，跳过降采样: {raw_path}')
         return
 
-    t = np.array([float(r['pc_ms']) for r in rows])
+    # 兼容两种raw.csv：新版只有 timestamp 列（没有 pc_ms），旧版两列都有。
+    # 有 pc_ms 就直接用（数值，不用再解析字符串）；没有就从 timestamp 反解析
+    # 出 epoch 毫秒数，效果等价。
+    if rows and 'pc_ms' in rows[0]:
+        t = np.array([float(r['pc_ms']) for r in rows])
+    else:
+        t = np.array([
+            datetime.strptime(r['timestamp'], '%Y-%m-%d %H:%M:%S.%f').timestamp() * 1000.0
+            for r in rows
+        ])
     cols = {name: np.array([float(r[name]) for r in rows])
             for name in ('acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z')}
 
