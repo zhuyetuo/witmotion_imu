@@ -166,11 +166,23 @@ async def run_wit_device(device: ImuDevice, scan_timeout: float):
     first_attempt = True
     while not stop_event.is_set():
         is_mac = bool(_MAC_RE.match(device.ident))
-        ble_device = await find_device(
-            None if is_mac else device.ident,
-            device.ident if is_mac else None,
-            timeout=scan_timeout,
-        )
+        try:
+            ble_device = await find_device(
+                None if is_mac else device.ident,
+                device.ident if is_mac else None,
+                timeout=scan_timeout,
+            )
+        except Exception as e:
+            # find_device() 本身也可能抛异常（尤其同时扫描/连接好几个设备时，
+            # 蓝牙协议栈更容易出问题）——之前这里没兜住，会直接冒泡出这个协程，
+            # 导致 asyncio.gather() 连带把所有设备的协程都判定失败，
+            # ble_thread_main() 的 finally 又会把 stop_event 设上，等于一个
+            # 设备扫描出错就把整个录制程序都干掉了。现在跟连接阶段一样重试。
+            if stop_event.is_set():
+                break
+            print(f'[{device.label}] 扫描出错: {e}，2秒后重试...')
+            await asyncio.sleep(2.0)
+            continue
         if ble_device is None:
             action = '扫描' if first_attempt else '重连'
             print(f'[{device.label}] {action}未找到 WitMotion 设备: {device.ident}，2秒后重试...')
@@ -294,13 +306,22 @@ def ble_thread_main(devices: list[ImuDevice], scan_timeout: float):
     asyncio.set_event_loop(loop)
 
     async def run_all():
-        tasks = []
+        labeled_tasks = []
         for d in devices:
             if d.dev_type == 'wit':
-                tasks.append(run_wit_device(d, scan_timeout))
+                labeled_tasks.append((d.label, run_wit_device(d, scan_timeout)))
             else:
-                tasks.append(run_hicc_device(d, scan_timeout))
-        await asyncio.gather(*tasks)
+                labeled_tasks.append((d.label, run_hicc_device(d, scan_timeout)))
+        # return_exceptions=True：某一个设备的协程如果出了没兜住的异常
+        # （不管是这次修的 find_device() 那种，还是以后没想到的其它情况），
+        # 只让那一个设备停止工作（后续一直显示 MISSING），不会连累其它设备/
+        # 把整个录制程序都跟着终止——之前默认行为是只要有一个任务抛异常，
+        # gather() 就直接把异常冒泡出去，run_wit_device 的 find_device() 那个
+        # bug 就是这么把整个程序干掉的。
+        results = await asyncio.gather(*(t for _, t in labeled_tasks), return_exceptions=True)
+        for (label, _), result in zip(labeled_tasks, results):
+            if isinstance(result, Exception):
+                print(f'[{label}] 协程异常退出（该设备后续会一直显示MISSING，其它设备不受影响）: {result}')
 
     try:
         loop.run_until_complete(run_all())
