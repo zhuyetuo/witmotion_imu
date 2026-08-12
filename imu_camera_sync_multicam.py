@@ -437,7 +437,21 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
             print()
             resampled_pairs = []  # (cam_label, device_label, resampled_base)
             if args.no_resample:
-                print('── --no-resample：跳过降采样，只保留原始文件 ──')
+                # 不降采样，但原始数据也按 cam x imu 两两配对复制一份（内容还是
+                # 原始频率，不经过 resample_raw_imu），方便直接拖拽上传标注；
+                # 配对之外，单独的 {base}_camN_raw.mp4/{base}_imuM_raw.csv 原始
+                # 文件也保留，两种都留，不删。
+                print('── --no-resample：不降采样，原始数据按 cam x imu 两两配对（原始文件也保留）──')
+                for d in devices:
+                    for cam in cameras:
+                        pair_base = f'{base}_{cam.label}_{d.label}_raw'
+                        try:
+                            shutil.copyfile(f'{base}_{cam.label}_raw.mp4', f'{pair_base}.mp4')
+                            shutil.copyfile(f'{base}_{d.label}_raw.csv', f'{pair_base}.csv')
+                            print(f'  {pair_base}.mp4 / .csv（{cam.label} 原始视频 + {d.label} 原始数据，'
+                                  f'文件名一致可直接拖拽配对）')
+                        except OSError as e:
+                            print(f'生成 {pair_base} 配对文件失败: {e}')
             else:
                 print('── 降采样（每路摄像头 x 每个设备各生成一对同名 mp4/csv）──')
                 for d in devices:
