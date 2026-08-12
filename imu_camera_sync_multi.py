@@ -77,6 +77,17 @@ stop_event = threading.Event()
 # 任意一个设备来了新样本就 set，用于事件驱动抓帧（--no-imu-sync 可关闭改回固定定时器）
 _new_sample_event = threading.Event()
 
+# 原始IMU流水csv的表头：timestamp 是格式化时间字符串（跟降采样输出的
+# timestamp 列格式一致，%Y-%m-%d %H:%M:%S.fff），给人看/直接拖进 Label
+# Studio 用。resample_raw_imu() 需要的 epoch 毫秒数改从这一列反解析
+# （datetime.strptime），不再单独存一份 pc_ms 数值列（仍兼容旧版两列都有的
+# raw.csv，见 imu_camera_sync.py 的 resample_raw_imu()）。
+RAW_CSV_HEADER = ['timestamp', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z']
+
+
+def _fmt_pc_ms(pc_ms: float) -> str:
+    return datetime.fromtimestamp(pc_ms / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+
 
 class ImuDevice:
     """一个 IMU 设备的独立状态：接收缓冲、Hz 统计、原始流水日志。"""
@@ -102,7 +113,7 @@ class ImuDevice:
         with self.raw_lock:
             if self.raw_writer is not None:
                 self.raw_writer.writerow([
-                    f"{row['pc_ms']:.3f}",
+                    _fmt_pc_ms(row['pc_ms']),
                     f"{row['acc_x']:.6f}", f"{row['acc_y']:.6f}", f"{row['acc_z']:.6f}",
                     f"{row['gyro_x']:.6f}", f"{row['gyro_y']:.6f}", f"{row['gyro_z']:.6f}",
                 ])
@@ -426,7 +437,7 @@ def _run_one_segment(args, devices: list[ImuDevice], cap, actual_w, actual_h, ta
         for d in devices:
             raw_file = open(f'{base}_{d.label}_raw.csv', 'w', newline='', encoding='utf-8-sig')
             raw_writer = csv.writer(raw_file)
-            raw_writer.writerow(['pc_ms', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z'])
+            raw_writer.writerow(RAW_CSV_HEADER)
             d.set_raw_writer(raw_writer)
             d._raw_file = raw_file  # 挂在对象上方便统一关闭
 
