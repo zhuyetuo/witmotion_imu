@@ -80,7 +80,7 @@ except ImportError:
 
 from imu_camera_sync import _FfmpegVfrSink, _Cv2CfrSink, resample_raw_imu
 from imu_camera_sync_multi import (
-    ImuDevice, ble_thread_main, parse_imu_spec, stop_event, _new_sample_event,
+    ImuDevice, ble_thread_main, parse_imu_spec, stop_event, _new_sample_event, RAW_CSV_HEADER,
 )
 from imu_camera_sync_rtsp import LatestFrameReader, build_rtsp_url, load_latency_config, _cache_key
 
@@ -276,7 +276,7 @@ def _run_one_segment(args, cameras: list, devices: list, target_fps: int, record
         for d in devices:
             raw_file = open(f'{base}_{d.label}_raw.csv', 'w', newline='', encoding='utf-8-sig')
             raw_writer = csv.writer(raw_file)
-            raw_writer.writerow(['pc_ms', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z'])
+            raw_writer.writerow(RAW_CSV_HEADER)
             d.set_raw_writer(raw_writer)
             d._raw_file = raw_file
 

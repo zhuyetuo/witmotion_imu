@@ -133,8 +133,16 @@ _imu_new_event = threading.Event()
 _imu_seq_counter = 0
 
 # 原始 IMU 全量流水日志（不受摄像头帧率影响，用于事后独立降采样）
+# timestamp 是给人看/直接拖进 Label Studio 用的格式化时间字符串（跟降采样
+# 输出的 timestamp 列格式一致，%Y-%m-%d %H:%M:%S.fff）；pc_ms 是同一个时刻的
+# 原始 epoch 毫秒数，resample_raw_imu() 内部算法用这一列做数值计算，两列
+# 内容等价，只是给不同用途用，不要因为想"精简"就删掉其中一列。
 _raw_csv_writer = None
-RAW_CSV_HEADER = ['pc_ms', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z']
+RAW_CSV_HEADER = ['timestamp', 'pc_ms', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z']
+
+
+def _fmt_pc_ms(pc_ms: float) -> str:
+    return datetime.fromtimestamp(pc_ms / 1000.0).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
 
 
 def _set_raw_csv_writer(writer):
@@ -154,7 +162,7 @@ def _push_imu(row: dict):
         _imu_buffer.append(row)
         if _raw_csv_writer is not None:
             _raw_csv_writer.writerow([
-                f"{row['pc_ms']:.3f}",
+                _fmt_pc_ms(row['pc_ms']), f"{row['pc_ms']:.3f}",
                 f"{row['acc_x']:.6f}", f"{row['acc_y']:.6f}", f"{row['acc_z']:.6f}",
                 f"{row['gyro_x']:.6f}", f"{row['gyro_y']:.6f}", f"{row['gyro_z']:.6f}",
             ])

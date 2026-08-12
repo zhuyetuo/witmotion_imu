@@ -59,7 +59,7 @@ from imu_camera_sync import (
     _FfmpegVfrSink, _Cv2CfrSink, _measure_actual_fps, probe_camera, resample_raw_imu, open_camera,
 )
 from imu_camera_sync_multi import (
-    ImuDevice, ble_thread_main, parse_imu_spec, stop_event, _new_sample_event,
+    ImuDevice, ble_thread_main, parse_imu_spec, stop_event, _new_sample_event, RAW_CSV_HEADER,
 )
 
 
@@ -275,7 +275,7 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
         for d in devices:
             raw_file = open(f'{base}_{d.label}_raw.csv', 'w', newline='', encoding='utf-8-sig')
             raw_writer = csv.writer(raw_file)
-            raw_writer.writerow(['pc_ms', 'acc_x', 'acc_y', 'acc_z', 'gyro_x', 'gyro_y', 'gyro_z'])
+            raw_writer.writerow(RAW_CSV_HEADER)
             d.set_raw_writer(raw_writer)
             d._raw_file = raw_file
 
