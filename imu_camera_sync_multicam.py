@@ -116,7 +116,7 @@ class CameraStream:
 
 
 def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame_idx,
-                  show_imu_values: bool = False):
+                  show_imu_values: bool = False, show_frame_info: bool = False):
     # 不再画半透明底框——纯文字叠加，字体带描边（先画黑色粗一点当描边、
     # 再画正常颜色）保证在任意背景色的画面上都看得清，不遮挡画面内容。
     def put(text, row, color=(200, 255, 200)):
@@ -125,7 +125,12 @@ def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame
         cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
 
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:23]
-    put(f'{ts}  [{cam_label}]  #{frame_idx}  t={elapsed:.1f}s  {cam_fps:.1f}/{target_fps}fps', 0, (255, 255, 100))
+    # #frame_idx（同步tick序号，核对丢帧用）/ t=elapsed（这一段已经录了多久）
+    # 平时看画面用不上，默认不显示，排查对齐/丢帧问题时加 --show-frame-info 打开。
+    if show_frame_info:
+        put(f'{ts}  [{cam_label}]  #{frame_idx}  t={elapsed:.1f}s  {cam_fps:.1f}/{target_fps}fps', 0, (255, 255, 100))
+    else:
+        put(f'{ts}  [{cam_label}]  {cam_fps:.1f}/{target_fps}fps', 0, (255, 255, 100))
     row = 1
     for device, hz, lag_ms, missing, imu_row in imu_info:
         if missing or imu_row is None:
@@ -370,7 +375,8 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
 
             for cam, frame, cam_fps in zip(cameras, frames, cam_fps_list):
                 display = draw_overlay(frame.copy(), cam.label, cam_fps, target_fps, imu_info, elapsed, frame_idx,
-                                        show_imu_values=args.show_imu_values)
+                                        show_imu_values=args.show_imu_values,
+                                        show_frame_info=args.show_frame_info)
                 if cam.video_writer:
                     cam.video_writer.write(display if save_overlay else frame)
                 try:
@@ -574,6 +580,9 @@ def main():
     ap.add_argument('--show-imu-values', action='store_true',
                     help='画面上显示每个IMU设备的实时6轴数值（加速度+角速度），默认不显示（比较占'
                          '画面）；只在需要肉眼确认设备有没有戴好、是不是在动的时候临时打开。')
+    ap.add_argument('--show-frame-info', action='store_true',
+                    help='画面上显示同步tick序号(#frame_idx)和这一段已录时长(t=...s)，默认不显示'
+                         '（平时看画面用不上）；排查丢帧/对齐问题时临时打开。')
     ap.add_argument('--resample-hz', type=float, default=25.0,
                     help='录制结束后把每个设备的原始IMU流水降采样到该频率，默认25Hz')
     ap.add_argument('--resample-only', action='store_true',
