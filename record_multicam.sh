@@ -18,10 +18,17 @@
 #                 删除原始的 {base}_camN.mp4/.csv/_meta.csv/_{imu}_raw.csv
 #   none        ：只保留原始文件，不生成任何降采样配对文件（--no-resample）
 #   both        ：原始文件和降采样配对文件都保留（不传 --resample-only 也不传 --no-resample）
+#
+# 画面上想显示狗狗名字而不是 imu1/imu2 这种编号，用 DOG_NAMES 传（空格分隔，
+# 顺序要跟 IMUS 一一对应，第几个名字对应第几个IMU），比如：
+#   IMUS="wit=WT1 wit=WT5 wit=WT4 wit=WT8" DOG_NAMES="bibi bali titi lulu" ./record_multicam.sh
+# 换了狗、换了设备组合，下次直接改这两个环境变量就行，不用改脚本本身；
+# 只影响画面显示，不影响文件名（文件名还是固定用 imu1/imu2...）。
 
 set -euo pipefail
 
 IMUS="${IMUS:-wit=WT901BLE68 wit=WTSDCL}"
+DOG_NAMES="${DOG_NAMES:-}"
 CAMS="${CAMS:-0 1}"
 WIDTH="${WIDTH:-1280}"
 HEIGHT="${HEIGHT:-720}"
@@ -38,6 +45,11 @@ for spec in $IMUS; do
     imu_args+=(--imu "$spec")
 done
 
+dog_name_args=()
+for name in $DOG_NAMES; do
+    dog_name_args+=(--dog-name "$name")
+done
+
 cam_args=()
 for idx in $CAMS; do
     cam_args+=(--camera "$idx")
@@ -51,7 +63,7 @@ case "$RESAMPLE_MODE" in
 esac
 
 python imu_camera_sync_multicam.py \
-    "${imu_args[@]}" \
+    "${imu_args[@]}" "${dog_name_args[@]}" \
     --align-hourly --resample-hz "$RESAMPLE_HZ" \
     "${cam_args[@]}" \
     --width "$WIDTH" --height "$HEIGHT" \

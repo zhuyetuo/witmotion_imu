@@ -130,16 +130,16 @@ def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame
     for device, hz, lag_ms, missing, imu_row in imu_info:
         if missing or imu_row is None:
             color = (80, 80, 255)
-            text = f'[{device.label}] MISSING'
+            text = f'[{device.display_name}] MISSING'
         elif lag_ms < 50:
             color = (100, 255, 100)
-            text = f'[{device.label}] {hz:.1f}Hz  lag={lag_ms:.0f}ms'
+            text = f'[{device.display_name}] {hz:.1f}Hz  lag={lag_ms:.0f}ms'
         elif lag_ms < 150:
             color = (50, 200, 255)
-            text = f'[{device.label}] {hz:.1f}Hz  lag={lag_ms:.0f}ms'
+            text = f'[{device.display_name}] {hz:.1f}Hz  lag={lag_ms:.0f}ms'
         else:
             color = (80, 80, 255)
-            text = f'[{device.label}] {hz:.1f}Hz  lag={lag_ms:.0f}ms !'
+            text = f'[{device.display_name}] {hz:.1f}Hz  lag={lag_ms:.0f}ms !'
         put(text, row, color)
         row += 1
         # 6轴实时数值：方便肉眼判断设备是不是静置在桌上没戴（加速度接近
@@ -532,6 +532,13 @@ def main():
     ap.add_argument('--imu', action='append', default=[],
                     help='IMU 设备，格式 类型=标识，可重复传多个。见 imu_camera_sync_multi.py 说明。'
                          '不传就是纯摄像头预览模式，不连IMU（组合CSV里就不会有对应的acc/gyro列）。')
+    ap.add_argument('--dog-name', action='append', default=[],
+                    help='画面叠加信息里显示的名字，按 --imu 出现的顺序一一对应（第几个 --dog-name '
+                         '对应第几个 --imu），比如 --imu wit=WT1 --imu wit=WT4 --dog-name bibi '
+                         '--dog-name titi 就是 WT1 显示成 bibi、WT4 显示成 titi。只影响画面上的'
+                         '显示名字，不影响文件名/CSV列名（那些还是用 imu1/imu2 这种固定编号）。'
+                         '不传就还是显示 imu1/imu2...；传的数量可以比 --imu 少，没对应到的设备'
+                         '照常显示 imuN。')
     ap.add_argument('--width', type=int, default=1280, help='最终输出/写入视频的分辨率宽，默认 1280（720p）')
     ap.add_argument('--height', type=int, default=720, help='最终输出/写入视频的分辨率高，默认 720（720p）')
     ap.add_argument('--capture-width', type=int, default=0,
@@ -599,7 +606,8 @@ def main():
         except ValueError as e:
             print(e)
             sys.exit(1)
-        devices.append(ImuDevice(dev_type, ident, label=f'imu{i}'))
+        dog_name = args.dog_name[i - 1] if i - 1 < len(args.dog_name) else None
+        devices.append(ImuDevice(dev_type, ident, label=f'imu{i}', display_name=dog_name))
 
     if args.probe:
         run_probe(args, args.camera, devices)
