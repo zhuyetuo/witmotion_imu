@@ -92,10 +92,14 @@ def _fmt_pc_ms(pc_ms: float) -> str:
 class ImuDevice:
     """一个 IMU 设备的独立状态：接收缓冲、Hz 统计、原始流水日志。"""
 
-    def __init__(self, dev_type: str, ident: str, label: str):
+    def __init__(self, dev_type: str, ident: str, label: str, display_name: str = None):
         self.dev_type = dev_type
         self.ident = ident
         self.label = label
+        # display_name: 画面叠加信息里显示的名字，默认跟 label（imu1/imu2...）
+        # 一样；--dog-name 可以把它换成"bibi"这种好认的名字，只影响画面显示，
+        # 不影响文件名/CSV列名（那些还是用 label，保证跟以前的命名规则兼容）。
+        self.display_name = display_name or label
         self.mac = 'unknown'
         self.buffer: deque = deque(maxlen=500)
         self.lock = threading.Lock()
