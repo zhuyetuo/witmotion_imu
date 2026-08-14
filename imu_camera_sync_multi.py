@@ -602,19 +602,37 @@ def _run_one_segment(args, devices: list[ImuDevice], cap, actual_w, actual_h, ta
                 print(f'       {base}_{d.label}_raw.csv')
 
             resampled_bases = {}
-            for d in devices:
-                resampled_base = f'{base}_{d.label}_resampled{args.resample_hz:g}hz'
-                resample_raw_imu(
-                    f'{base}_{d.label}_raw.csv', f'{resampled_base}.csv', args.resample_hz,
-                    t_start_ms=first_cam_ts_ms, t_end_ms=last_cam_ts_ms,
-                )
-                print(f'       {resampled_base}.csv（{d.label} 降采样，起止时间已对齐视频）')
-                try:
-                    shutil.copyfile(f'{base}.mp4', f'{resampled_base}.mp4')
-                    print(f'       {resampled_base}.mp4（复制，供 Label Studio 与 {d.label} resampled CSV 配对）')
-                except OSError as e:
-                    print(f'复制 {d.label} 配对视频失败: {e}')
-                resampled_bases[d.label] = resampled_base
+            if args.no_resample:
+                # 不降采样，只把原始视频按每个设备复制一份、名字加上 _raw 后缀
+                # （跟imu_camera_sync_multicam.py的 --no-resample 行为一致）：
+                # {base}_{imu}_raw.mp4，直接复制 {base}.mp4。CSV 不用另外复制——
+                # 原始IMU CSV本来就已经叫 {base}_{imu}_raw.csv，跟这里要配的
+                # 文件名完全一样，复制自己会报错（SameFileError），跳过就行。
+                # 单独的 {base}.mp4/{base}_imuN_raw.csv 原始文件也保留，两种都留，不删。
+                print()
+                print('── --no-resample：不降采样，原始视频按设备配对（原始文件也保留）──')
+                for d in devices:
+                    pair_video = f'{base}_{d.label}_raw.mp4'
+                    try:
+                        shutil.copyfile(f'{base}.mp4', pair_video)
+                        print(f'       {pair_video} / {base}_{d.label}_raw.csv（视频复制自 {base}.mp4，'
+                              f'跟 {d.label} 原始数据文件名一致，可直接拖拽配对）')
+                    except OSError as e:
+                        print(f'生成 {pair_video} 失败: {e}')
+            else:
+                for d in devices:
+                    resampled_base = f'{base}_{d.label}_resampled{args.resample_hz:g}hz'
+                    resample_raw_imu(
+                        f'{base}_{d.label}_raw.csv', f'{resampled_base}.csv', args.resample_hz,
+                        t_start_ms=first_cam_ts_ms, t_end_ms=last_cam_ts_ms,
+                    )
+                    print(f'       {resampled_base}.csv（{d.label} 降采样，起止时间已对齐视频）')
+                    try:
+                        shutil.copyfile(f'{base}.mp4', f'{resampled_base}.mp4')
+                        print(f'       {resampled_base}.mp4（复制，供 Label Studio 与 {d.label} resampled CSV 配对）')
+                    except OSError as e:
+                        print(f'复制 {d.label} 配对视频失败: {e}')
+                    resampled_bases[d.label] = resampled_base
 
             print()
             print('── 自动对齐校验（组合CSV，按帧对齐）──')
@@ -698,11 +716,20 @@ def main():
                     help='录制结束后把每个设备的原始IMU流水降采样到该频率，默认25Hz')
     ap.add_argument('--resample-only', action='store_true',
                     help='只保留各设备的降采样版文件，删除原始的 {base}.mp4/.csv/_meta.csv/_raw.csv')
+    ap.add_argument('--no-resample', action='store_true',
+                    help='跟 --resample-only 相反：完全跳过降采样这一步，不生成任何 '
+                         '{base}_imuN_resampled{HZ}hz.mp4/.csv 文件，只按设备把原始视频/CSV配对成 '
+                         '{base}_imuN_raw.mp4/.csv（同时保留单独的 {base}.mp4/{base}_imuN_raw.csv）。'
+                         '跟 --resample-only 互斥。')
     ap.add_argument('--loop', action='store_true',
                     help='循环录制模式：每段 --duration 秒，录完自动开始下一段，直到按 Q/ESC 或 Ctrl+C 才停止')
     ap.add_argument('--probe', action='store_true',
                     help='只探测硬件能力（摄像头 + 各IMU设备当前实际输出频率），不录制，探测完直接退出')
     args = ap.parse_args()
+
+    if args.resample_only and args.no_resample:
+        print('--resample-only 和 --no-resample 互斥（一个是"只留降采样版"，一个是"只留原始版"），只能选一个。')
+        sys.exit(1)
 
     devices = []
     for i, spec in enumerate(args.imu, start=1):
