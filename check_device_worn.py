@@ -121,7 +121,7 @@ async def collect_one_wit(ident: str, duration: float, scan_timeout: float, resu
 
 async def collect_one_hicc(ident: str, duration: float, result: dict):
     from hicc_parse import (
-        FrameBuffer, parse_dp_sequence, find_tx_uuid, find_rx_uuid, send_timesync,
+        FrameBuffer, parse_dp_sequence, find_tx_uuid, find_rx_uuid, send_timesync, acc_raw_to_g,
         DP_ACC_X, DP_ACC_Y, DP_ACC_Z, DP_GYRO_X, DP_GYRO_Y, DP_GYRO_Z, CMD_REPORT,
     )
 
@@ -140,7 +140,7 @@ async def collect_one_hicc(ident: str, duration: float, result: dict):
             if DP_ACC_X not in dps or DP_GYRO_X not in dps:
                 continue
             rows.append({
-                'acc': [dps[DP_ACC_X] / 1_000_000.0, dps[DP_ACC_Y] / 1_000_000.0, dps[DP_ACC_Z] / 1_000_000.0],
+                'acc': [acc_raw_to_g(dps[DP_ACC_X]), acc_raw_to_g(dps[DP_ACC_Y]), acc_raw_to_g(dps[DP_ACC_Z])],
                 'gyro': [dps[DP_GYRO_X] / 1_000_000.0, dps[DP_GYRO_Y] / 1_000_000.0, dps[DP_GYRO_Z] / 1_000_000.0],
             })
 

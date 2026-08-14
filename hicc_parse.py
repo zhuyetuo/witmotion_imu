@@ -41,6 +41,18 @@ DP_HUM_IN    = 0x21
 DP_TEMP_BODY = 0x22
 DP_BATT_MV   = 0x0B
 
+# 原始 DP_ACC_* 定点数除以 1e6 得到的是 m/s²（不是 g）——实测静置时
+# |acc| ≈ 9.8~10.06，跟标准重力加速度 9.80665 m/s² 对得上，而这个仓库其它
+# 地方（WitMotion 数据、特征提取、训练用的CSV列）全都假定加速度单位是 g。
+# 这里再除一次 GRAVITY_MPS2，把 HICC 的加速度也换算成 g，跟 WitMotion 保持
+# 一致，两种设备的数据才能直接混用/对比，不然数值差了近10倍，模型根本没法用。
+GRAVITY_MPS2 = 9.80665
+
+
+def acc_raw_to_g(raw) -> float:
+    """DP_ACC_X/Y/Z 的原始定点数值 -> g（重力加速度单位）。"""
+    return raw / 1_000_000.0 / GRAVITY_MPS2
+
 # ── CSV 表头 ───────────────────────────────────────────────────────────────
 CSV_HEADER_6AXIS = ['timestamp', 'acc_x', 'acc_y', 'acc_z',
                     'gyro_x', 'gyro_y', 'gyro_z']
@@ -107,9 +119,9 @@ def decode_report(dp: dict, frame_type: str) -> dict:
         out['gyro_x'] = dp.get(DP_GYRO_X, 0) / 1_000_000.0
         out['gyro_y'] = dp.get(DP_GYRO_Y, 0) / 1_000_000.0
         out['gyro_z'] = dp.get(DP_GYRO_Z, 0) / 1_000_000.0
-        out['acc_x']  = dp.get(DP_ACC_X,  0) / 1_000_000.0
-        out['acc_y']  = dp.get(DP_ACC_Y,  0) / 1_000_000.0
-        out['acc_z']  = dp.get(DP_ACC_Z,  0) / 1_000_000.0
+        out['acc_x']  = acc_raw_to_g(dp.get(DP_ACC_X, 0))
+        out['acc_y']  = acc_raw_to_g(dp.get(DP_ACC_Y, 0))
+        out['acc_z']  = acc_raw_to_g(dp.get(DP_ACC_Z, 0))
     else:
         out['temp_in']   = dp.get(DP_TEMP_IN,   0) / 10.0
         out['hum_in']    = dp.get(DP_HUM_IN,    0) / 10.0

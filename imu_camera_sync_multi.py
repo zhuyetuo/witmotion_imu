@@ -239,7 +239,7 @@ async def run_wit_device(device: ImuDevice, scan_timeout: float):
 async def run_hicc_device(device: ImuDevice, scan_timeout: float):
     """自动重连，原因同 run_wit_device（信号差导致真实断连，不重连就永远卡在断开状态）。"""
     from hicc_parse import (
-        FrameBuffer, parse_dp_sequence, find_tx_uuid, find_rx_uuid, send_timesync,
+        FrameBuffer, parse_dp_sequence, find_tx_uuid, find_rx_uuid, send_timesync, acc_raw_to_g,
         DP_ACC_X, DP_ACC_Y, DP_ACC_Z, DP_GYRO_X, DP_GYRO_Y, DP_GYRO_Z, CMD_REPORT,
     )
 
@@ -260,8 +260,8 @@ async def run_hicc_device(device: ImuDevice, scan_timeout: float):
                 continue
             device.push({
                 'pc_ms': pc_ms,
-                'acc_x': dps[DP_ACC_X] / 1_000_000.0, 'acc_y': dps[DP_ACC_Y] / 1_000_000.0,
-                'acc_z': dps[DP_ACC_Z] / 1_000_000.0,
+                'acc_x': acc_raw_to_g(dps[DP_ACC_X]), 'acc_y': acc_raw_to_g(dps[DP_ACC_Y]),
+                'acc_z': acc_raw_to_g(dps[DP_ACC_Z]),
                 'gyro_x': dps[DP_GYRO_X] / 1_000_000.0, 'gyro_y': dps[DP_GYRO_Y] / 1_000_000.0,
                 'gyro_z': dps[DP_GYRO_Z] / 1_000_000.0,
             })
