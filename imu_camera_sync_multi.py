@@ -77,6 +77,16 @@ stop_event = threading.Event()
 # 任意一个设备来了新样本就 set，用于事件驱动抓帧（--no-imu-sync 可关闭改回固定定时器）
 _new_sample_event = threading.Event()
 
+# 多个设备扫描要串行化：Windows 的 Bleak(WinRT) 后端不太支持同一进程里同时跑
+# 多个 BLE 主动扫描——多个设备的重连协程各自每隔几秒独立调一次 find_device()，
+# 长时间跑下来很容易互相冲突，某个设备如果一直"抢"不到扫描窗口，就会一直卡在
+# MISSING、每次重试都失败，但又不会报错/退出，表现得像"设备坏了"，实际上是
+# 扫描请求本身互相打架。重启整个程序能"解决"是因为所有设备的重试节奏被同时
+# 重置了，不再是原来那个"一直抢不到"的设备。这里用一个全局锁把 find_device()
+# 串行化，同一时刻只有一个设备在扫描，连接阶段（已经找到设备之后）不受影响，
+# 各设备仍然是并发连接/收数据，只有"扫描"这一小段是排队的。
+_scan_lock = asyncio.Lock()
+
 # 原始IMU流水csv的表头：timestamp 是格式化时间字符串（跟降采样输出的
 # timestamp 列格式一致，%Y-%m-%d %H:%M:%S.fff），给人看/直接拖进 Label
 # Studio 用。resample_raw_imu() 需要的 epoch 毫秒数改从这一列反解析
@@ -171,11 +181,12 @@ async def run_wit_device(device: ImuDevice, scan_timeout: float):
     while not stop_event.is_set():
         is_mac = bool(_MAC_RE.match(device.ident))
         try:
-            ble_device = await find_device(
-                None if is_mac else device.ident,
-                device.ident if is_mac else None,
-                timeout=scan_timeout,
-            )
+            async with _scan_lock:  # 串行化扫描，避免多设备并发扫描互相冲突（见上面的说明）
+                ble_device = await find_device(
+                    None if is_mac else device.ident,
+                    device.ident if is_mac else None,
+                    timeout=scan_timeout,
+                )
         except Exception as e:
             # find_device() 本身也可能抛异常（尤其同时扫描/连接好几个设备时，
             # 蓝牙协议栈更容易出问题）——之前这里没兜住，会直接冒泡出这个协程，
