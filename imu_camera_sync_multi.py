@@ -177,6 +177,21 @@ async def run_wit_device(device: ImuDevice, scan_timeout: float):
                 'gyro_x': p['gyro'][0], 'gyro_y': p['gyro'][1], 'gyro_z': p['gyro'][2],
             })
 
+    # 指数退避：固定每2秒重试一次，长时间信号不好会导致 find_device() 里
+    # "新建扫描器→启动→停止"这个循环几小时内跑几千次——Windows的蓝牙(WinRT)
+    # 底层扛不住这么频繁地反复开关扫描，积累久了容易把系统蓝牙服务拖到假死，
+    # 只能重启电脑才能恢复（不是设备坏了，是扫描太frequent把蓝牙栈拖垮了）。
+    # 失败次数越多、等待间隔越长（2→4→8→...封顶60秒），大幅减少长时间信号差
+    # 时的扫描次数；一旦连接成功就重置回2秒，不影响正常情况下的重连速度。
+    BASE_BACKOFF = 2.0
+    MAX_BACKOFF = 60.0
+    backoff = BASE_BACKOFF
+
+    async def _wait_and_backoff():
+        nonlocal backoff
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, MAX_BACKOFF)
+
     first_attempt = True
     while not stop_event.is_set():
         is_mac = bool(_MAC_RE.match(device.ident))
@@ -195,14 +210,14 @@ async def run_wit_device(device: ImuDevice, scan_timeout: float):
             # 设备扫描出错就把整个录制程序都干掉了。现在跟连接阶段一样重试。
             if stop_event.is_set():
                 break
-            print(f'[{device.label}] 扫描出错: {e}，2秒后重试...')
-            await asyncio.sleep(2.0)
+            print(f'[{device.label}] 扫描出错: {e}，{backoff:.0f}秒后重试...')
+            await _wait_and_backoff()
             continue
         if ble_device is None:
             action = '扫描' if first_attempt else '重连'
-            print(f'[{device.label}] {action}未找到 WitMotion 设备: {device.ident}，2秒后重试...')
+            print(f'[{device.label}] {action}未找到 WitMotion 设备: {device.ident}，{backoff:.0f}秒后重试...')
             first_attempt = False
-            await asyncio.sleep(2.0)
+            await _wait_and_backoff()
             continue
 
         disconnected = asyncio.Event()
@@ -224,10 +239,11 @@ async def run_wit_device(device: ImuDevice, scan_timeout: float):
                     except Exception:
                         continue
                 if subscribed is None:
-                    print(f'[{device.label}] 订阅 Notify 失败，2秒后重试...')
-                    await asyncio.sleep(2.0)
+                    print(f'[{device.label}] 订阅 Notify 失败，{backoff:.0f}秒后重试...')
+                    await _wait_and_backoff()
                     continue
                 print(f'[{device.label}] 已订阅: {subscribed}')
+                backoff = BASE_BACKOFF  # 连上了，重置退避，下次断连从2秒开始重试
                 while not stop_event.is_set() and not disconnected.is_set():
                     await asyncio.sleep(0.1)
                 if disconnected.is_set():
@@ -240,8 +256,8 @@ async def run_wit_device(device: ImuDevice, scan_timeout: float):
         except Exception as e:
             if stop_event.is_set():
                 break
-            print(f'[{device.label}] 连接异常: {e}，2秒后重试...')
-            await asyncio.sleep(2.0)
+            print(f'[{device.label}] 连接异常: {e}，{backoff:.0f}秒后重试...')
+            await _wait_and_backoff()
             continue
         break
     print(f'[{device.label}] WitMotion 已断开')
@@ -277,6 +293,17 @@ async def run_hicc_device(device: ImuDevice, scan_timeout: float):
                 'gyro_z': dps[DP_GYRO_Z] / 1_000_000.0,
             })
 
+    # 指数退避，原因同 run_wit_device（长时间信号差时固定2秒重试，累计几千次
+    # 连接尝试容易把Windows蓝牙栈拖垮，只能重启电脑才能恢复）。
+    BASE_BACKOFF = 2.0
+    MAX_BACKOFF = 60.0
+    backoff = BASE_BACKOFF
+
+    async def _wait_and_backoff():
+        nonlocal backoff
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, MAX_BACKOFF)
+
     while not stop_event.is_set():
         print(f'[{device.label}] 连接 HICC: {address}')
         disconnected = asyncio.Event()
@@ -290,13 +317,14 @@ async def run_hicc_device(device: ImuDevice, scan_timeout: float):
                 tx_uuid = await find_tx_uuid(client)
                 rx_uuid = await find_rx_uuid(client)
                 if tx_uuid is None:
-                    print(f'[{device.label}] 找不到 HICC TX 特征值，2秒后重试...')
-                    await asyncio.sleep(2.0)
+                    print(f'[{device.label}] 找不到 HICC TX 特征值，{backoff:.0f}秒后重试...')
+                    await _wait_and_backoff()
                     continue
                 if rx_uuid:
                     await send_timesync(client, rx_uuid)
                 await client.start_notify(tx_uuid, lambda s, d: on_data(s, d, fb))
                 print(f'[{device.label}] 已订阅: {tx_uuid}')
+                backoff = BASE_BACKOFF  # 连上了，重置退避
                 while not stop_event.is_set() and not disconnected.is_set():
                     await asyncio.sleep(0.1)
                 if disconnected.is_set():
@@ -309,8 +337,8 @@ async def run_hicc_device(device: ImuDevice, scan_timeout: float):
         except Exception as e:
             if stop_event.is_set():
                 break
-            print(f'[{device.label}] 连接异常: {e}，2秒后重试...')
-            await asyncio.sleep(2.0)
+            print(f'[{device.label}] 连接异常: {e}，{backoff:.0f}秒后重试...')
+            await _wait_and_backoff()
             continue
         break
     print(f'[{device.label}] HICC 已断开')
