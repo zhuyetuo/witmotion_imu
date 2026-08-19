@@ -39,6 +39,10 @@ CAM_FPS="${CAM_FPS:-25}"
 WARMUP_SEC="${WARMUP_SEC:-10}"
 OUT_DIR="${OUT_DIR:-data/multicam_multiimu}"
 RESAMPLE_MODE="${RESAMPLE_MODE:-only}"
+# 设备一直连不上时重连间隔的封顶秒数（指数退避2→4→8→...封顶这个值），默认
+# 300秒（5分钟）；长时间无人值守录制建议保持默认或调更高，避免频繁反复扫描
+# 把Windows蓝牙栈拖垮（症状：整个蓝牙适配器搜不到任何设备，得重启电脑）。
+RECONNECT_MAX_BACKOFF="${RECONNECT_MAX_BACKOFF:-300}"
 
 imu_args=()
 for spec in $IMUS; do
@@ -69,4 +73,5 @@ python imu_camera_sync_multicam.py \
     --width "$WIDTH" --height "$HEIGHT" \
     --capture-width "$CAPTURE_WIDTH" --capture-height "$CAPTURE_HEIGHT" \
     --loop "${resample_flag[@]}" --out-dir "$OUT_DIR" \
-    --warmup-sec "$WARMUP_SEC" --cam-fps "$CAM_FPS"
+    --warmup-sec "$WARMUP_SEC" --cam-fps "$CAM_FPS" \
+    --reconnect-max-backoff "$RECONNECT_MAX_BACKOFF"

@@ -575,6 +575,11 @@ def main():
     ap.add_argument('--video-crf', type=int, default=28, help='H.264 CRF，默认 28')
     ap.add_argument('--out-dir', default='data', help='输出目录，默认 data/')
     ap.add_argument('--scan-timeout', type=float, default=8.0, help='BLE 扫描超时（秒），默认 8')
+    ap.add_argument('--reconnect-max-backoff', type=float, default=300.0,
+                    help='设备一直连不上时，重连间隔按2→4→8→...指数退避的封顶秒数，默认300秒'
+                         '（5分钟）。长时间信号差不会让重试间隔无限缩短，避免频繁反复扫描把'
+                         'Windows蓝牙栈拖垮（症状：整个蓝牙适配器搜不到任何设备，得重启电脑才能'
+                         '恢复）；长时间无人值守录制（比如整晚8小时以上）建议保持默认或调更高。')
     ap.add_argument('--no-save-overlay', action='store_true', help='保存干净视频（不含叠加信息）')
     ap.add_argument('--no-imu-sync', action='store_true', help='关闭事件驱动同步，改用固定定时器抓帧')
     ap.add_argument('--show-imu-values', action='store_true',
@@ -642,7 +647,8 @@ def main():
         # run_all() 在设备列表为空时会立刻 gather() 完，finally 里的
         # stop_event.set() 会跟着马上触发，导致摄像头主循环还没真正开始
         # 就被当成"该停止了"，一tick都抓不到就退出。
-        t = threading.Thread(target=ble_thread_main, args=(devices, args.scan_timeout), daemon=True)
+        t = threading.Thread(target=ble_thread_main,
+                             args=(devices, args.scan_timeout, args.reconnect_max_backoff), daemon=True)
         t.start()
         print('等待 BLE 连接中...')
         time.sleep(2.0)

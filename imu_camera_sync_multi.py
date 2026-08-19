@@ -61,12 +61,11 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from bleak import BleakClient
+    from bleak import BleakClient, BleakScanner
 except ImportError:
     print('缺少 bleak，请先安装: pip install bleak')
     sys.exit(1)
 
-from ble_utils import find_device
 from imu_camera_sync import (
     _FfmpegVfrSink, _Cv2CfrSink, _measure_actual_fps, probe_camera, resample_raw_imu,
 )
@@ -77,15 +76,63 @@ stop_event = threading.Event()
 # 任意一个设备来了新样本就 set，用于事件驱动抓帧（--no-imu-sync 可关闭改回固定定时器）
 _new_sample_event = threading.Event()
 
-# 多个设备扫描要串行化：Windows 的 Bleak(WinRT) 后端不太支持同一进程里同时跑
-# 多个 BLE 主动扫描——多个设备的重连协程各自每隔几秒独立调一次 find_device()，
-# 长时间跑下来很容易互相冲突，某个设备如果一直"抢"不到扫描窗口，就会一直卡在
-# MISSING、每次重试都失败，但又不会报错/退出，表现得像"设备坏了"，实际上是
-# 扫描请求本身互相打架。重启整个程序能"解决"是因为所有设备的重试节奏被同时
-# 重置了，不再是原来那个"一直抢不到"的设备。这里用一个全局锁把 find_device()
-# 串行化，同一时刻只有一个设备在扫描，连接阶段（已经找到设备之后）不受影响，
-# 各设备仍然是并发连接/收数据，只有"扫描"这一小段是排队的。
-_scan_lock = asyncio.Lock()
+class SharedScanner:
+    """
+    整个录制过程共用一个常驻的 BLE 扫描器，取代"每个设备的重连协程各自反复
+    开关自己的扫描会话"这种模式。
+
+    背景：之前每次重连尝试都会新建一个 BleakScanner、start()、扫一段时间、
+    stop()，长时间跑（尤其信号一直不好的设备，每隔几秒就重来一次）会让
+    Windows 的蓝牙(WinRT)栈反复被"开关扫描"折腾，积累几小时后容易把系统
+    蓝牙服务拖到假死，只能重启电脑才能恢复；退避重试（拉长重连间隔）能减少
+    这种折腾的频率，但代价是设备真的恢复信号后，最多要等到退避封顶那么久
+    才会被发现，不够快。
+
+    这里换一种做法：整个进程只 start() 一次扫描器，之后一直被动收听广播
+    （detection_callback 只是更新一个内存字典，不产生额外的蓝牙操作），
+    直到录制结束才 stop()。各设备的重连循环不再自己发起扫描，只是频繁地
+    （比如每秒）查一下这个内存字典里有没有匹配自己的广播——这是纯内存操作，
+    没有任何蓝牙栈开销，可以查得很勤，几乎在设备一恢复广播的瞬间就能发现；
+    同时因为全程只有一个扫描会话在跑，不管一个设备"没电"多少个小时，都不会
+    再产生额外的蓝牙栈负担。
+    """
+
+    def __init__(self, max_age_s: float = 15.0):
+        self.max_age_s = max_age_s
+        self._seen: dict[str, tuple[object, float]] = {}  # 地址(大写) -> (BLEDevice, 最后见到的时间)
+        self._scanner = None
+
+    def _on_detect(self, device, _adv_data):
+        self._seen[device.address.upper()] = (device, time.monotonic())
+
+    async def start(self):
+        self._scanner = BleakScanner(detection_callback=self._on_detect)
+        await self._scanner.start()
+
+    async def stop(self):
+        if self._scanner is not None:
+            try:
+                await self._scanner.stop()
+            except Exception:
+                pass
+
+    def find(self, name_filter: str = None, address: str = None):
+        """在最近 max_age_s 秒内见过的广播里找匹配的设备，找不到返回 None
+        （不会阻塞、不会发起任何蓝牙操作，纯内存查找）。"""
+        now = time.monotonic()
+        if address:
+            entry = self._seen.get(address.upper())
+            if entry and now - entry[1] <= self.max_age_s:
+                return entry[0]
+            return None
+        if name_filter:
+            nf = name_filter.lower()
+            best, best_ts = None, -1.0
+            for dev, ts in self._seen.values():
+                if dev.name and nf in dev.name.lower() and now - ts <= self.max_age_s and ts > best_ts:
+                    best, best_ts = dev, ts
+            return best
+        return None
 
 # 原始IMU流水csv的表头：timestamp 是格式化时间字符串（跟降采样输出的
 # timestamp 列格式一致，%Y-%m-%d %H:%M:%S.fff），给人看/直接拖进 Label
@@ -156,12 +203,16 @@ class ImuDevice:
 
 # ── BLE 连接（每个设备一个协程，同一个事件循环里并发跑） ────────────────────
 
-async def run_wit_device(device: ImuDevice, scan_timeout: float):
+async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_max_backoff: float = 300.0):
     """
     自动重连：BLE 信号太差（比如项圈被狗压在身下）会导致连接被判定为真正
-    断开，而不只是丢几个包。断开后不退出协程，而是稍等一下重新扫描/连接，
-    不断重试直到 stop_event 被设置（--duration 到时或用户手动停止），
-    这样信号恢复后能自动续上，不会一直卡在"最后一次断开前"的状态。
+    断开，而不只是丢几个包。断开后不退出协程，而是从共享扫描器(SharedScanner)
+    的内存字典里查这个设备的广播，找到了就重新连接，不断重试直到 stop_event
+    被设置（--duration 到时或用户手动停止），这样信号恢复后能自动续上，
+    不会一直卡在"最后一次断开前"的状态；设备一直不在（比如没电了）也不会
+    额外消耗蓝牙栈资源——"找设备"这一步只是查内存字典，不发起任何蓝牙操作，
+    可以查得很勤（1秒一次），设备一恢复广播基本能立刻发现，不用像"重新发起
+    一次扫描"那样等一整个扫描窗口。
     """
     from wit_parse import DEFAULT_NOTIFY_CANDIDATES, StreamingByteBuffer, parse_one_packet
 
@@ -177,32 +228,32 @@ async def run_wit_device(device: ImuDevice, scan_timeout: float):
                 'gyro_x': p['gyro'][0], 'gyro_y': p['gyro'][1], 'gyro_z': p['gyro'][2],
             })
 
+    # 这里的退避只针对"设备已经通过广播确认在线，但连接握手/订阅Notify失败"
+    # 这种情况——比"设备压根没开机/没电"少见得多，稍微退避一下即可，封顶值
+    # 复用 reconnect_max_backoff（默认300秒），不会造成明显延迟。
+    BASE_BACKOFF = 2.0
+    MAX_BACKOFF = reconnect_max_backoff
+    backoff = BASE_BACKOFF
+
+    async def _wait_and_backoff():
+        nonlocal backoff
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, MAX_BACKOFF)
+
+    is_mac = bool(_MAC_RE.match(device.ident))
     first_attempt = True
     while not stop_event.is_set():
-        is_mac = bool(_MAC_RE.match(device.ident))
-        try:
-            async with _scan_lock:  # 串行化扫描，避免多设备并发扫描互相冲突（见上面的说明）
-                ble_device = await find_device(
-                    None if is_mac else device.ident,
-                    device.ident if is_mac else None,
-                    timeout=scan_timeout,
-                )
-        except Exception as e:
-            # find_device() 本身也可能抛异常（尤其同时扫描/连接好几个设备时，
-            # 蓝牙协议栈更容易出问题）——之前这里没兜住，会直接冒泡出这个协程，
-            # 导致 asyncio.gather() 连带把所有设备的协程都判定失败，
-            # ble_thread_main() 的 finally 又会把 stop_event 设上，等于一个
-            # 设备扫描出错就把整个录制程序都干掉了。现在跟连接阶段一样重试。
-            if stop_event.is_set():
-                break
-            print(f'[{device.label}] 扫描出错: {e}，2秒后重试...')
-            await asyncio.sleep(2.0)
-            continue
+        # 纯内存查表，不发起任何蓝牙操作，找不到就等1秒再查，可以一直这样
+        # 查下去，不管设备缺席多久都不会给蓝牙栈增加负担。
+        ble_device = scanner.find(
+            name_filter=None if is_mac else device.ident,
+            address=device.ident if is_mac else None,
+        )
         if ble_device is None:
-            action = '扫描' if first_attempt else '重连'
-            print(f'[{device.label}] {action}未找到 WitMotion 设备: {device.ident}，2秒后重试...')
-            first_attempt = False
-            await asyncio.sleep(2.0)
+            if first_attempt:
+                print(f'[{device.label}] 等待 WitMotion 设备广播: {device.ident}...')
+                first_attempt = False
+            await asyncio.sleep(1.0)
             continue
 
         disconnected = asyncio.Event()
@@ -224,10 +275,11 @@ async def run_wit_device(device: ImuDevice, scan_timeout: float):
                     except Exception:
                         continue
                 if subscribed is None:
-                    print(f'[{device.label}] 订阅 Notify 失败，2秒后重试...')
-                    await asyncio.sleep(2.0)
+                    print(f'[{device.label}] 订阅 Notify 失败，{backoff:.0f}秒后重试...')
+                    await _wait_and_backoff()
                     continue
                 print(f'[{device.label}] 已订阅: {subscribed}')
+                backoff = BASE_BACKOFF  # 连上了，重置退避，下次断连从2秒开始重试
                 while not stop_event.is_set() and not disconnected.is_set():
                     await asyncio.sleep(0.1)
                 if disconnected.is_set():
@@ -240,14 +292,14 @@ async def run_wit_device(device: ImuDevice, scan_timeout: float):
         except Exception as e:
             if stop_event.is_set():
                 break
-            print(f'[{device.label}] 连接异常: {e}，2秒后重试...')
-            await asyncio.sleep(2.0)
+            print(f'[{device.label}] 连接异常: {e}，{backoff:.0f}秒后重试...')
+            await _wait_and_backoff()
             continue
         break
     print(f'[{device.label}] WitMotion 已断开')
 
 
-async def run_hicc_device(device: ImuDevice, scan_timeout: float):
+async def run_hicc_device(device: ImuDevice, scan_timeout: float, reconnect_max_backoff: float = 300.0):
     """自动重连，原因同 run_wit_device（信号差导致真实断连，不重连就永远卡在断开状态）。"""
     from hicc_parse import (
         FrameBuffer, parse_dp_sequence, find_tx_uuid, find_rx_uuid, send_timesync, acc_raw_to_g,
@@ -277,6 +329,17 @@ async def run_hicc_device(device: ImuDevice, scan_timeout: float):
                 'gyro_z': dps[DP_GYRO_Z] / 1_000_000.0,
             })
 
+    # 指数退避，原因同 run_wit_device（长时间信号差时固定2秒重试，累计几千次
+    # 连接尝试容易把Windows蓝牙栈拖垮，只能重启电脑才能恢复）。
+    BASE_BACKOFF = 2.0
+    MAX_BACKOFF = reconnect_max_backoff
+    backoff = BASE_BACKOFF
+
+    async def _wait_and_backoff():
+        nonlocal backoff
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, MAX_BACKOFF)
+
     while not stop_event.is_set():
         print(f'[{device.label}] 连接 HICC: {address}')
         disconnected = asyncio.Event()
@@ -290,13 +353,14 @@ async def run_hicc_device(device: ImuDevice, scan_timeout: float):
                 tx_uuid = await find_tx_uuid(client)
                 rx_uuid = await find_rx_uuid(client)
                 if tx_uuid is None:
-                    print(f'[{device.label}] 找不到 HICC TX 特征值，2秒后重试...')
-                    await asyncio.sleep(2.0)
+                    print(f'[{device.label}] 找不到 HICC TX 特征值，{backoff:.0f}秒后重试...')
+                    await _wait_and_backoff()
                     continue
                 if rx_uuid:
                     await send_timesync(client, rx_uuid)
                 await client.start_notify(tx_uuid, lambda s, d: on_data(s, d, fb))
                 print(f'[{device.label}] 已订阅: {tx_uuid}')
+                backoff = BASE_BACKOFF  # 连上了，重置退避
                 while not stop_event.is_set() and not disconnected.is_set():
                     await asyncio.sleep(0.1)
                 if disconnected.is_set():
@@ -309,34 +373,39 @@ async def run_hicc_device(device: ImuDevice, scan_timeout: float):
         except Exception as e:
             if stop_event.is_set():
                 break
-            print(f'[{device.label}] 连接异常: {e}，2秒后重试...')
-            await asyncio.sleep(2.0)
+            print(f'[{device.label}] 连接异常: {e}，{backoff:.0f}秒后重试...')
+            await _wait_and_backoff()
             continue
         break
     print(f'[{device.label}] HICC 已断开')
 
 
-def ble_thread_main(devices: list[ImuDevice], scan_timeout: float):
+def ble_thread_main(devices: list[ImuDevice], scan_timeout: float, reconnect_max_backoff: float = 300.0):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     async def run_all():
-        labeled_tasks = []
-        for d in devices:
-            if d.dev_type == 'wit':
-                labeled_tasks.append((d.label, run_wit_device(d, scan_timeout)))
-            else:
-                labeled_tasks.append((d.label, run_hicc_device(d, scan_timeout)))
-        # return_exceptions=True：某一个设备的协程如果出了没兜住的异常
-        # （不管是这次修的 find_device() 那种，还是以后没想到的其它情况），
-        # 只让那一个设备停止工作（后续一直显示 MISSING），不会连累其它设备/
-        # 把整个录制程序都跟着终止——之前默认行为是只要有一个任务抛异常，
-        # gather() 就直接把异常冒泡出去，run_wit_device 的 find_device() 那个
-        # bug 就是这么把整个程序干掉的。
-        results = await asyncio.gather(*(t for _, t in labeled_tasks), return_exceptions=True)
-        for (label, _), result in zip(labeled_tasks, results):
-            if isinstance(result, Exception):
-                print(f'[{label}] 协程异常退出（该设备后续会一直显示MISSING，其它设备不受影响）: {result}')
+        # 整个录制过程只开一个常驻扫描器，所有 wit 设备共用（见 SharedScanner
+        # 的说明）；hicc 设备是直接按 MAC 地址连接，不走扫描这条路，不受影响。
+        scanner = SharedScanner()
+        await scanner.start()
+        try:
+            labeled_tasks = []
+            for d in devices:
+                if d.dev_type == 'wit':
+                    labeled_tasks.append((d.label, run_wit_device(d, scanner, reconnect_max_backoff)))
+                else:
+                    labeled_tasks.append((d.label, run_hicc_device(d, scan_timeout, reconnect_max_backoff)))
+            # return_exceptions=True：某一个设备的协程如果出了没兜住的异常，
+            # 只让那一个设备停止工作（后续一直显示 MISSING），不会连累其它设备/
+            # 把整个录制程序都跟着终止——默认行为是只要有一个任务抛异常，
+            # gather() 就直接把异常冒泡出去，把整个程序干掉。
+            results = await asyncio.gather(*(t for _, t in labeled_tasks), return_exceptions=True)
+            for (label, _), result in zip(labeled_tasks, results):
+                if isinstance(result, Exception):
+                    print(f'[{label}] 协程异常退出（该设备后续会一直显示MISSING，其它设备不受影响）: {result}')
+        finally:
+            await scanner.stop()
 
     try:
         loop.run_until_complete(run_all())
@@ -719,6 +788,11 @@ def main():
     ap.add_argument('--video-crf', type=int, default=28, help='H.264 CRF，默认 28')
     ap.add_argument('--out-dir', default='data', help='输出目录，默认 data/')
     ap.add_argument('--scan-timeout', type=float, default=8.0, help='BLE 扫描超时（秒），默认 8')
+    ap.add_argument('--reconnect-max-backoff', type=float, default=300.0,
+                    help='设备一直连不上时，重连间隔按2→4→8→...指数退避的封顶秒数，默认300秒'
+                         '（5分钟）。长时间信号差不会让重试间隔无限缩短，避免频繁反复扫描把'
+                         'Windows蓝牙栈拖垮（症状：整个蓝牙适配器搜不到任何设备，得重启电脑才能'
+                         '恢复）；长时间无人值守录制（比如整晚8小时以上）建议保持默认或调更高。')
     ap.add_argument('--no-save-overlay', action='store_true',
                     help='保存干净视频（不含叠加信息）；默认保存带叠加信息的视频')
     ap.add_argument('--no-imu-sync', action='store_true',
@@ -755,7 +829,8 @@ def main():
         run_probe(args, devices)
         return
 
-    t = threading.Thread(target=ble_thread_main, args=(devices, args.scan_timeout), daemon=True)
+    t = threading.Thread(target=ble_thread_main,
+                         args=(devices, args.scan_timeout, args.reconnect_max_backoff), daemon=True)
     t.start()
 
     print('等待 BLE 连接中...')
