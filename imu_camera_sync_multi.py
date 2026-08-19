@@ -156,7 +156,7 @@ class ImuDevice:
 
 # ── BLE 连接（每个设备一个协程，同一个事件循环里并发跑） ────────────────────
 
-async def run_wit_device(device: ImuDevice, scan_timeout: float):
+async def run_wit_device(device: ImuDevice, scan_timeout: float, reconnect_max_backoff: float = 300.0):
     """
     自动重连：BLE 信号太差（比如项圈被狗压在身下）会导致连接被判定为真正
     断开，而不只是丢几个包。断开后不退出协程，而是稍等一下重新扫描/连接，
@@ -181,10 +181,12 @@ async def run_wit_device(device: ImuDevice, scan_timeout: float):
     # "新建扫描器→启动→停止"这个循环几小时内跑几千次——Windows的蓝牙(WinRT)
     # 底层扛不住这么频繁地反复开关扫描，积累久了容易把系统蓝牙服务拖到假死，
     # 只能重启电脑才能恢复（不是设备坏了，是扫描太frequent把蓝牙栈拖垮了）。
-    # 失败次数越多、等待间隔越长（2→4→8→...封顶60秒），大幅减少长时间信号差
-    # 时的扫描次数；一旦连接成功就重置回2秒，不影响正常情况下的重连速度。
+    # 失败次数越多、等待间隔越长（2→4→8→...封顶 reconnect_max_backoff秒，
+    # 默认300秒/5分钟——8小时录制、设备一直连不上的极端情况下，重试总次数
+    # 大概在100次左右，比固定2秒重试的上万次安全得多），一旦连接成功就重置
+    # 回2秒，不影响正常情况下的重连速度。
     BASE_BACKOFF = 2.0
-    MAX_BACKOFF = 60.0
+    MAX_BACKOFF = reconnect_max_backoff
     backoff = BASE_BACKOFF
 
     async def _wait_and_backoff():
@@ -263,7 +265,7 @@ async def run_wit_device(device: ImuDevice, scan_timeout: float):
     print(f'[{device.label}] WitMotion 已断开')
 
 
-async def run_hicc_device(device: ImuDevice, scan_timeout: float):
+async def run_hicc_device(device: ImuDevice, scan_timeout: float, reconnect_max_backoff: float = 300.0):
     """自动重连，原因同 run_wit_device（信号差导致真实断连，不重连就永远卡在断开状态）。"""
     from hicc_parse import (
         FrameBuffer, parse_dp_sequence, find_tx_uuid, find_rx_uuid, send_timesync, acc_raw_to_g,
@@ -296,7 +298,7 @@ async def run_hicc_device(device: ImuDevice, scan_timeout: float):
     # 指数退避，原因同 run_wit_device（长时间信号差时固定2秒重试，累计几千次
     # 连接尝试容易把Windows蓝牙栈拖垮，只能重启电脑才能恢复）。
     BASE_BACKOFF = 2.0
-    MAX_BACKOFF = 60.0
+    MAX_BACKOFF = reconnect_max_backoff
     backoff = BASE_BACKOFF
 
     async def _wait_and_backoff():
@@ -344,7 +346,7 @@ async def run_hicc_device(device: ImuDevice, scan_timeout: float):
     print(f'[{device.label}] HICC 已断开')
 
 
-def ble_thread_main(devices: list[ImuDevice], scan_timeout: float):
+def ble_thread_main(devices: list[ImuDevice], scan_timeout: float, reconnect_max_backoff: float = 300.0):
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
@@ -352,9 +354,9 @@ def ble_thread_main(devices: list[ImuDevice], scan_timeout: float):
         labeled_tasks = []
         for d in devices:
             if d.dev_type == 'wit':
-                labeled_tasks.append((d.label, run_wit_device(d, scan_timeout)))
+                labeled_tasks.append((d.label, run_wit_device(d, scan_timeout, reconnect_max_backoff)))
             else:
-                labeled_tasks.append((d.label, run_hicc_device(d, scan_timeout)))
+                labeled_tasks.append((d.label, run_hicc_device(d, scan_timeout, reconnect_max_backoff)))
         # return_exceptions=True：某一个设备的协程如果出了没兜住的异常
         # （不管是这次修的 find_device() 那种，还是以后没想到的其它情况），
         # 只让那一个设备停止工作（后续一直显示 MISSING），不会连累其它设备/
@@ -747,6 +749,11 @@ def main():
     ap.add_argument('--video-crf', type=int, default=28, help='H.264 CRF，默认 28')
     ap.add_argument('--out-dir', default='data', help='输出目录，默认 data/')
     ap.add_argument('--scan-timeout', type=float, default=8.0, help='BLE 扫描超时（秒），默认 8')
+    ap.add_argument('--reconnect-max-backoff', type=float, default=300.0,
+                    help='设备一直连不上时，重连间隔按2→4→8→...指数退避的封顶秒数，默认300秒'
+                         '（5分钟）。长时间信号差不会让重试间隔无限缩短，避免频繁反复扫描把'
+                         'Windows蓝牙栈拖垮（症状：整个蓝牙适配器搜不到任何设备，得重启电脑才能'
+                         '恢复）；长时间无人值守录制（比如整晚8小时以上）建议保持默认或调更高。')
     ap.add_argument('--no-save-overlay', action='store_true',
                     help='保存干净视频（不含叠加信息）；默认保存带叠加信息的视频')
     ap.add_argument('--no-imu-sync', action='store_true',
@@ -783,7 +790,8 @@ def main():
         run_probe(args, devices)
         return
 
-    t = threading.Thread(target=ble_thread_main, args=(devices, args.scan_timeout), daemon=True)
+    t = threading.Thread(target=ble_thread_main,
+                         args=(devices, args.scan_timeout, args.reconnect_max_backoff), daemon=True)
     t.start()
 
     print('等待 BLE 连接中...')
