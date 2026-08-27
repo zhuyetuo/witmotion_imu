@@ -100,7 +100,7 @@ import sys
 import threading
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 
 try:
     import cv2
@@ -370,6 +370,113 @@ META_HEADER = [
 ]
 
 _TS_FMT = '%Y-%m-%d %H:%M:%S.%f'
+
+
+def write_anchored_raw_csv(raw_path: str, out_path: str,
+                            t_start_ms: float = None, t_end_ms: float = None,
+                            gap_threshold_s: float = 1.0,
+                            fallback_hz: float = 25.0):
+    """
+    --no-resample（保留原始未降采样数据）模式专用：把原始IMU CSV复制一份，
+    但把时间轴对齐到 [t_start_ms, t_end_ms]（通常是视频第一帧/最后一帧的真实
+    时间戳，也就是 first_tick_ts_ms/last_tick_ts_ms），并且用"6轴全0"这个
+    物理上不可能出现的读数（重力会让加速度至少在某个轴上有读数，除非自由
+    落体，狗不会长时间处于那个状态），作为"这段时间没有真实信号"的哨兵值，
+    不留空、也不插值编造真实数值：
+
+    1. 起始边界：IMU设备连接/收到第一条真实数据本身有延迟，原始CSV第一行
+       时间戳往往比视频真正开始录制的时刻晚几百毫秒到1秒（不是累积误差，
+       是从一开始时间起点就没对齐）。Label Studio默认按"CSV第一行=视频第
+       0秒"对齐两边，这个起点偏差会导致全程感觉视频比数据"慢了一截"。
+    2. 结束边界：同理裁掉/补齐视频结束时间之后的部分。
+    3. 内部缺口：真实数据流里，只要两条相邻真实样本的时间间隔超过
+       gap_threshold_s（默认1秒，对应"允许误差1秒以内"这个约定），就认定
+       中间这段是真实信号缺失（比如狗趴着压住项圈、信号被身体遮挡）。
+
+    缺失区间按"每一帧"密集填充"6轴全0"的哨兵行，而不是只在缺口两头各插
+    一行——按该设备真实数据推算出的原始采样间隔（同一份文件里所有相邻真实
+    样本间隔的中位数；整段文件都没有任何真实数据时，用 fallback_hz 参数
+    兜底，默认25Hz，对应HICC设备的原生频率，比WitMotion的50Hz更保守，
+    宁可行数偏多也不漏标），把每一段缺口逐帧补成全0行。这样不管是画图
+    还是下游代码逐行/逐样本处理，缺失区间每一行实际拿到的都是全0，不依赖
+    图表软件"两点连线"的假设。
+
+    真实数值本身永远不会被改动/插值；哪怕整段时间完全没有任何真实数据
+    （比如某个设备这一小时完全没连上），也只是从起始边界到结束边界之间
+    逐帧填成全0，不会伪造中间任何"看起来有变化"的数值。
+
+    t_start_ms/t_end_ms 任一个是 None 时，退化成普通复制（不做任何时间轴/
+    缺口处理），行为等同于以前直接 shutil.copyfile()。
+    """
+    if t_start_ms is None or t_end_ms is None:
+        shutil.copyfile(raw_path, out_path)
+        return
+
+    start_dt = datetime.fromtimestamp(t_start_ms / 1000.0)
+    end_dt = datetime.fromtimestamp(t_end_ms / 1000.0)
+
+    def parse_ts(s):
+        for fmt in ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S'):
+            try:
+                return datetime.strptime(s.strip(), fmt)
+            except ValueError:
+                continue
+        return None
+
+    with open(raw_path, newline='', encoding='utf-8-sig') as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        rows = list(reader)
+
+    n_cols = len(header) if header else 7
+    kept = []  # [(datetime, row), ...]，按源文件顺序，时间上应该已经是单调的
+    for row in rows:
+        if not row or not row[0].strip():
+            continue
+        ts = parse_ts(row[0])
+        if ts is None or ts < start_dt or ts > end_dt:
+            continue
+        kept.append((ts, row))
+
+    # 用这份文件里真实样本间隔的中位数估算原始采样周期，用来给缺口逐帧
+    # 打点；完全没有真实数据（长度<2）时用 fallback_hz 兜底。
+    if len(kept) >= 2:
+        real_diffs = sorted((b[0] - a[0]).total_seconds() for a, b in zip(kept, kept[1:]))
+        median_interval_s = real_diffs[len(real_diffs) // 2]
+        if median_interval_s <= 0:
+            median_interval_s = 1.0 / fallback_hz
+    else:
+        median_interval_s = 1.0 / fallback_hz
+    step = timedelta(seconds=median_interval_s)
+
+    def zero_row(ts):
+        ts_str = ts.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        return [ts_str] + ['0.000000'] * (n_cols - 1)
+
+    def fill_gap(out_rows, gap_start, gap_end):
+        # (gap_start, gap_end) 开区间内逐 step 打一行全0，不含端点本身
+        # （端点要么是真实样本，要么是 start_dt/end_dt 边界，不重复打点）。
+        t = gap_start + step
+        while t < gap_end:
+            out_rows.append(zero_row(t))
+            t += step
+
+    out_rows = []
+    prev_ts = start_dt
+    for ts, row in kept:
+        if (ts - prev_ts).total_seconds() > gap_threshold_s:
+            fill_gap(out_rows, prev_ts, ts)
+        out_rows.append(row)
+        prev_ts = ts
+
+    if (end_dt - prev_ts).total_seconds() > gap_threshold_s:
+        fill_gap(out_rows, prev_ts, end_dt)
+
+    with open(out_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        if header:
+            writer.writerow(header)
+        writer.writerows(out_rows)
 
 
 def resample_raw_imu(raw_path: str, out_path: str, target_hz: float,

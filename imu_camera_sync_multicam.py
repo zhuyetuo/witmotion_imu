@@ -57,6 +57,7 @@ except ImportError:
 
 from imu_camera_sync import (
     _FfmpegVfrSink, _Cv2CfrSink, _measure_actual_fps, probe_camera, resample_raw_imu, open_camera,
+    write_anchored_raw_csv,
 )
 from imu_camera_sync_multi import (
     ImuDevice, ble_thread_main, parse_imu_spec, stop_event, _new_sample_event, RAW_CSV_HEADER,
@@ -447,13 +448,28 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 # 原始频率，不经过 resample_raw_imu），方便直接拖拽上传标注；
                 # 配对之外，单独的 {base}_camN_raw.mp4/{base}_imuM_raw.csv 原始
                 # 文件也保留，两种都留，不删。
-                print('── --no-resample：不降采样，原始数据按 cam x imu 两两配对（原始文件也保留）──')
+                #
+                # CSV这一份用 write_anchored_raw_csv() 而不是直接复制：对齐到
+                # first_tick_ts_ms/last_tick_ts_ms（视频第一帧/最后一帧的真实
+                # 时间戳），不改动/不插值任何真实数值。除了开头（IMU连接延迟
+                # 导致第一条真实数据比视频晚几百毫秒到1秒）、结尾（裁掉视频
+                # 结束之后的部分）这两处边界，中间只要检测到相邻两条真实样本
+                # 间隔超过1秒（信号断联，比如设备被压住），也会在缺口两头各
+                # 插一行数据。这些"没有真实信号"的行统一用6轴全0填充（而不是
+                # 留空）：6轴同时全为0在真实IMU数据里不可能出现（重力会让加速
+                # 度至少有读数），既能让Label Studio图表上显示为一段贴着0的
+                # 平线、不会被误当成真实变化去标注，也方便下游训练代码用一条
+                # "全0→判定缺失，跳过"的简单规则识别，无需处理空值/NaN。
+                print('── --no-resample：不降采样，原始数据按 cam x imu 两两配对（原始文件也保留，时间轴已对齐视频起止）──')
                 for d in devices:
                     for cam in cameras:
                         pair_base = f'{base}_{cam.label}_{d.label}_raw'
                         try:
                             shutil.copyfile(f'{base}_{cam.label}_raw.mp4', f'{pair_base}.mp4')
-                            shutil.copyfile(f'{base}_{d.label}_raw.csv', f'{pair_base}.csv')
+                            write_anchored_raw_csv(
+                                f'{base}_{d.label}_raw.csv', f'{pair_base}.csv',
+                                t_start_ms=first_tick_ts_ms, t_end_ms=last_tick_ts_ms,
+                            )
                             print(f'  {pair_base}.mp4 / .csv（{cam.label} 原始视频 + {d.label} 原始数据，'
                                   f'文件名一致可直接拖拽配对）')
                         except OSError as e:
