@@ -372,6 +372,73 @@ META_HEADER = [
 _TS_FMT = '%Y-%m-%d %H:%M:%S.%f'
 
 
+def write_anchored_raw_csv(raw_path: str, out_path: str,
+                            t_start_ms: float = None, t_end_ms: float = None):
+    """
+    --no-resample（保留原始未降采样数据）模式专用：把原始IMU CSV复制一份，
+    但把时间轴对齐到 [t_start_ms, t_end_ms]（通常是视频第一帧/最后一帧的真实
+    时间戳，也就是 first_tick_ts_ms/last_tick_ts_ms）——不插值、不改动任何
+    真实数值，只处理"起止边界"：
+
+    1. IMU设备连接/收到第一条真实数据本身有延迟，原始CSV的第一行时间戳
+       往往比视频真正开始录制的时刻晚几百毫秒到1秒（不是累积误差，是从
+       一开始时间起点就没对齐）。Label Studio默认按"CSV第一行=视频第0秒"
+       来对齐两边，这个起点偏差会导致全程感觉视频比数据"慢了一截"。这里
+       如果检测到IMU第一条真实数据晚于视频开始时间，就在最前面补一行
+       "时间戳=t_start_ms、acc/gyro留空"的锚点行——不编造数值，只是让
+       时间轴的起点跟视频对上。
+    2. 同理裁掉时间戳晚于 t_end_ms 的尾部数据（IMU还在收但视频已经结束
+       之后的那部分，不属于这段视频内容）。
+    3. 早于 t_start_ms 的数据（IMU连接比视频早一点点收到的）也一并裁掉，
+       保证CSV的时间范围跟视频严格一致。
+
+    t_start_ms/t_end_ms 任一个是 None 时，退化成普通复制（不做任何时间轴
+    处理），行为等同于以前直接 shutil.copyfile()。
+    """
+    if t_start_ms is None or t_end_ms is None:
+        shutil.copyfile(raw_path, out_path)
+        return
+
+    start_dt = datetime.fromtimestamp(t_start_ms / 1000.0)
+    end_dt = datetime.fromtimestamp(t_end_ms / 1000.0)
+
+    def parse_ts(s):
+        for fmt in ('%Y-%m-%d %H:%M:%S.%f', '%Y-%m-%d %H:%M:%S'):
+            try:
+                return datetime.strptime(s.strip(), fmt)
+            except ValueError:
+                continue
+        return None
+
+    with open(raw_path, newline='', encoding='utf-8-sig') as f:
+        reader = csv.reader(f)
+        header = next(reader, None)
+        rows = list(reader)
+
+    kept = []
+    first_ts = None
+    for row in rows:
+        if not row or not row[0].strip():
+            continue
+        ts = parse_ts(row[0])
+        if ts is None or ts < start_dt or ts > end_dt:
+            continue
+        if first_ts is None:
+            first_ts = ts
+        kept.append(row)
+
+    with open(out_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        if header:
+            writer.writerow(header)
+            # 视频已经开始录制，但这个时刻IMU还没有真实数据（正常连接延迟）——
+            # 补一行时间戳对齐的锚点行，数值留空，不是缺数据的0.5秒里瞎编数值。
+            if first_ts is not None and first_ts > start_dt:
+                anchor_ts_str = start_dt.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                writer.writerow([anchor_ts_str] + [''] * (len(header) - 1))
+        writer.writerows(kept)
+
+
 def resample_raw_imu(raw_path: str, out_path: str, target_hz: float,
                       t_start_ms: float = None, t_end_ms: float = None,
                       gap_ratio: float = 5.0, latency_ms: float = 0.0):

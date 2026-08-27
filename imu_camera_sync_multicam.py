@@ -57,6 +57,7 @@ except ImportError:
 
 from imu_camera_sync import (
     _FfmpegVfrSink, _Cv2CfrSink, _measure_actual_fps, probe_camera, resample_raw_imu, open_camera,
+    write_anchored_raw_csv,
 )
 from imu_camera_sync_multi import (
     ImuDevice, ble_thread_main, parse_imu_spec, stop_event, _new_sample_event, RAW_CSV_HEADER,
@@ -447,13 +448,25 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 # 原始频率，不经过 resample_raw_imu），方便直接拖拽上传标注；
                 # 配对之外，单独的 {base}_camN_raw.mp4/{base}_imuM_raw.csv 原始
                 # 文件也保留，两种都留，不删。
-                print('── --no-resample：不降采样，原始数据按 cam x imu 两两配对（原始文件也保留）──')
+                #
+                # CSV这一份用 write_anchored_raw_csv() 而不是直接复制：IMU设备
+                # 连接/收到第一条真实数据本身有延迟，原始CSV第一行时间戳往往
+                # 比视频真正开始录制晚几百毫秒到1秒，如果就这么直接复制，
+                # Label Studio默认"CSV第一行=视频第0秒"的对齐假设会全程偏差
+                # 那么多。这里对齐到 first_tick_ts_ms/last_tick_ts_ms（视频
+                # 第一帧/最后一帧的真实时间戳）：不改动/不插值任何真实数值，
+                # 只是IMU还没连上那一小段用一行留空的锚点行占住起点，让时间轴
+                # 起点跟视频对上；尾部也裁掉视频结束之后的部分。
+                print('── --no-resample：不降采样，原始数据按 cam x imu 两两配对（原始文件也保留，时间轴已对齐视频起止）──')
                 for d in devices:
                     for cam in cameras:
                         pair_base = f'{base}_{cam.label}_{d.label}_raw'
                         try:
                             shutil.copyfile(f'{base}_{cam.label}_raw.mp4', f'{pair_base}.mp4')
-                            shutil.copyfile(f'{base}_{d.label}_raw.csv', f'{pair_base}.csv')
+                            write_anchored_raw_csv(
+                                f'{base}_{d.label}_raw.csv', f'{pair_base}.csv',
+                                t_start_ms=first_tick_ts_ms, t_end_ms=last_tick_ts_ms,
+                            )
                             print(f'  {pair_base}.mp4 / .csv（{cam.label} 原始视频 + {d.label} 原始数据，'
                                   f'文件名一致可直接拖拽配对）')
                         except OSError as e:
