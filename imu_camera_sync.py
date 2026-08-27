@@ -374,7 +374,8 @@ _TS_FMT = '%Y-%m-%d %H:%M:%S.%f'
 
 def write_anchored_raw_csv(raw_path: str, out_path: str,
                             t_start_ms: float = None, t_end_ms: float = None,
-                            gap_threshold_s: float = 1.0):
+                            gap_threshold_s: float = 1.0,
+                            fallback_hz: float = 25.0):
     """
     --no-resample（保留原始未降采样数据）模式专用：把原始IMU CSV复制一份，
     但把时间轴对齐到 [t_start_ms, t_end_ms]（通常是视频第一帧/最后一帧的真实
@@ -390,17 +391,19 @@ def write_anchored_raw_csv(raw_path: str, out_path: str,
     2. 结束边界：同理裁掉/补齐视频结束时间之后的部分。
     3. 内部缺口：真实数据流里，只要两条相邻真实样本的时间间隔超过
        gap_threshold_s（默认1秒，对应"允许误差1秒以内"这个约定），就认定
-       中间这段是真实信号缺失（比如狗趴着压住项圈、信号被身体遮挡），在
-       缺口刚开始、刚结束这两个时刻各插一行"6轴全0"的哨兵行，图表上就是
-       一段贴着0的平线，而不是一段空白跳过或者一条看似连续的斜线插值。
+       中间这段是真实信号缺失（比如狗趴着压住项圈、信号被身体遮挡）。
 
-    每个缺口只插2行（缺口起止各一行），不是按固定频率密集填充——大多数
-    时序图表组件（包括Label Studio）两点之间会画直线连接，2个0值端点就足够
-    在图上撑出一整段平的0，不需要更密集的填充。
+    缺失区间按"每一帧"密集填充"6轴全0"的哨兵行，而不是只在缺口两头各插
+    一行——按该设备真实数据推算出的原始采样间隔（同一份文件里所有相邻真实
+    样本间隔的中位数；整段文件都没有任何真实数据时，用 fallback_hz 参数
+    兜底，默认25Hz，对应HICC设备的原生频率，比WitMotion的50Hz更保守，
+    宁可行数偏多也不漏标），把每一段缺口逐帧补成全0行。这样不管是画图
+    还是下游代码逐行/逐样本处理，缺失区间每一行实际拿到的都是全0，不依赖
+    图表软件"两点连线"的假设。
 
     真实数值本身永远不会被改动/插值；哪怕整段时间完全没有任何真实数据
     （比如某个设备这一小时完全没连上），也只是从起始边界到结束边界之间
-    整体填成一段"全0平线"，不会伪造中间任何"看起来有变化"的数值。
+    逐帧填成全0，不会伪造中间任何"看起来有变化"的数值。
 
     t_start_ms/t_end_ms 任一个是 None 时，退化成普通复制（不做任何时间轴/
     缺口处理），行为等同于以前直接 shutil.copyfile()。
@@ -435,23 +438,39 @@ def write_anchored_raw_csv(raw_path: str, out_path: str,
             continue
         kept.append((ts, row))
 
+    # 用这份文件里真实样本间隔的中位数估算原始采样周期，用来给缺口逐帧
+    # 打点；完全没有真实数据（长度<2）时用 fallback_hz 兜底。
+    if len(kept) >= 2:
+        real_diffs = sorted((b[0] - a[0]).total_seconds() for a, b in zip(kept, kept[1:]))
+        median_interval_s = real_diffs[len(real_diffs) // 2]
+        if median_interval_s <= 0:
+            median_interval_s = 1.0 / fallback_hz
+    else:
+        median_interval_s = 1.0 / fallback_hz
+    step = timedelta(seconds=median_interval_s)
+
     def zero_row(ts):
         ts_str = ts.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
         return [ts_str] + ['0.000000'] * (n_cols - 1)
 
-    epsilon = timedelta(milliseconds=1)
+    def fill_gap(out_rows, gap_start, gap_end):
+        # (gap_start, gap_end) 开区间内逐 step 打一行全0，不含端点本身
+        # （端点要么是真实样本，要么是 start_dt/end_dt 边界，不重复打点）。
+        t = gap_start + step
+        while t < gap_end:
+            out_rows.append(zero_row(t))
+            t += step
+
     out_rows = []
     prev_ts = start_dt
     for ts, row in kept:
         if (ts - prev_ts).total_seconds() > gap_threshold_s:
-            out_rows.append(zero_row(prev_ts + epsilon))
-            out_rows.append(zero_row(ts - epsilon))
+            fill_gap(out_rows, prev_ts, ts)
         out_rows.append(row)
         prev_ts = ts
 
     if (end_dt - prev_ts).total_seconds() > gap_threshold_s:
-        out_rows.append(zero_row(prev_ts + epsilon))
-        out_rows.append(zero_row(end_dt - epsilon))
+        fill_gap(out_rows, prev_ts, end_dt)
 
     with open(out_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
