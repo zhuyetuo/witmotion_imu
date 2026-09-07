@@ -77,27 +77,116 @@ class CameraStream:
         # （视野变窄），不是完整画幅等比缩小；按原生高分辨率采集、软件缩放到
         # 输出分辨率，才能保住完整广角视野。不指定 capture_width/height 时
         # 两者相同，行为和之前完全一样。
-        cap_w = capture_width or width
-        cap_h = capture_height or height
-        self.cap = open_camera(index, cap_w, cap_h, target_fps, backend=backend,
-                                fourcc=fourcc, autofocus=autofocus, auto_wb=auto_wb,
-                                show_settings_dialog=show_settings_dialog)
+        self.actual_w, self.actual_h = width, height  # 最终输出/写入视频的分辨率
+        # 重连时要用同一套参数重新 open_camera，全部记下来
+        self._open_kwargs = dict(index=index, width=capture_width or width, height=capture_height or height,
+                                 fps=target_fps, backend=backend, fourcc=fourcc, autofocus=autofocus,
+                                 auto_wb=auto_wb, show_settings_dialog=False)
+        self.cap = open_camera(**{**self._open_kwargs, 'show_settings_dialog': show_settings_dialog})
         if not self.cap.isOpened():
             raise RuntimeError(f'无法打开摄像头 {index}（{label}），可以试试 --backend dshow/msmf')
-        driver_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        driver_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        self.actual_w, self.actual_h = width, height  # 最终输出/写入视频的分辨率
-        self.need_resize = (driver_w, driver_h) != (width, height)
-        if self.need_resize:
-            print(f'{label}: 采集 {driver_w}x{driver_h} → 缩放输出 {width}x{height}')
+        self._after_open()
         self.video_writer = None
         self.ts_window: list[float] = []
+        # 断联/重连状态：某一路摄像头中途掉了（USB 松了、供电不稳、驱动挂了）不能
+        # 把整个采集停掉——其它摄像头和 IMU 还好好的。掉了的这一路写占位黑帧
+        # 顶住（保证视频帧数 == 组合CSV行数，对齐关系不乱），后台按间隔尝试重新
+        # 打开，连回来了就无缝接着录。连续读失败 FAIL_STREAK_TO_DOWN 次才算掉线，
+        # 偶尔一帧读不到不算。
+        self.down = False
+        self.fail_streak = 0
+        self.down_since: float | None = None
+        self.next_retry = 0.0
+        self.retry_interval = 5.0
+        self.last_frame = None
+        self.dropped_ticks = 0  # 这一段里写了多少个占位帧，结束时汇报
+
+    FAIL_STREAK_TO_DOWN = 3
+
+    def _after_open(self):
+        driver_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        driver_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.need_resize = (driver_w, driver_h) != (self.actual_w, self.actual_h)
+        if self.need_resize:
+            print(f'{self.label}: 采集 {driver_w}x{driver_h} → 缩放输出 {self.actual_w}x{self.actual_h}')
 
     def read(self):
         ret, frame = self.cap.read()
         if ret and self.need_resize:
             frame = cv2.resize(frame, (self.actual_w, self.actual_h))
         return ret, frame
+
+    def _placeholder(self, now: float):
+        """掉线期间的占位帧：黑底 + 提示文字，写进视频保持帧数对齐，画面上也一眼能看出这路断了。"""
+        import numpy as np
+        frame = np.zeros((self.actual_h, self.actual_w, 3), dtype=np.uint8)
+        secs = now - (self.down_since or now)
+        for i, text in enumerate((f'{self.label} DISCONNECTED', f'reconnecting... {secs:.0f}s')):
+            pos = (20, self.actual_h // 2 - 20 + i * 40)
+            cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 4, cv2.LINE_AA)
+            cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 1.0, (80, 80, 255), 2, cv2.LINE_AA)
+        return frame
+
+    def _try_reconnect(self, now: float) -> bool:
+        if now < self.next_retry:
+            return False
+        self.next_retry = now + self.retry_interval
+        try:
+            cap = open_camera(**self._open_kwargs)
+            ok = cap.isOpened()
+            if ok:
+                ret, _ = cap.read()
+                ok = bool(ret)
+            if not ok:
+                cap.release()
+                return False
+        except Exception as e:  # noqa: BLE001 驱动层什么异常都可能抛，重连失败就下次再试
+            print(f'{self.label} 重连异常: {e}')
+            return False
+        self.cap = cap
+        self._after_open()
+        secs = now - (self.down_since or now)
+        print(f'{self.label} 已重新连上（断了 {secs:.0f}s）')
+        self.down = False
+        self.fail_streak = 0
+        self.down_since = None
+        return True
+
+    def read_resilient(self, now: float):
+        """主循环用这个：永远返回一帧（真实帧或占位帧）+ 这帧是不是真的。
+        掉线了就走重连逻辑，不抛异常、不让调用方停。"""
+        if self.down:
+            if self._try_reconnect(now):
+                ret, frame = self.read()
+                if ret:
+                    self.last_frame = frame
+                    return frame, True
+                self.down = True
+            self.dropped_ticks += 1
+            return self._placeholder(now), False
+
+        ret, frame = self.read()
+        if ret:
+            self.fail_streak = 0
+            self.last_frame = frame
+            return frame, True
+
+        self.fail_streak += 1
+        if self.fail_streak >= self.FAIL_STREAK_TO_DOWN:
+            self.down = True
+            self.down_since = now
+            self.next_retry = now + self.retry_interval
+            print(f'{self.label} 连续 {self.fail_streak} 次读取失败，判定断联，其它摄像头/IMU 继续录，'
+                  f'这一路写占位帧并每 {self.retry_interval:.0f}s 尝试重连')
+            try:
+                self.cap.release()
+            except Exception:  # noqa: BLE001
+                pass
+        self.dropped_ticks += 1
+        # 还没判定掉线的那一两帧，用上一帧顶一下比黑帧自然
+        if self.last_frame is not None:
+            return self.last_frame, False
+        return self._placeholder(now), False
 
     def fps_tick(self, now: float) -> float:
         cutoff = now - 1.0
@@ -112,7 +201,10 @@ class CameraStream:
             self.video_writer = None
 
     def release(self):
-        self.cap.release()
+        try:
+            self.cap.release()
+        except Exception:  # noqa: BLE001 掉线时 cap 可能已经 release 过
+            pass
         self.close_writer()
 
 
@@ -184,10 +276,11 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice]):
         until = time.time() + args.warmup_sec
         while time.time() < until and not stop_event.is_set():
             for cam in cameras:
-                cam.read()
+                cam.read_resilient(time.time())
             time.sleep(1.0 / target_fps)
         cam_report = '  '.join(
-            f'{c.label}={_measure_actual_fps(c.cap, warmup=0, sample=10):.1f}fps' for c in cameras)
+            f'{c.label}={_measure_actual_fps(c.cap, warmup=0, sample=10):.1f}fps' if not c.down else f'{c.label}=断联'
+            for c in cameras)
         imu_report = '  '.join(f'{d.label}={d.current_hz():.1f}Hz' for d in devices)
         print(f'预热结束: {cam_report}  {imu_report}')
 
@@ -252,6 +345,8 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
     meta_header = ['frame_idx', 'timestamp']
     for cam in cameras:
         meta_header.append(f'{cam.label}_fps')
+    for cam in cameras:
+        meta_header.append(f'{cam.label}_missing')  # 1 = 这一 tick 这路摄像头没拿到真实帧（占位帧）
     for d in devices:
         csv_header += [f'{d.label}_acc_x', f'{d.label}_acc_y', f'{d.label}_acc_z',
                         f'{d.label}_gyro_x', f'{d.label}_gyro_y', f'{d.label}_gyro_z']
@@ -330,24 +425,21 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 first_tick_ts_ms = tick_ts_ms
             last_tick_ts_ms = tick_ts_ms
 
+            # 某路摄像头读失败不再整体退出：掉线的那一路写占位帧、后台重连，
+            # 其它摄像头和 IMU 照常录（见 CameraStream.read_resilient）
             frames = []
+            cam_missing = []
             read_failed = False
             for cam in cameras:
-                ret, frame = cam.read()
-                if not ret:
-                    print(f'{cam.label} 读取失败，退出。')
-                    read_failed = True
-                    should_stop[0] = True
-                    break
+                frame, ok = cam.read_resilient(tick_ts)
                 frames.append(frame)
-            if read_failed:
-                break
+                cam_missing.append(0 if ok else 1)
 
             tick_ts_str = datetime.fromtimestamp(tick_ts).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-            cam_fps_list = [cam.fps_tick(tick_ts) for cam in cameras]
+            cam_fps_list = [cam.fps_tick(tick_ts) if ok == 0 else 0.0 for cam, ok in zip(cameras, cam_missing)]
 
             csv_row = [tick_ts_str]
-            meta_row = [frame_idx, tick_ts_str] + [f'{fps:.1f}' for fps in cam_fps_list]
+            meta_row = [frame_idx, tick_ts_str] + [f'{fps:.1f}' for fps in cam_fps_list] + cam_missing
             imu_info = []
 
             for d in devices:
@@ -419,6 +511,11 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
             if hasattr(d, '_raw_file'):
                 d._raw_file.close()
         print(f'\n共采集 {frame_idx} 个同步tick  {elapsed:.1f}s')
+        for cam in cameras:
+            if cam.dropped_ticks:
+                state = '仍未连上' if cam.down else '已恢复'
+                print(f'  [{cam.label}] 本段有 {cam.dropped_ticks} 个 tick 没拿到真实帧（占位帧顶替，{state}）')
+            cam.dropped_ticks = 0
         if record_mode:
             print(f'已保存: {base}.csv  {base}_meta.csv')
             for cam in cameras:
