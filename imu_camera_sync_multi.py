@@ -97,17 +97,30 @@ class SharedScanner:
     再产生额外的蓝牙栈负担。
     """
 
+    # 常驻扫描器在 Windows(WinRT) 上跑久了会"悄悄死掉"：watcher 被系统 abort 之后
+    # 不再回调 detection_callback，但 Python 这边没有任何异常，_seen 字典就此
+    # 冻结，find() 永远查不到新广播——表现就是"设备信号明明好了，却再也连不上，
+    # 只有重启命令（等于重建扫描器）才行"。所以加一个看门狗：超过这么久一个
+    # 广播都没收到（几只狗的项圈都在附近时正常每秒都有广播），就把扫描器
+    # 停掉重建。
+    STALL_RESTART_S = 90.0
+
     def __init__(self, max_age_s: float = 15.0):
         self.max_age_s = max_age_s
         self._seen: dict[str, tuple[object, float]] = {}  # 地址(大写) -> (BLEDevice, 最后见到的时间)
         self._scanner = None
+        self.last_detect = time.monotonic()
+        self.restarts = 0
 
     def _on_detect(self, device, _adv_data):
-        self._seen[device.address.upper()] = (device, time.monotonic())
+        now = time.monotonic()
+        self._seen[device.address.upper()] = (device, now)
+        self.last_detect = now
 
     async def start(self):
         self._scanner = BleakScanner(detection_callback=self._on_detect)
         await self._scanner.start()
+        self.last_detect = time.monotonic()
 
     async def stop(self):
         if self._scanner is not None:
@@ -115,6 +128,38 @@ class SharedScanner:
                 await self._scanner.stop()
             except Exception:
                 pass
+            self._scanner = None
+
+    async def restart(self, reason: str):
+        self.restarts += 1
+        print(f'[扫描器] {reason}，重建 BLE 扫描器（第 {self.restarts} 次）')
+        await self.stop()
+        # 旧扫描器缓存的 BLEDevice 对象跟着作废，等新扫描器重新收到广播再用
+        self._seen.clear()
+        await asyncio.sleep(1.0)
+        try:
+            await self.start()
+        except Exception as e:
+            print(f'[扫描器] 重建失败: {e}，稍后再试')
+            self._scanner = None
+
+    def evict(self, address: str):
+        """某个缓存的 BLEDevice 连接失败后把它踢掉：这个对象可能已经是陈旧的
+        句柄（设备离线很久之后又回来），强制等一条新广播拿新对象再连。"""
+        self._seen.pop(address.upper(), None)
+
+    async def watchdog(self, devices: list):
+        """每 5 秒检查一次扫描器还活着没（见 STALL_RESTART_S 的说明）。只在有设备
+        掉线等着重连时才管——全部设备都连着的时候它们不再广播，收不到广播是
+        正常的，不用重建。"""
+        while not stop_event.is_set():
+            await asyncio.sleep(5.0)
+            if all(getattr(d, 'connected', False) for d in devices if d.dev_type == 'wit'):
+                self.last_detect = time.monotonic()
+                continue
+            stalled = time.monotonic() - self.last_detect
+            if self._scanner is None or stalled >= self.STALL_RESTART_S:
+                await self.restart(f'有设备掉线等重连，但 {stalled:.0f}s 没收到任何 BLE 广播' if self._scanner else '扫描器不存在')
 
     def find(self, name_filter: str = None, address: str = None):
         """在最近 max_age_s 秒内见过的广播里找匹配的设备，找不到返回 None
@@ -164,9 +209,12 @@ class ImuDevice:
         self.hz_lock = threading.Lock()
         self.raw_writer = None
         self.raw_lock = threading.Lock()
+        self.last_sample_ts = 0.0  # 最近一条样本的 time.time()，连接假死检测用
+        self.connected = False
 
     def push(self, row: dict):
         now = time.time()
+        self.last_sample_ts = now
         with self.lock:
             self.buffer.append(row)
         with self.hz_lock:
@@ -232,8 +280,16 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
     # 这种情况——比"设备压根没开机/没电"少见得多，稍微退避一下即可，封顶值
     # 复用 reconnect_max_backoff（默认300秒），不会造成明显延迟。
     BASE_BACKOFF = 2.0
-    MAX_BACKOFF = reconnect_max_backoff
+    # 走到这一步说明设备的广播是能收到的（就在附近、有电），连接握手失败多半是
+    # 蓝牙栈一时抽风或缓存的设备对象陈旧，不该像"设备压根不在"那样退避到 5 分钟
+    # ——那样信号恢复后要白等好几分钟。封顶 30s 够了。
+    MAX_BACKOFF = min(reconnect_max_backoff, 30.0)
     backoff = BASE_BACKOFF
+    # 连接"看起来还在"但一直没有数据：WinRT 上设备信号断了有时不会触发
+    # disconnected_callback，协程就永远卡在"已连接"的循环里等一个不会来的
+    # 断开事件——表现也是"再也连不上，只能重启命令"。超过这么久没数据就主动
+    # 断开重连。WitMotion 正常 50Hz，10 秒没一条肯定不对。
+    NO_DATA_TIMEOUT_S = 10.0
 
     async def _wait_and_backoff():
         nonlocal backoff
@@ -280,8 +336,23 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
                     continue
                 print(f'[{device.label}] 已订阅: {subscribed}')
                 backoff = BASE_BACKOFF  # 连上了，重置退避，下次断连从2秒开始重试
+                device.last_sample_ts = time.time()
+                device.connected = True
+                stale = False
                 while not stop_event.is_set() and not disconnected.is_set():
                     await asyncio.sleep(0.1)
+                    if time.time() - device.last_sample_ts > NO_DATA_TIMEOUT_S:
+                        stale = True
+                        break
+                device.connected = False
+                if stale:
+                    print(f'[{device.label}] 连接未断但 {NO_DATA_TIMEOUT_S:.0f}s 没收到数据（假死），主动断开重连...')
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                    scanner.evict(ble_device.address)
+                    continue
                 if disconnected.is_set():
                     print(f'[{device.label}] 连接断开（信号问题），尝试自动重连...')
                     continue
@@ -292,6 +363,9 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
         except Exception as e:
             if stop_event.is_set():
                 break
+            # 用缓存的设备对象连不上，把它从扫描器缓存里踢掉，等一条新广播拿新对象
+            # 再试——离线很久又回来的设备，旧对象里的句柄经常已经失效
+            scanner.evict(ble_device.address)
             print(f'[{device.label}] 连接异常: {e}，{backoff:.0f}秒后重试...')
             await _wait_and_backoff()
             continue
@@ -400,6 +474,8 @@ def ble_thread_main(devices: list[ImuDevice], scan_timeout: float, reconnect_max
             # 只让那一个设备停止工作（后续一直显示 MISSING），不会连累其它设备/
             # 把整个录制程序都跟着终止——默认行为是只要有一个任务抛异常，
             # gather() 就直接把异常冒泡出去，把整个程序干掉。
+            if any(d.dev_type == 'wit' for d in devices):
+                labeled_tasks.append(('扫描器看门狗', scanner.watchdog(devices)))
             results = await asyncio.gather(*(t for _, t in labeled_tasks), return_exceptions=True)
             for (label, _), result in zip(labeled_tasks, results):
                 if isinstance(result, Exception):
