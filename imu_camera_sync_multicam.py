@@ -64,6 +64,15 @@ from imu_camera_sync_multi import (
 )
 
 
+def _fmt_duration(secs: float) -> str:
+    secs = int(secs)
+    if secs < 60:
+        return f'{secs}s'
+    if secs < 3600:
+        return f'{secs // 60}m{secs % 60:02d}s'
+    return f'{secs // 3600}h{(secs % 3600) // 60:02d}m'
+
+
 class CameraStream:
     """一路摄像头的独立状态：VideoCapture、视频写入、fps 统计。"""
 
@@ -97,11 +106,21 @@ class CameraStream:
         self.fail_streak = 0
         self.down_since: float | None = None
         self.next_retry = 0.0
-        self.retry_interval = 5.0
+        # 重连间隔指数退避 5s→10s→…封顶 RETRY_MAX_INTERVAL：真松了要人去插回来的话
+        # 可能一断就是一天，每 5s 反复 open_camera 一整天既白耗 CPU，Windows 上还
+        # 可能把摄像头驱动栈折腾出问题；连上一次就重置回 5s
+        self.retry_interval = self.RETRY_MIN_INTERVAL
         self.last_frame = None
         self.dropped_ticks = 0  # 这一段里写了多少个占位帧，结束时汇报
+        self.last_down_report = 0.0
 
     FAIL_STREAK_TO_DOWN = 3
+    RETRY_MIN_INTERVAL = 5.0
+    RETRY_MAX_INTERVAL = 60.0
+    DOWN_REPORT_INTERVAL = 60.0  # 断联期间每隔这么久在终端提醒一次
+
+    def down_seconds(self, now: float) -> float:
+        return now - self.down_since if self.down and self.down_since is not None else 0.0
 
     def _after_open(self):
         driver_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -120,17 +139,21 @@ class CameraStream:
         """掉线期间的占位帧：黑底 + 提示文字，写进视频保持帧数对齐，画面上也一眼能看出这路断了。"""
         import numpy as np
         frame = np.zeros((self.actual_h, self.actual_w, 3), dtype=np.uint8)
-        secs = now - (self.down_since or now)
-        for i, text in enumerate((f'{self.label} DISCONNECTED', f'reconnecting... {secs:.0f}s')):
+        for i, text in enumerate((f'{self.label} DISCONNECTED', f'reconnecting... {_fmt_duration(self.down_seconds(now))}')):
             pos = (20, self.actual_h // 2 - 20 + i * 40)
             cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 4, cv2.LINE_AA)
             cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 1.0, (80, 80, 255), 2, cv2.LINE_AA)
         return frame
 
     def _try_reconnect(self, now: float) -> bool:
+        if now - self.last_down_report >= self.DOWN_REPORT_INTERVAL:
+            self.last_down_report = now
+            print(f'!! {self.label} 已断联 {_fmt_duration(self.down_seconds(now))}，仍在尝试重连'
+                  f'（间隔 {self.retry_interval:.0f}s）——如果是线松了需要人去插回去')
         if now < self.next_retry:
             return False
         self.next_retry = now + self.retry_interval
+        self.retry_interval = min(self.retry_interval * 2, self.RETRY_MAX_INTERVAL)
         try:
             cap = open_camera(**self._open_kwargs)
             ok = cap.isOpened()
@@ -145,11 +168,11 @@ class CameraStream:
             return False
         self.cap = cap
         self._after_open()
-        secs = now - (self.down_since or now)
-        print(f'{self.label} 已重新连上（断了 {secs:.0f}s）')
+        print(f'{self.label} 已重新连上（断了 {_fmt_duration(self.down_seconds(now))}）')
         self.down = False
         self.fail_streak = 0
         self.down_since = None
+        self.retry_interval = self.RETRY_MIN_INTERVAL
         return True
 
     def read_resilient(self, now: float):
@@ -175,9 +198,11 @@ class CameraStream:
         if self.fail_streak >= self.FAIL_STREAK_TO_DOWN:
             self.down = True
             self.down_since = now
+            self.retry_interval = self.RETRY_MIN_INTERVAL
             self.next_retry = now + self.retry_interval
+            self.last_down_report = now
             print(f'{self.label} 连续 {self.fail_streak} 次读取失败，判定断联，其它摄像头/IMU 继续录，'
-                  f'这一路写占位帧并每 {self.retry_interval:.0f}s 尝试重连')
+                  f'这一路写占位帧并尝试重连（{self.RETRY_MIN_INTERVAL:.0f}s 起指数退避到 {self.RETRY_MAX_INTERVAL:.0f}s）')
             try:
                 self.cap.release()
             except Exception:  # noqa: BLE001
@@ -209,7 +234,8 @@ class CameraStream:
 
 
 def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame_idx,
-                  show_imu_values: bool = False, show_frame_info: bool = False):
+                  show_imu_values: bool = False, show_frame_info: bool = False,
+                  down_cams: list[str] | None = None):
     # 不再画半透明底框——纯文字叠加，字体带描边（先画黑色粗一点当描边、
     # 再画正常颜色）保证在任意背景色的画面上都看得清，不遮挡画面内容。
     def put(text, row, color=(200, 255, 200)):
@@ -252,6 +278,10 @@ def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame
             row += 1
             put(gyro_text, row, (200, 200, 200))
             row += 1
+    # 别的摄像头断了，在每一路画面上都挂一条红字——断掉那路的窗口是黑的没人看，
+    # 得让盯着任何一个窗口的人都能看见"有一路掉了，去插线"
+    if down_cams:
+        put('!! ' + '  '.join(down_cams) + '  <- check cable', row, (60, 60, 255))
     return frame
 
 
@@ -466,10 +496,12 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
             if meta_writer:
                 meta_writer.writerow(meta_row)
 
+            down_cams = [f'{c.label} DOWN {_fmt_duration(c.down_seconds(tick_ts))}' for c in cameras if c.down]
             for cam, frame, cam_fps in zip(cameras, frames, cam_fps_list):
                 display = draw_overlay(frame.copy(), cam.label, cam_fps, target_fps, imu_info, elapsed, frame_idx,
                                         show_imu_values=args.show_imu_values,
-                                        show_frame_info=args.show_frame_info)
+                                        show_frame_info=args.show_frame_info,
+                                        down_cams=down_cams if not cam.down else None)
                 if cam.video_writer:
                     cam.video_writer.write(display if save_overlay else frame)
                 try:
