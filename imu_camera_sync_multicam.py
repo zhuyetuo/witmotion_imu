@@ -40,6 +40,7 @@
                                                 （--resample-hz 指定目标频率，默认25）
 """
 
+import log_setup
 import argparse
 import csv
 import os
@@ -753,6 +754,12 @@ def main():
     ap.add_argument('--probe', action='store_true',
                     help='只探测硬件能力（每路摄像头 + 各IMU设备当前实际输出频率），不录制，探测完直接退出')
     args = ap.parse_args()
+
+    # 日志留存：终端照常打印，同时逐行带时间戳写进 logs/。录制是连着好几天跑的，
+    # BLE 断连这类问题必须能回头翻几小时前发生了什么（见 log_setup.py）
+    log_path = log_setup.setup(prefix='record_multicam')
+    print(f'[日志] 本次输出同时写入: {log_path}')
+
 
     if args.resample_only and args.no_resample:
         print('--resample-only 和 --no-resample 互斥（一个是"只留降采样版"，一个是"只留原始版"），只能选一个。')

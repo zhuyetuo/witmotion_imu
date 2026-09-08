@@ -42,6 +42,7 @@
                                                   （--resample-hz 指定目标频率，默认 25）
 """
 
+import log_setup
 import argparse
 import asyncio
 import csv
@@ -305,8 +306,9 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
     # 断开事件——表现也是"再也连不上，只能重启命令"。超过这么久没数据就主动
     # 断开重连。WitMotion 正常 50Hz，10 秒没一条肯定不对。
     NO_DATA_TIMEOUT_S = 10.0
-    # 连接握手/订阅必须有超时。BlueZ 和 WinRT 都出现过 connect() 或 start_notify()
-    # 永远不返回、也不抛异常的情况（设备离开一段时间后适配器状态错乱最容易触发）——
+    # 连接握手/订阅必须有超时。Windows(WinRT) 和 Linux(BlueZ) 都出现过 connect()
+    # 或 start_notify() 永远不返回、也不抛异常的情况（设备离开一段时间后适配器
+    # 状态错乱最容易触发）——
     # 协程就此永久卡死在这一行，外面的重连循环再也不会转，表现就是"信号明明恢复了
     # 却再也不自动重连，只能重启命令"。这是这个 bug 反复出现的根因。
     CONNECT_TIMEOUT_S = 20.0
@@ -316,10 +318,13 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
     # 底层重新来过；再不行就按地址连，绕开可能已经陈旧的 BLEDevice 句柄。
     FAILS_BEFORE_RESCAN = 3
     FAILS_BEFORE_ADDRESS_MODE = 6
-    # 一直收不到这个设备的广播也要管：设备断开后（比如狗出门遛了半小时），
-    # BlueZ 有时还留着一条陈旧的连接记录，于是根本不再上报它的广播，find()
-    # 永远返回 None，这个循环就静默地每秒空转下去，再也不会重连——这是另一条
-    # 通往"再也连不上"的路。等超过这么久还没广播就重建扫描器让底层重新来过。
+    # 一直收不到这个设备的广播也要管：设备断开后（比如狗出门遛了半小时），系统
+    # 蓝牙栈有时还留着一条陈旧的连接/配对记录（Windows 的 WinRT 和 Linux 的
+    # BlueZ 都会），于是根本不再上报它的广播，find() 永远返回 None，这个循环就
+    # 静默地每秒空转下去，再也不会重连——这是另一条通往"再也连不上"的路。
+    # 注意原有的扫描器看门狗管不了这种：另外几个设备和环境里的蓝牙设备一直在
+    # 广播，"一条广播都收不到"的条件永远不成立。等超过这么久还没等到这个设备的
+    # 广播，就重建扫描器让底层重新来过。
     WAIT_ADVERT_RESCAN_S = 120.0
     # 重建之后如果还是收不到，就别一直重建（每次重建都要动蓝牙栈），拉长到这个间隔
     WAIT_ADVERT_RESCAN_MAX_S = 600.0
@@ -963,6 +968,12 @@ def main():
     ap.add_argument('--probe', action='store_true',
                     help='只探测硬件能力（摄像头 + 各IMU设备当前实际输出频率），不录制，探测完直接退出')
     args = ap.parse_args()
+
+    # 日志留存：终端照常打印，同时逐行带时间戳写进 logs/。录制是连着好几天跑的，
+    # BLE 断连这类问题必须能回头翻几小时前发生了什么（见 log_setup.py）
+    log_path = log_setup.setup(prefix='record_multi')
+    print(f'[日志] 本次输出同时写入: {log_path}')
+
 
     if args.resample_only and args.no_resample:
         print('--resample-only 和 --no-resample 互斥（一个是"只留降采样版"，一个是"只留原始版"），只能选一个。')
