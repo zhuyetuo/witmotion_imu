@@ -286,6 +286,19 @@ def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame
     return frame
 
 
+def _csv_has_data_rows(path: str) -> bool:
+    """CSV 除了表头之外还有没有真实数据行。"""
+    try:
+        with open(path, 'r', encoding='utf-8-sig') as f:
+            f.readline()  # 表头
+            for line in f:
+                if line.strip():
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 def _seconds_to_next_hour(now: datetime) -> float:
     next_hour = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
     return (next_hour - now).total_seconds()
@@ -549,6 +562,22 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 state = '仍未连上' if cam.down else '已恢复'
                 print(f'  [{cam.label}] 本段有 {cam.dropped_ticks} 个 tick 没拿到真实帧（占位帧顶替，{state}）')
             cam.dropped_ticks = 0
+        # 设备从头到尾一条数据都没来（没连上/一开始就断了），它的 raw.csv 就只有
+        # 一行表头。这种设备下面不要再生成配对文件——配对文件是最终要传上 NAS、
+        # 进标注平台的东西，一个只有表头的 CSV 到了那边就是个打开就报错、算不出
+        # 任何指标的空样本，还得有人回过头来一个个删。宁可这一路没有文件，
+        # 也不要一个看起来正常、其实是空的文件。
+        dead_devices = set()
+        if record_mode:
+            for d in devices:
+                if not _csv_has_data_rows(f'{base}_{d.label}_raw.csv'):
+                    dead_devices.add(d.label)
+            if dead_devices:
+                print()
+                print(f'!! 警告: {"、".join(sorted(dead_devices))} 整段没有收到任何数据'
+                      f'（raw.csv 只有表头）——不会为它生成配对文件。')
+                print('!! 检查一下设备有没有连上、是不是没电了，这一段这几路的数据是丢了的。')
+
         if record_mode:
             print(f'已保存: {base}.csv  {base}_meta.csv')
             for cam in cameras:
@@ -592,6 +621,9 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 # "全0→判定缺失，跳过"的简单规则识别，无需处理空值/NaN。
                 print('── --no-resample：不降采样，原始数据按 cam x imu 两两配对（原始文件也保留，时间轴已对齐视频起止）──')
                 for d in devices:
+                    if d.label in dead_devices:
+                        print(f'  跳过 {d.label}：整段没有数据，不生成配对文件')
+                        continue
                     for cam in cameras:
                         pair_base = f'{base}_{cam.label}_{d.label}_raw'
                         try:
@@ -608,6 +640,9 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 print('── 降采样（每路摄像头 x 每个设备各生成一对同名 mp4/csv）──')
                 for d in devices:
                     if not cameras:
+                        continue
+                    if d.label in dead_devices:
+                        print(f'  跳过 {d.label}：整段没有数据，不生成配对文件')
                         continue
                     # 每个设备只需要算一次降采样，但要让每一对 mp4/csv 文件名（去掉
                     # 扩展名）完全一致才能直接拖进 Label Studio 配对，所以第一路摄像头
