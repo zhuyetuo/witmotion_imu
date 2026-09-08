@@ -878,3 +878,39 @@ logs/record_multicam_2026-09-08.log
 
 BLE 断连、扫描器重建、摄像头掉线这些都在里面，出问题直接翻日志，不用再靠回忆
 终端里滚过去的内容。环境变量 `IMU_LOG_DIR` 换目录、`IMU_LOG_KEEP_DAYS` 改保留天数。
+
+## 每天自动归档到 NAS
+
+`daily_archive.sh` 把收工后的两步（挑文件、传 NAS）串起来，挂到 Windows 任务计划里
+每天自动跑。
+
+```bash
+./daily_archive.sh              # 处理昨天 + 补传之前没传成功的
+./daily_archive.sh 2026_9_7     # 指定某一天
+./daily_archive.sh --retry-only # 只补传（VPN 修好后跑这个）
+DRY_RUN=1 ./daily_archive.sh    # 只看会做什么
+```
+
+注册成每天 00:05 自动跑（管理员 CMD 执行一次，路径按实际改）：
+
+```
+schtasks /Create /TN "IMU每日归档" /TR "C:\Users\user\Downloads\witmotion_imu\daily_archive.bat" /SC DAILY /ST 00:05 /RL HIGHEST /F
+```
+
+**几条关键行为**
+
+- **原始数据一个都不删**。跟手工那套「就地删掉没用的配对」不同，这里是新建一个暂存
+  目录 `data/_upload/<日期>`，把要传的文件放进去（同一块盘上用硬链接，不占额外空间、
+  也不用真拷几十 G），传完 NAS 再把暂存删掉——删的是链接，原文件原封不动。
+- **绝不碰正在录的数据**。默认只处理昨天；动手前还会确认这个目录确实已经不写了。
+  录制进程和这个脚本是两个互不相干的进程，归档失败也影响不到录制。
+- **VPN 断了不算失败**。连不上就记一笔跳过，本地什么都不动。下次运行（或手动
+  `--retry-only`）自动补传，VPN 断几天也不用管。日志末尾和
+  `data/multicam_multiimu/待传到NAS.txt` 会列出还欠哪几天。
+- **不会重复覆盖**。传之前先扫 NAS 上的同名目录逐个文件比对：
+  一模一样就跳过不重传；只缺几个就补那几个；同名但大小对不上就停手报出来，
+  确认无误后 `FORCE_OVERWRITE=1` 才会覆盖。
+- 日志在 `logs/daily_archive_<日期>.log`。
+
+要传哪些配对改 `KEEP_PAIRS`（默认 `cam1_imu1 cam2_imu2 cam3_imu3 cam1_imu4:csv`，
+写法跟 `cleanup_resampled_pairs.sh` 一样，`:csv` / `:mp4` 表示只要其中一种）。

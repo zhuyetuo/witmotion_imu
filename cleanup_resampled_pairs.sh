@@ -4,7 +4,10 @@
 # 全部删除（比如筛选完标注要用的具体组合后，把没用到的配对清掉省地方）。
 #
 # 用法:
-#   ./cleanup_resampled_pairs.sh <目录> <保留关键字> [<保留关键字> ...]
+#   ./cleanup_resampled_pairs.sh [-y] <目录> <保留关键字> [<保留关键字> ...]
+#
+#   -y / --yes  跳过确认直接删（给 daily_archive.sh 这类自动化脚本用；
+#               手动跑的时候别加，还是让它列出清单等你确认）
 #
 #   每个"保留关键字"默认同时保留 mp4 和 csv；只想留其中一种时加后缀
 #   :mp4 或 :csv。关键字用文件名里的 camX_imuY 片段（子串匹配，不用写全名）。
@@ -17,8 +20,14 @@
 
 set -euo pipefail
 
+ASSUME_YES=0
+if [ "${1:-}" = "-y" ] || [ "${1:-}" = "--yes" ]; then
+    ASSUME_YES=1
+    shift
+fi
+
 if [ "$#" -lt 2 ]; then
-    echo "用法: $0 <目录> <保留关键字> [<保留关键字> ...]"
+    echo "用法: $0 [-y] <目录> <保留关键字> [<保留关键字> ...]"
     echo "例子: $0 data/multicam_multiimu cam1_imu1 cam2_imu2 cam3_imu1:mp4"
     exit 1
 fi
@@ -62,10 +71,14 @@ echo "以下 ${#to_delete[@]} 个文件将被删除:"
 printf '  %s\n' "${to_delete[@]}"
 echo
 
-read -r -p "确认删除以上文件？(y/N) " confirm
-if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
-    echo "已取消，未删除任何文件。"
-    exit 0
+if [ "$ASSUME_YES" = "1" ]; then
+    echo "(-y 已指定，直接删除)"
+else
+    read -r -p "确认删除以上文件？(y/N) " confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        echo "已取消，未删除任何文件。"
+        exit 0
+    fi
 fi
 
 rm -v -- "${to_delete[@]}"
