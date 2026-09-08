@@ -26,6 +26,7 @@
 #   ./daily_archive.sh --today      处理今天（确定已经收工了才用）
 #   ./daily_archive.sh --retry-only 只补传，不处理新的一天
 #   DRY_RUN=1 ./daily_archive.sh    只打印要做什么
+#   ARCHIVE_ENABLED=0 ./daily_archive.sh   关掉，什么都不做（或建 .archive_disabled 文件）
 #
 # 可配置（环境变量，或直接改下面的默认值）：
 #   KEEP_PAIRS   要传的配对，默认 "cam1_imu1 cam2_imu2 cam3_imu3 cam1_imu4:csv"
@@ -47,6 +48,15 @@ SETTLE_MIN="${SETTLE_MIN:-20}"        # 处理"今天"时要求的静默分钟�
 PAST_SETTLE_MIN="${PAST_SETTLE_MIN:-3}"  # 处理过去的日期时（录制早就换目录了）
 DRY_RUN="${DRY_RUN:-0}"
 NAS_PROBE_TIMEOUT="${NAS_PROBE_TIMEOUT:-15}"
+
+# 总开关：这整套自动归档是可选的。不注册任务计划就等于没有它——录制脚本
+# 完全不知道这个文件存在，不 import、不调用、不共享任何状态。已经注册了想临时
+# 关掉，两种办法：设 ARCHIVE_ENABLED=0，或者在仓库根目录建一个 .archive_disabled
+# 文件（不用改任务计划，也不用改代码）。
+if [ "${ARCHIVE_ENABLED:-1}" = "0" ] || [ -f .archive_disabled ]; then
+    echo "每日归档已关闭（ARCHIVE_ENABLED=0 或存在 .archive_disabled），什么都不做"
+    exit 0
+fi
 
 LOG_DIR="${IMU_LOG_DIR:-logs}"
 mkdir -p "$LOG_DIR"
