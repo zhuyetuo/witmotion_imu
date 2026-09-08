@@ -105,12 +105,18 @@ class SharedScanner:
     # 停掉重建。
     STALL_RESTART_S = 90.0
 
+    # 重建之间的最小间隔：四个设备的重连协程可能同时判定"该重建了"，不加冷却
+    # 会连着重建好几次，每次都清空 _seen、动一次蓝牙栈，反而更难恢复。
+    RESTART_COOLDOWN_S = 30.0
+
     def __init__(self, max_age_s: float = 15.0):
         self.max_age_s = max_age_s
         self._seen: dict[str, tuple[object, float]] = {}  # 地址(大写) -> (BLEDevice, 最后见到的时间)
         self._scanner = None
         self.last_detect = time.monotonic()
         self.restarts = 0
+        self._restart_lock = asyncio.Lock()
+        self._last_restart = 0.0
 
     def _on_detect(self, device, _adv_data):
         now = time.monotonic()
@@ -131,6 +137,15 @@ class SharedScanner:
             self._scanner = None
 
     async def restart(self, reason: str):
+        # 同一时刻只允许一个重建在跑；刚重建过就跳过（几个设备会同时来敲门）
+        async with self._restart_lock:
+            since = time.monotonic() - self._last_restart
+            if self._scanner is not None and since < self.RESTART_COOLDOWN_S:
+                return
+            await self._restart_locked(reason)
+
+    async def _restart_locked(self, reason: str):
+        self._last_restart = time.monotonic()
         self.restarts += 1
         print(f'[扫描器] {reason}，重建 BLE 扫描器（第 {self.restarts} 次）')
         await self.stop()
@@ -290,6 +305,24 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
     # 断开事件——表现也是"再也连不上，只能重启命令"。超过这么久没数据就主动
     # 断开重连。WitMotion 正常 50Hz，10 秒没一条肯定不对。
     NO_DATA_TIMEOUT_S = 10.0
+    # 连接握手/订阅必须有超时。BlueZ 和 WinRT 都出现过 connect() 或 start_notify()
+    # 永远不返回、也不抛异常的情况（设备离开一段时间后适配器状态错乱最容易触发）——
+    # 协程就此永久卡死在这一行，外面的重连循环再也不会转，表现就是"信号明明恢复了
+    # 却再也不自动重连，只能重启命令"。这是这个 bug 反复出现的根因。
+    CONNECT_TIMEOUT_S = 20.0
+    SUBSCRIBE_TIMEOUT_S = 10.0
+    # 广播明明收得到、却连不上，连着失败这么多次就说明不是"设备不在"，而是本机
+    # 蓝牙栈/适配器的状态坏了（BlueZ 里残留着旧连接是最常见的），重建扫描器让
+    # 底层重新来过；再不行就按地址连，绕开可能已经陈旧的 BLEDevice 句柄。
+    FAILS_BEFORE_RESCAN = 3
+    FAILS_BEFORE_ADDRESS_MODE = 6
+    # 一直收不到这个设备的广播也要管：设备断开后（比如狗出门遛了半小时），
+    # BlueZ 有时还留着一条陈旧的连接记录，于是根本不再上报它的广播，find()
+    # 永远返回 None，这个循环就静默地每秒空转下去，再也不会重连——这是另一条
+    # 通往"再也连不上"的路。等超过这么久还没广播就重建扫描器让底层重新来过。
+    WAIT_ADVERT_RESCAN_S = 120.0
+    # 重建之后如果还是收不到，就别一直重建（每次重建都要动蓝牙栈），拉长到这个间隔
+    WAIT_ADVERT_RESCAN_MAX_S = 600.0
 
     async def _wait_and_backoff():
         nonlocal backoff
@@ -298,6 +331,10 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
 
     is_mac = bool(_MAC_RE.match(device.ident))
     first_attempt = True
+    fails = 0                       # 连续失败次数（连上一次就清零）
+    waiting_since = time.monotonic()  # 从什么时候开始等这个设备的广播
+    rescan_after = WAIT_ADVERT_RESCAN_S
+    last_report = 0.0
     while not stop_event.is_set():
         # 纯内存查表，不发起任何蓝牙操作，找不到就等1秒再查，可以一直这样
         # 查下去，不管设备缺席多久都不会给蓝牙栈增加负担。
@@ -309,8 +346,24 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
             if first_attempt:
                 print(f'[{device.label}] 等待 WitMotion 设备广播: {device.ident}...')
                 first_attempt = False
+            waited = time.monotonic() - waiting_since
+            # 每 5 分钟报一次还在等，免得看日志以为程序卡死了
+            if waited - last_report >= 300:
+                last_report = waited
+                print(f'[{device.label}] 仍未收到广播，已等待 {waited / 60:.0f} 分钟')
+            if waited >= rescan_after:
+                # 广播收不到不一定是设备的问题，也可能是本机适配器留着陈旧状态
+                await scanner.restart(f'{device.label} 已 {waited / 60:.0f} 分钟收不到广播')
+                waiting_since = time.monotonic()
+                last_report = 0.0
+                rescan_after = min(rescan_after * 2, WAIT_ADVERT_RESCAN_MAX_S)
             await asyncio.sleep(1.0)
             continue
+
+        # 找到广播了，等待计时重新开始
+        waiting_since = time.monotonic()
+        rescan_after = WAIT_ADVERT_RESCAN_S
+        last_report = 0.0
 
         disconnected = asyncio.Event()
 
@@ -318,57 +371,80 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
             disconnected.set()
 
         buf = StreamingByteBuffer()
+        # 连续失败多次之后改用"按地址连"：缓存的 BLEDevice 里带着底层句柄，设备
+        # 离线很久再回来时那个句柄经常已经失效；传地址让 bleak 自己重新解析。
+        target = (device.mac or ble_device.address) if fails >= FAILS_BEFORE_ADDRESS_MODE else ble_device
+        client = BleakClient(target, disconnected_callback=on_disconnect)
         try:
-            async with BleakClient(ble_device, disconnected_callback=on_disconnect) as client:
-                print(f'[{device.label}] WitMotion 已连接: {ble_device.name}  {ble_device.address}')
-                device.mac = ble_device.address
-                subscribed = None
-                for uuid in DEFAULT_NOTIFY_CANDIDATES:
-                    try:
-                        await client.start_notify(uuid, lambda s, d: on_data(s, d, buf))
-                        subscribed = uuid
-                        break
-                    except Exception:
-                        continue
-                if subscribed is None:
-                    print(f'[{device.label}] 订阅 Notify 失败，{backoff:.0f}秒后重试...')
-                    await _wait_and_backoff()
-                    continue
-                print(f'[{device.label}] 已订阅: {subscribed}')
-                backoff = BASE_BACKOFF  # 连上了，重置退避，下次断连从2秒开始重试
-                device.last_sample_ts = time.time()
-                device.connected = True
-                stale = False
-                while not stop_event.is_set() and not disconnected.is_set():
-                    await asyncio.sleep(0.1)
-                    if time.time() - device.last_sample_ts > NO_DATA_TIMEOUT_S:
-                        stale = True
-                        break
-                device.connected = False
-                if stale:
-                    print(f'[{device.label}] 连接未断但 {NO_DATA_TIMEOUT_S:.0f}s 没收到数据（假死），主动断开重连...')
-                    try:
-                        await client.disconnect()
-                    except Exception:
-                        pass
-                    scanner.evict(ble_device.address)
-                    continue
-                if disconnected.is_set():
-                    print(f'[{device.label}] 连接断开（信号问题），尝试自动重连...')
-                    continue
+            # 整个握手过程都套超时，绝不允许无限期卡住（见 CONNECT_TIMEOUT_S）
+            await asyncio.wait_for(client.connect(), timeout=CONNECT_TIMEOUT_S)
+            print(f'[{device.label}] WitMotion 已连接: {ble_device.name}  {ble_device.address}')
+            device.mac = ble_device.address
+            subscribed = None
+            for uuid in DEFAULT_NOTIFY_CANDIDATES:
                 try:
-                    await client.stop_notify(subscribed)
+                    await asyncio.wait_for(
+                        client.start_notify(uuid, lambda s, d: on_data(s, d, buf)),
+                        timeout=SUBSCRIBE_TIMEOUT_S,
+                    )
+                    subscribed = uuid
+                    break
                 except Exception:
-                    pass
+                    continue
+            if subscribed is None:
+                print(f'[{device.label}] 订阅 Notify 失败，{backoff:.0f}秒后重试...')
+                raise RuntimeError('订阅失败')
+            print(f'[{device.label}] 已订阅: {subscribed}')
+            backoff = BASE_BACKOFF  # 连上了，重置退避，下次断连从2秒开始重试
+            fails = 0
+            device.last_sample_ts = time.time()
+            device.connected = True
+            stale = False
+            while not stop_event.is_set() and not disconnected.is_set():
+                await asyncio.sleep(0.1)
+                if time.time() - device.last_sample_ts > NO_DATA_TIMEOUT_S:
+                    stale = True
+                    break
+            device.connected = False
+            if stale:
+                print(f'[{device.label}] 连接未断但 {NO_DATA_TIMEOUT_S:.0f}s 没收到数据（假死），主动断开重连...')
+                scanner.evict(ble_device.address)
+                continue
+            if disconnected.is_set():
+                print(f'[{device.label}] 连接断开（信号问题），尝试自动重连...')
+                continue
+        except asyncio.TimeoutError:
+            if stop_event.is_set():
+                break
+            device.connected = False
+            fails += 1
+            scanner.evict(ble_device.address)
+            print(f'[{device.label}] 连接/订阅超时（第 {fails} 次），{backoff:.0f}秒后重试...')
+            if fails == FAILS_BEFORE_RESCAN:
+                await scanner.restart(f'{device.label} 广播收得到但连不上')
+            await _wait_and_backoff()
+            continue
         except Exception as e:
             if stop_event.is_set():
                 break
+            device.connected = False
+            fails += 1
             # 用缓存的设备对象连不上，把它从扫描器缓存里踢掉，等一条新广播拿新对象
             # 再试——离线很久又回来的设备，旧对象里的句柄经常已经失效
             scanner.evict(ble_device.address)
-            print(f'[{device.label}] 连接异常: {e}，{backoff:.0f}秒后重试...')
+            print(f'[{device.label}] 连接异常: {e}（第 {fails} 次），{backoff:.0f}秒后重试...')
+            if fails == FAILS_BEFORE_RESCAN:
+                await scanner.restart(f'{device.label} 广播收得到但连不上')
             await _wait_and_backoff()
             continue
+        finally:
+            # 不管怎么退出这一轮，都要确保底层连接被释放：残留的半开连接会让
+            # BlueZ 认为设备还连着，下一次 connect 直接失败或者卡住
+            device.connected = False
+            try:
+                await asyncio.wait_for(client.disconnect(), timeout=5.0)
+            except Exception:
+                pass
         break
     print(f'[{device.label}] WitMotion 已断开')
 
