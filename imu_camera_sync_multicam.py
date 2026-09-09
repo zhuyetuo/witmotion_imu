@@ -131,11 +131,57 @@ class CameraStream:
         if self.need_resize:
             print(f'{self.label}: 采集 {driver_w}x{driver_h} → 缩放输出 {self.actual_w}x{self.actual_h}')
 
+    def start_reader(self):
+        """
+        起一个后台线程一直读这路摄像头，主循环只取"最新的一帧"。
+
+        为什么必须这样：cap.read() 会阻塞等下一帧到来。六路串行读，就是六次等待
+        叠加——现场实测每个 tick 光"读摄像头"就 90ms，占了 144ms 总耗时的 62%，
+        帧率被压到 7fps（目标 25）。而这 90ms 不是 CPU 在算，纯粹是在排队等。
+
+        还有个更隐蔽的后果：串行读意味着同一个 tick 里 cam1 和 cam6 的画面差了
+        将近 90ms。多机位同步采集的意义就在于"同一时刻各个角度"，差 90ms 等于
+        这个前提本身不成立。各读各的之后，每路都是自己最新的一帧，偏差降到
+        一帧以内。
+        """
+        self._latest = (False, None)
+        self._latest_lock = threading.Lock()
+        self._cap_lock = threading.Lock()
+        self._reader_stop = threading.Event()
+        self._reader = threading.Thread(target=self._reader_loop, daemon=True)
+        self._reader.start()
+
+    def stop_reader(self):
+        if getattr(self, '_reader', None) is not None:
+            self._reader_stop.set()
+            self._reader.join(timeout=2.0)
+            self._reader = None
+
+    def _reader_loop(self):
+        while not self._reader_stop.is_set():
+            with self._cap_lock:
+                cap = self.cap
+            try:
+                ret, frame = cap.read()
+            except Exception:  # noqa: BLE001 驱动层什么都可能抛，交给上面的重连逻辑
+                ret, frame = False, None
+            if ret and self.need_resize:
+                frame = cv2.resize(frame, (self.actual_w, self.actual_h))
+            with self._latest_lock:
+                self._latest = (ret, frame)
+            if not ret:
+                # 读失败就别空转烧 CPU，等一下让重连逻辑有机会介入
+                time.sleep(0.01)
+
     def read(self):
-        ret, frame = self.cap.read()
-        if ret and self.need_resize:
-            frame = cv2.resize(frame, (self.actual_w, self.actual_h))
-        return ret, frame
+        if getattr(self, '_reader', None) is None:
+            # 没起读取线程（比如 --probe、预热）时保持原来的同步行为
+            ret, frame = self.cap.read()
+            if ret and self.need_resize:
+                frame = cv2.resize(frame, (self.actual_w, self.actual_h))
+            return ret, frame
+        with self._latest_lock:
+            return self._latest
 
     def _placeholder(self, now: float):
         """掉线期间的占位帧：黑底 + 提示文字，写进视频保持帧数对齐，画面上也一眼能看出这路断了。"""
@@ -168,7 +214,17 @@ class CameraStream:
         except Exception as e:  # noqa: BLE001 驱动层什么异常都可能抛，重连失败就下次再试
             print(f'{self.label} 重连异常: {e}')
             return False
-        self.cap = cap
+        # 换 cap 要加锁：读取线程可能正拿着旧的那个
+        old = self.cap
+        if getattr(self, '_cap_lock', None) is not None:
+            with self._cap_lock:
+                self.cap = cap
+        else:
+            self.cap = cap
+        try:
+            old.release()
+        except Exception:  # noqa: BLE001
+            pass
         self._after_open()
         print(f'{self.label} 已重新连上（断了 {_fmt_duration(self.down_seconds(now))}）')
         self.down = False
@@ -410,6 +466,11 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice], pai
         imu_report = '  '.join(f'{d.label}={d.current_hz():.1f}Hz' for d in devices)
         print(f'预热结束: {cam_report}  {imu_report}')
 
+    # 预热用同步读（要现场测每路的真实 fps），预热完再切到后台读取线程。
+    # 从这里开始主循环拿的是"每路最新的一帧"，不再挨个等。
+    for cam in cameras:
+        cam.start_reader()
+
     try:
         segment_no = 0
         while True:
@@ -433,6 +494,7 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice], pai
     finally:
         stop_event.set()
         for cam in cameras:
+            cam.stop_reader()
             cam.release()
         try:
             cv2.destroyAllWindows()
