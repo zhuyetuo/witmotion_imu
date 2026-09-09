@@ -74,15 +74,21 @@ if [ -n "$SITE" ]; then
         ls sites/*.env 2>/dev/null | sed 's|^|  |' || echo "  （一个都没有）"
         exit 1
     fi
-    # 场地文件里是直接赋值（IMUS="..."），source 之后会盖掉命令行上传进来的同名
-    # 变量。想要的是反过来：文件当底、命令行临时覆盖。所以先把命令行给的存一份，
-    # source 完再放回去。
-    for _v in IMUS IMU_IDS DEVICES DOG_NAMES CAMS PAIRS EXTRA_ARGS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
+    # 场地文件里是直接赋值（IMUS="..."），source 之后会盖掉命令行传进来的同名
+    # 变量。想要的是反过来：文件当底、命令行临时覆盖。所以先存一份，source 完
+    # 再放回去。
+    #
+    # 要存哪些变量，从文件里现读，不写死清单——写死过一次，结果 WARMUP_SEC、
+    # CAPTURE_WIDTH 这些后来加进场地文件的项不在清单里，命令行传了也盖不上，
+    # 而且完全没有提示。清单和文件内容早晚会走岔，让它自己去看就不会。
+    _site_vars="$(grep -oE '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' "$site_file" \
+                  | tr -d ' \t=' | sort -u)"
+    for _v in $_site_vars; do
         eval "_saved_$_v=\${$_v:-}"
     done
     # shellcheck disable=SC1090
     . "$site_file"
-    for _v in IMUS IMU_IDS DEVICES DOG_NAMES CAMS PAIRS EXTRA_ARGS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
+    for _v in $_site_vars; do
         eval "_s=\$_saved_$_v"
         [ -n "$_s" ] && eval "$_v=\$_s"
     done
@@ -211,13 +217,27 @@ case "$RESAMPLE_MODE" in
     *) echo "RESAMPLE_MODE 只能是 only/none/both，收到的是: $RESAMPLE_MODE"; exit 1 ;;
 esac
 
+# DURATION：只录这么多秒然后正常结束（用来验证，跑完会走完整的收尾流程：
+# 对齐校验、生成配对文件、ffmpeg 正常写完索引）。
+# 不设就是默认的"按整点切分、一直循环录"。
+#   DURATION=60 SITE=狗场 ./record_multicam.sh
+DURATION="${DURATION:-}"
+if [ -n "$DURATION" ]; then
+    # 定时和"按整点切"是互斥的：--align-hourly 会把每段的时长改成"到下一个
+    # 整点还剩多久"，那样 --duration 根本不起作用
+    segment_args=(--duration "$DURATION")
+    echo "定时录制：$DURATION 秒后正常结束（不按整点切分、不循环）"
+else
+    segment_args=(--align-hourly --loop)
+fi
+
 python imu_camera_sync_multicam.py \
     "${imu_args[@]}" "${imu_label_args[@]+"${imu_label_args[@]}"}" "${dog_name_args[@]}" \
-    --align-hourly --resample-hz "$RESAMPLE_HZ" \
+    "${segment_args[@]}" --resample-hz "$RESAMPLE_HZ" \
     "${cam_args[@]}" "${pair_args[@]+"${pair_args[@]}"}" \
     --width "$WIDTH" --height "$HEIGHT" \
     --capture-width "$CAPTURE_WIDTH" --capture-height "$CAPTURE_HEIGHT" \
-    --loop "${resample_flag[@]}" --out-dir "$OUT_DIR" \
+    "${resample_flag[@]}" --out-dir "$OUT_DIR" \
     --warmup-sec "$WARMUP_SEC" --cam-fps "$CAM_FPS" \
     --reconnect-max-backoff "$RECONNECT_MAX_BACKOFF" \
     $EXTRA_ARGS
