@@ -60,6 +60,20 @@ SITE="${SITE:-}"
 if [ -z "$SITE" ] && [ -f "sites/.current" ]; then
     SITE="$(tr -d '\r\n ' < sites/.current)"
 fi
+# SITE 可以写 ASCII 别名（gouchang / yingpeng），跟中文场地名等价。
+# 别名登记在场地文件自己的 SITE_ALIAS= 里，这里现扫，不写死对照表——写死的
+# 清单跟文件内容早晚走岔（EXTRA_ARGS 那次就是）。
+# 为什么需要：install_autostart.bat 是 .bat，cmd 按字节读 .bat，里面出现中文
+# 早晚出乱子（setup_windows.bat 栽过一次）。有了别名，.bat 全程只碰 ASCII。
+if [ -n "$SITE" ] && [ ! -f "sites/${SITE}.env" ]; then
+    for _f in sites/*.env; do
+        [ -f "$_f" ] || continue
+        if grep -q "^[[:space:]]*SITE_ALIAS=[\"']\?${SITE}[\"']\?[[:space:]]*\$" "$_f"; then
+            SITE="$(basename "$_f" .env)"
+            break
+        fi
+    done
+fi
 if [ -n "$SITE" ] && [ -f "sites/${SITE}.env" ]; then
     _saved_keep="${KEEP_PAIRS:-}"
     # shellcheck disable=SC1090
