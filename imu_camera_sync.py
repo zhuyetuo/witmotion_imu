@@ -660,6 +660,7 @@ def _ffmpeg_has_encoder(name: str) -> bool:
 
 
 class _FfmpegVfrSink:
+    _encoder_reported = False   # 只在第一路摄像头时打印一次用了哪个编码器
     """
     通过管道把每一帧实时喂给 ffmpeg，用 -use_wallclock_as_timestamps 1 让
     ffmpeg 把每帧的 PTS 直接记录为写入那一刻的真实系统时间（可变帧率 VFR）。
@@ -676,17 +677,40 @@ class _FfmpegVfrSink:
         # 注意：ffmpeg 的编码器名是 mpeg4（写出的 fourcc 才是 mp4v），
         # 不存在名为 "mp4v" 的编码器，写错会导致 ffmpeg 直接报错退出、
         # 输出文件为空/损坏，且之前 stderr=DEVNULL 会把报错吞掉不可见。
-        if _ffmpeg_has_encoder('libx264'):
+        # 编码器优先级：核显硬编 > libx264 > mpeg4。
+        # 可以用环境变量 VIDEO_ENCODER 强制指定（qsv / nvenc / x264 / mpeg4），
+        # 硬编在某些驱动上会出怪问题，出事时要能一句话切回软编。
+        #
+        # 为什么要硬编：六路 720p 同时软编（libx264）在 6 核的机器上就是压满，
+        # 而现场那台是 i5-10400 + Intel UHD 630——UHD 630 带 Quick Sync，
+        # 同时编六路 720p 对它是小事，还把 CPU 整个让出来给采集和叠加。
+        #
+        # 输出像素格式要跟着编码器走：QSV 要 nv12，软编用 yuv420p。给错的话
+        # ffmpeg 会插一次多余的格式转换，白花 CPU（甚至直接报错退出）。
+        want = os.environ.get('VIDEO_ENCODER', 'auto').strip().lower()
+        pix_fmt = 'yuv420p'
+        if want in ('auto', 'qsv') and _ffmpeg_has_encoder('h264_qsv'):
+            # global_quality 跟 crf 是同一个意思（数越小越好），量级也接近
+            codec_args = ['-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', str(crf)]
+            pix_fmt = 'nv12'
+        elif want in ('auto', 'nvenc') and _ffmpeg_has_encoder('h264_nvenc'):
+            codec_args = ['-c:v', 'h264_nvenc', '-preset', 'p4', '-cq', str(crf)]
+        elif want in ('auto', 'qsv', 'nvenc', 'x264') and _ffmpeg_has_encoder('libx264'):
             codec_args = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(crf)]
         else:
             codec_args = ['-c:v', 'mpeg4', '-q:v', '3']
+        if not _FfmpegVfrSink._encoder_reported:
+            _FfmpegVfrSink._encoder_reported = True
+            print(f'视频编码器: {codec_args[1]}'
+                  + ('（核显硬编，CPU 让给采集）' if 'qsv' in codec_args[1] or 'nvenc' in codec_args[1] else '（软编，吃 CPU）')
+                  + '  —— 想换用 VIDEO_ENCODER=qsv/nvenc/x264/mpeg4')
         self.proc = subprocess.Popen(
             [
                 'ffmpeg', '-y', '-loglevel', 'error',
                 '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-s', f'{width}x{height}',
                 '-use_wallclock_as_timestamps', '1',
                 '-i', '-',
-                *codec_args, '-pix_fmt', 'yuv420p', '-vsync', 'vfr',
+                *codec_args, '-pix_fmt', pix_fmt, '-vsync', 'vfr',
                 path,
             ],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
