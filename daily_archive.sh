@@ -105,7 +105,10 @@ NAS_DEST="${NAS_DEST:-//192.168.2.249/ai_data/data_raw}"
 #
 # 注意：这只影响以后传的。NAS 上已经有的那些不带后缀的日期目录原地不动，
 # 平台扫描用的是 os.walk（递归），新旧两种目录名都能扫到，不用改后端。
-NAS_DAY_SUFFIX="${NAS_DAY_SUFFIX-}"
+# 兼容：这一项以前叫 NAS_DAY_SUFFIX，只作用在 NAS 上。现在本地目录也带同一个
+# 后缀（record_multicam.sh 建目录时就带上了），NAS 那边直接照搬本地目录名——
+# 少一处拼接就少一处能拼错的地方。老名字继续认。
+DAY_SUFFIX="${DAY_SUFFIX-${NAS_DAY_SUFFIX-}}"
 DATA_DIR="${DATA_DIR:-data/multicam_multiimu}"
 STAGE_ROOT="${STAGE_ROOT:-data/_upload}"
 SETTLE_MIN="${SETTLE_MIN:-20}"        # 处理"今天"时要求的静默分钟数
@@ -129,15 +132,27 @@ say() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$LOG_FILE"; }
 
 # 后缀要落到 NAS 的目录名上，只放行 ASCII 字母数字和 _ -。挡在这里而不是
 # "尽力而为地传上去"：一个乱码目录名传完了才发现，比不传更难收拾。
-case "$NAS_DAY_SUFFIX" in
+case "$DAY_SUFFIX" in
     *[!A-Za-z0-9_-]*)
-        say "⚠ NAS_DAY_SUFFIX=\"$NAS_DAY_SUFFIX\" 有非 ASCII 或特殊字符，已忽略（只认 A-Z a-z 0-9 _ -）"
-        NAS_DAY_SUFFIX=""
+        say "⚠ DAY_SUFFIX=\"$DAY_SUFFIX\" 有非 ASCII 或特殊字符，已忽略（只认 A-Z a-z 0-9 _ -）"
+        DAY_SUFFIX=""
         ;;
 esac
-if [ -z "$NAS_DAY_SUFFIX" ]; then
-    say "提示：没设 NAS_DAY_SUFFIX，NAS 上就是纯日期目录，两个场地会混在一起"
+if [ -z "$DAY_SUFFIX" ]; then
+    say "提示：没设 DAY_SUFFIX，日期目录不带场地后缀，两个场地会混在一起"
 fi
+
+# 一个日期对应的本地目录名。现在录制建的是带后缀的（2026_9_9_gouchang），
+# 但 NAS 上和本地都还留着一批以前不带后缀的目录，补传时要能找到，所以两种都认：
+# 带后缀的存在就用它，否则退回不带后缀的老名字。
+day_dir_for() {
+    local d="$1"
+    if [ -n "$DAY_SUFFIX" ] && [ -d "$DATA_DIR/${d}${DAY_SUFFIX}" ]; then
+        printf '%s' "${d}${DAY_SUFFIX}"
+    else
+        printf '%s' "$d"
+    fi
+}
 
 ARCHIVED=".archived"        # 传完了
 PENDING=".upload_pending"   # 试过但没传成功（NAS 不通/传一半），下次自动重试
@@ -151,7 +166,11 @@ settled() {
     # 早就写到今天那个目录去了，昨天这个不可能再有人写。留几分钟是等最后一个
     # 整点片段落盘。这样任务计划挂在 00:05 这种刚过零点的时间也能正常跑
     # （用 20 分钟的话，昨天 23:59 写完的文件会把整个流程挡住）
-    [ "$day" = "$(date +%Y_%-m_%-d)" ] || mins="$PAST_SETTLE_MIN"
+    # 目录名现在可能带场地后缀（2026_9_9_gouchang）；老数据不带，两种都算"今天"
+    case "$day" in
+        "$(date +%Y_%-m_%-d)"|"$(date +%Y_%-m_%-d)$DAY_SUFFIX") ;;
+        *) mins="$PAST_SETTLE_MIN" ;;
+    esac
     # 排除 . 开头的标记文件——.upload_pending / .archived 是这个脚本自己写的，
     # 算进去会把"最近有文件改动"判成真，补传永远被自己挡住
     [ -z "$(find "$dir" -type f ! -name '.*' -newermt "-${mins} minutes" -print -quit 2>/dev/null)" ]
@@ -238,7 +257,7 @@ build_stage() {
 nas_precheck() {
     local day="$1"
     local stage="$STAGE_ROOT/$day"
-    local dest="$NAS_DEST/${day}${NAS_DAY_SUFFIX}"
+    local dest="$NAS_DEST/$day"
 
     PRECHECK=go
     if [ ! -d "$dest" ]; then
@@ -279,7 +298,7 @@ nas_precheck() {
 sync_stage() {
     local day="$1"
     local stage="$STAGE_ROOT/$day"
-    local dest="$NAS_DEST/${day}${NAS_DAY_SUFFIX}"
+    local dest="$NAS_DEST/$day"
     local n_local rc
     n_local=$(find "$stage" -maxdepth 1 -type f ! -name '.*' | wc -l)
 
@@ -336,7 +355,7 @@ process_day() {
         for f in "$src"/*; do
             [ -f "$f" ] && want_file "$(basename "$f")" && n=$((n + 1))
         done
-        say "  (DRY_RUN) 会把 $n 个文件放进 $stage 再传到 $NAS_DEST/${day}${NAS_DAY_SUFFIX}，原始数据不动"
+        say "  (DRY_RUN) 会把 $n 个文件放进 $stage 再传到 $NAS_DEST/$day，原始数据不动"
         return 0
     fi
 
@@ -369,7 +388,7 @@ process_day() {
         # 传完了才删暂存——删的是硬链接，原始数据一个不少
         rm -rf "$stage"
         rm -f "$src/$PENDING"
-        echo "$(date '+%Y-%m-%d %H:%M:%S') 已传到 $NAS_DEST/${day}${NAS_DAY_SUFFIX}" > "$src/$ARCHIVED"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') 已传到 $NAS_DEST/$day" > "$src/$ARCHIVED"
         say "  ✓ 暂存已清理，原始数据原样保留在 $src"
         return 0
     fi
@@ -383,8 +402,8 @@ RETRY_ONLY=0
 DAY=""
 case "${1:-}" in
     --retry-only) RETRY_ONLY=1 ;;
-    --today)      DAY="$(date +%Y_%-m_%-d)" ;;
-    "")           DAY="$(date -d 'yesterday' +%Y_%-m_%-d)" ;;   # 今天还在录，不动
+    --today)      DAY="$(day_dir_for "$(date +%Y_%-m_%-d)")" ;;
+    "")           DAY="$(day_dir_for "$(date -d 'yesterday' +%Y_%-m_%-d)")" ;;   # 今天还在录，不动
     *)            DAY="$1" ;;
 esac
 

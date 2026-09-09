@@ -595,9 +595,12 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
     ts_tag = now_dt.strftime('%Y%m%d_%H%M%S%f')[:-3]
     # 按录制开始那天新建一个日期子文件夹（2026_7_18 这种格式，不补零），
     # 方便按天整理/归档，不用每天手动建目录或者在一堆文件里翻日期。
-    day_dir = f'{now_dt.year}_{now_dt.month}_{now_dt.day}'
+    day_dir = f'{now_dt.year}_{now_dt.month}_{now_dt.day}{args.day_suffix}'
     out_dir = os.path.join(args.out_dir, day_dir)
-    os.makedirs(out_dir, exist_ok=True)
+    # 调试模式（既没有 --duration 也没有 --align-hourly）什么都不写，就别建空目录了：
+    # 每调一次留一个空的 2026_9_9_gouchang，归档扫目录时还得挨个判断
+    if record_mode:
+        os.makedirs(out_dir, exist_ok=True)
     base = os.path.join(out_dir, f'multicam_{ts_tag}')
 
     csv_file = meta_file = None
@@ -1112,6 +1115,13 @@ def main():
     ap.add_argument('--no-precheck', action='store_true',
                     help='跳过开录前的设备预检。预检是为了避免"参数写错→录一整天空 CSV"，'
                          '只有确认设备稍后才会上线之类的特殊情况才该关掉')
+    ap.add_argument('--day-suffix', default='',
+                    help='按天分的子目录名后面加这个后缀，比如 --day-suffix _gouchang 就是 '
+                         '2026_9_9_gouchang。\n'
+                         '为什么要有：两个场地各自往同一个 NAS 传，日期目录是同一个，一个 '
+                         '2026_9_9 里混着两个场地的东西，想确认某个场地今天录全了没有只能自己'
+                         '按 imu 号挑。本地目录带上后缀之后，NAS 那边直接照搬同名目录，'
+                         '少一处拼接就少一处能拼错的地方。只认 A-Z a-z 0-9 _ -。')
     ap.add_argument('--probe', action='store_true',
                     help='只探测硬件能力（每路摄像头 + 各IMU设备当前实际输出频率），不录制，探测完直接退出')
     args = ap.parse_args()
@@ -1121,6 +1131,13 @@ def main():
     log_path = log_setup.setup(prefix='record_multicam')
     print(f'[日志] 本次输出同时写入: {log_path}')
 
+
+    if args.day_suffix and not re.fullmatch(r'[A-Za-z0-9_-]+', args.day_suffix):
+        # 这个后缀最终要落到 NAS 的目录名上，穿过 cygpath -w → robocopy → SMB →
+        # 后端容器的挂载点。中间任何一环编码没对齐就是个乱码目录，而且几天后才会
+        # 从平台上样本数不对发现。挡在建目录之前比事后收拾容易。
+        print(f'--day-suffix 只能用 A-Z a-z 0-9 _ -，收到: {args.day_suffix!r}')
+        sys.exit(1)
 
     if args.resample_only and args.no_resample:
         print('--resample-only 和 --no-resample 互斥（一个是"只留降采样版"，一个是"只留原始版"），只能选一个。')

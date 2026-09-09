@@ -7,6 +7,7 @@
 #   SITE=狗场 ./record_multicam.sh
 #
 #   PREVIEW=0 SITE=狗场 ./record_multicam.sh   ← 起手不开预览窗口
+#   DEBUG=1   SITE=狗场 ./record_multicam.sh   ← 只看画面，什么都不存
 #
 # SITE 会去读 sites/<名字>.env，那里写死了这个场地的设备 MAC、狗名、摄像头路数。
 # 为什么要有它：这个脚本原来的默认值是 IMUS="wit=WT901BLE68 wit=WTSDCL"、
@@ -280,8 +281,40 @@ esac
 # 对齐校验、生成配对文件、ffmpeg 正常写完索引）。
 # 不设就是默认的"按整点切分、一直循环录"。
 #   DURATION=60 SITE=狗场 ./record_multicam.sh
+# DAY_SUFFIX：按天分的目录名后缀，2026_9_9 → 2026_9_9_gouchang。
+# 写在场地配置里（老名字 NAS_DAY_SUFFIX 继续认）。两个场地各自往同一个 NAS 传，
+# 日期目录是同一个，混在一起就没法一眼看出某个场地今天录全了没有。
+# 本地目录就带上后缀，NAS 那边照搬同名目录，少一处拼接少一处能拼错的地方。
+DAY_SUFFIX="${DAY_SUFFIX:-${NAS_DAY_SUFFIX:-}}"
+
+# DEBUG：调试模式，什么都不存，只开画面。
+#   DEBUG=1 SITE=狗场 ./record_multicam.sh
+#
+# 用来干一件具体的事：认清楚系统里的「摄像头 0」是哪个单间。画面上有 camN、
+# 配对的狗名、imu 编号和实时 Hz，对着屏幕数一遍就知道谁是谁——这件事光看
+# --probe 的能力表是看不出来的，那里面没有画面。
+#
+# 为什么要单独一个模式而不是"录一段再删"：调试要反复开关，每次都在硬盘上留一
+# 段 720p 视频和一堆 CSV，还会污染归档目录（归档是按目录扫的）。
+# 底层脚本不给 --duration 也不给 --align-hourly 时本来就不写任何文件，
+# 这里只是把它接出来，顺便强制开预览、跳过 45 秒预热（调试等不起）。
+DEBUG="${DEBUG:-0}"
+case "$(echo "$DEBUG" | tr 'A-Z' 'a-z')" in
+    1|yes|on|true|y) DEBUG=1 ;;
+    0|no|off|false|n) DEBUG=0 ;;
+    *) echo "DEBUG 只认 0/1（或 on/off、yes/no），收到: $DEBUG"; exit 1 ;;
+esac
+
 DURATION="${DURATION:-}"
-if [ -n "$DURATION" ]; then
+if [ "$DEBUG" = "1" ]; then
+    # 不传 --duration 也不传 --align-hourly = 只预览不落盘
+    segment_args=()
+    WARMUP_SEC="0"
+    EXTRA_ARGS="${EXTRA_ARGS//--no-preview/}"   # 调试就是要看画面，PREVIEW=0 也不作数
+    _preview_say="开（调试模式强制）"
+    echo "调试模式：不保存任何文件，只开画面。按 q + 回车 或 Ctrl-C 退出。"
+    echo "  画面上每路都写着 camN + 配对的狗名 + imu 编号 + 实时 Hz，对着屏幕认一遍就行。"
+elif [ -n "$DURATION" ]; then
     # 定时和"按整点切"是互斥的：--align-hourly 会把每段的时长改成"到下一个
     # 整点还剩多久"，那样 --duration 根本不起作用
     segment_args=(--duration "$DURATION")
@@ -321,5 +354,6 @@ python imu_camera_sync_multicam.py \
     --capture-width "$CAPTURE_WIDTH" --capture-height "$CAPTURE_HEIGHT" \
     "${resample_flag[@]}" --out-dir "$OUT_DIR" \
     --warmup-sec "$WARMUP_SEC" --cam-fps "$CAM_FPS" \
+    --day-suffix "$DAY_SUFFIX" \
     --reconnect-max-backoff "$RECONNECT_MAX_BACKOFF" \
     $EXTRA_ARGS
