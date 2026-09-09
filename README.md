@@ -879,6 +879,52 @@ logs/record_multicam_2026-09-08.log
 BLE 断连、扫描器重建、摄像头掉线这些都在里面，出问题直接翻日志，不用再靠回忆
 终端里滚过去的内容。环境变量 `IMU_LOG_DIR` 换目录、`IMU_LOG_KEEP_DAYS` 改保留天数。
 
+## 现场无人值守：装一次，之后不用管
+
+前面「录制」和「归档」是分开的两条命令，验证阶段那样跑没问题。真正在场地上应该是
+一条都不用敲：开机自己开始录，每天半夜自己传 NAS。
+
+**一台机器装一次**（管理员，双击也行，它自己会提权）：
+
+```
+install_autostart.bat gouchang      REM 狗场
+install_autostart.bat yingpeng      REM 影棚
+install_autostart.bat /uninstall    REM 撤掉
+```
+
+它做三件事：把场地记进 `sites/.current`、注册「登录时开始录制」、注册「每天 00:05 归档」。
+
+**还有一步得手动做**：让机器开机自动登录（`Win+R` → `netplwiz` → 取消勾选「要使用本
+计算机，用户必须输入用户名和密码」）。停电恢复之后，机器自己开机、自己登录、自己开始
+录，现场没人也能接上——这是无人值守的关键一步，不做的话停电就等于停到有人去点开机。
+
+**为什么是「登录时」而不是「开机时」**：USB 摄像头和蓝牙栈都要走交互式桌面会话，
+在没人登录的 session 0 里两样都开不可靠。所以用自动登录把会话顶起来，再在会话里启动。
+
+**录制不需要每天重启**：`--align-hourly --loop` 是一小时一个文件、跨天自动换目录，
+一次启动能跑几个月。`record_autostart.bat` 在外面又包了一层：进程崩了（USB 掉线、
+蓝牙栈卡死）等 30 秒自动重开，不会出现凌晨三点停了、第二天早上才发现。
+
+**自动跑的时候不开预览窗口**（`--no-preview`）：没人坐在那儿按 `p`，六个 720p 窗口
+白白吃掉四成帧率。要看画面就手动跑一次 `SITE=狗场 ./record_multicam.sh`。
+
+**想暂时停掉**，不用动任务计划：在仓库根目录建一个空的 `.recording_disabled` 文件，
+再把正在跑的 python 结束掉；删掉这个文件就恢复。归档那边同理是 `.archive_disabled`。
+
+**一台机器只准跑一份**：`record_multicam.sh` 会写 `.recording.lock`，已经有一份活着
+就拒绝启动。两份抢同一批摄像头和同一个蓝牙适配器，结果不是干脆报错，而是两边都断
+断续续地录——文件都在、都能播，缺帧要对着 `meta.csv` 数才看得出来。
+
+**常用检查**：
+
+```
+schtasks /Run   /TN "IMU record"    REM 不重启，现在就开始录
+schtasks /Query /TN "IMU record"    REM 在不在跑
+type logs\record_autostart.log      REM 崩过几次
+```
+
+日志都在 `logs/`。
+
 ## 每天自动归档到 NAS
 
 `daily_archive.sh` 把收工后的两步（挑文件、传 NAS）串起来，挂到 Windows 任务计划里

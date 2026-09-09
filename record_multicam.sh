@@ -81,6 +81,20 @@ SITE="${SITE:-}"
 if [ -z "$SITE" ] && [ -f "sites/.current" ]; then
     SITE="$(tr -d '\r\n ' < sites/.current)"
 fi
+# SITE 可以写 ASCII 别名（gouchang / yingpeng），跟中文场地名等价。
+# 别名登记在场地文件自己的 SITE_ALIAS= 里，这里现扫，不写死对照表——写死的
+# 清单跟文件内容早晚走岔（EXTRA_ARGS 那次就是）。
+# 为什么需要：install_autostart.bat 是 .bat，cmd 按字节读 .bat，里面出现中文
+# 早晚出乱子（setup_windows.bat 栽过一次）。有了别名，.bat 全程只碰 ASCII。
+if [ -n "$SITE" ] && [ ! -f "sites/${SITE}.env" ]; then
+    for _f in sites/*.env; do
+        [ -f "$_f" ] || continue
+        if grep -q "^[[:space:]]*SITE_ALIAS=[\"']\?${SITE}[\"']\?[[:space:]]*\$" "$_f"; then
+            SITE="$(basename "$_f" .env)"
+            break
+        fi
+    done
+fi
 if [ -n "$SITE" ]; then
     site_file="sites/${SITE}.env"
     if [ ! -f "$site_file" ]; then
@@ -218,6 +232,12 @@ done
 # 故意不加引号展开（下面 $EXTRA_ARGS 按空格分词），这样能一次传多个。
 EXTRA_ARGS="${EXTRA_ARGS:-}"
 
+# EXTRA_ARGS_APPEND：在场地配置的 EXTRA_ARGS 后面再追加，而不是把它替换掉。
+# 给 record_autostart.bat 用的——它要强制加 --no-preview（开机自动跑的时候
+# 没人坐在那儿按 p，六个窗口白白吃掉四成帧率）。用 EXTRA_ARGS 的话，哪天往
+# 场地配置里加了别的开关就会被它悄悄顶掉，而且是不报错的那种。
+EXTRA_ARGS="$EXTRA_ARGS ${EXTRA_ARGS_APPEND:-}"
+
 PAIRS="${PAIRS:-}"
 pair_args=()
 for pr in $PAIRS; do
@@ -250,6 +270,28 @@ if [ -n "$DURATION" ]; then
 else
     segment_args=(--align-hourly --loop)
 fi
+
+# ── 一台机器只准跑一份 ───────────────────────────────────────────────
+# 自动启动接上之后，"开机自己跑着一份 + 人手又敲一次"是迟早会发生的。两份
+# 抢同一批摄像头和同一个蓝牙适配器，结果不是干脆报错，而是两边都断断续续
+# 地录——文件都在、都能播，缺帧要对着 meta.csv 数才看得出来。
+#
+# 锁文件存的是这个 bash 的 PID，靠 kill -0 判断它还活不活着。进程没了锁文件
+# 还在（断电、任务管理器强杀）不算数，下一次直接接管。
+# 万一 PID 被复用误判了，按提示加 FORCE=1 跳过。
+LOCK=".recording.lock"
+if [ -f "$LOCK" ] && [ "${FORCE:-0}" != "1" ]; then
+    old="$(cat "$LOCK" 2>/dev/null || true)"
+    if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
+        echo "已经有一份录制在跑了（PID $old），这次不启动。" >&2
+        echo "  想停掉它：kill $old" >&2
+        echo "  确认那个 PID 其实已经没了：FORCE=1 SITE=$SITE ./record_multicam.sh" >&2
+        exit 1
+    fi
+    echo "清掉上次没删干净的锁文件（PID ${old:-空} 已经不在了）"
+fi
+echo $$ > "$LOCK"
+trap 'rm -f "$LOCK"' EXIT
 
 python imu_camera_sync_multicam.py \
     "${imu_args[@]}" "${imu_label_args[@]+"${imu_label_args[@]}"}" "${dog_name_args[@]}" \
