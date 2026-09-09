@@ -326,7 +326,21 @@ def _seconds_to_next_hour(now: datetime) -> float:
     return (next_hour - now).total_seconds()
 
 
-def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice]):
+def _pairs_for(cameras, device, pair_filter):
+    """这个设备要跟哪几路摄像头配对。pair_filter 为空 = 全排列（老行为）。
+
+    狗场那种「一间一狗一摄像头」的场地必须限制：cam_i 和 imu_i 严格一一对应，
+    全排列出来 36 份里 30 份是「A 房间的画面配 B 房间的狗」，纯废文件——而且每份
+    都是一小时的 720p 视频拷贝，磁盘是成倍烧的。
+    影棚那种一个大空间多只狗的场地相反：哪路摄像头拍到哪只狗事先不知道，
+    全排列是有意义的，所以默认不限制。
+    """
+    if not pair_filter:
+        return list(cameras)
+    return [c for c in cameras if (c.label, device.label) in pair_filter]
+
+
+def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice], pair_filter=None):
     target_fps = args.cam_fps
 
     for cam in cameras:
@@ -642,12 +656,12 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 # 度至少有读数），既能让Label Studio图表上显示为一段贴着0的
                 # 平线、不会被误当成真实变化去标注，也方便下游训练代码用一条
                 # "全0→判定缺失，跳过"的简单规则识别，无需处理空值/NaN。
-                print('── --no-resample：不降采样，原始数据按 cam x imu 两两配对（原始文件也保留，时间轴已对齐视频起止）──')
+                print('── --no-resample：不降采样，原始数据按 cam x imu 配对（原始文件也保留，时间轴已对齐视频起止）──')
                 for d in devices:
                     if d.label in dead_devices:
                         print(f'  跳过 {d.label}：整段没有数据，不生成配对文件')
                         continue
-                    for cam in cameras:
+                    for cam in _pairs_for(cameras, d, pair_filter):
                         pair_base = f'{base}_{cam.label}_{d.label}_raw'
                         try:
                             shutil.copyfile(f'{base}_{cam.label}_raw.mp4', f'{pair_base}.mp4')
@@ -671,16 +685,19 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                     # 扩展名）完全一致才能直接拖进 Label Studio 配对，所以第一路摄像头
                     # 直接把降采样结果写到配对文件名下，其余摄像头再从这份结果复制过去
                     # （内容完全相同，只是复制成不同文件名，方便按文件名对拖拽上传）。
-                    first_pair_base = f'{base}_{cameras[0].label}_{d.label}_resampled{args.resample_hz:g}hz'
+                    want = _pairs_for(cameras, d, pair_filter)
+                    if not want:
+                        continue
+                    first_pair_base = f'{base}_{want[0].label}_{d.label}_resampled{args.resample_hz:g}hz'
                     resample_raw_imu(
                         f'{base}_{d.label}_raw.csv', f'{first_pair_base}.csv', args.resample_hz,
                         t_start_ms=first_tick_ts_ms, t_end_ms=last_tick_ts_ms,
                     )
-                    for cam in cameras:
+                    for cam in want:
                         pair_base = f'{base}_{cam.label}_{d.label}_resampled{args.resample_hz:g}hz'
                         try:
                             shutil.copyfile(f'{base}_{cam.label}_raw.mp4', f'{pair_base}.mp4')
-                            if cam is not cameras[0]:
+                            if cam is not want[0]:
                                 shutil.copyfile(f'{first_pair_base}.csv', f'{pair_base}.csv')
                             print(f'  {pair_base}.mp4 / .csv（{cam.label} 视频 + {d.label} 降采样数据，'
                                   f'文件名一致可直接拖拽配对）')
@@ -812,6 +829,13 @@ def main():
                          '（12:00→13:00→14:00...），配合 --loop 就能一直按小时切文件。跟 --duration 是'
                          '二选一：加了这个参数 --duration 会被忽略；不加这个参数，--duration 的固定秒数'
                          '用法完全不受影响。')
+    ap.add_argument('--pair', action='append', default=[], metavar='camN:imuM',
+                    help='只生成这些 cam x imu 配对，可重复传，例如 --pair cam1:imu1 --pair cam2:imu2。'
+                         '不传就按老规矩全排列。'
+                         '狗场那种「一间一狗一摄像头」的场地必须用它：cam_i 和 imu_i 是严格一一对应，'
+                         '全排列出来 30/36 都是「A 房间的画面配 B 房间的狗」，纯废文件，还成倍占磁盘。'
+                         '影棚那种一个大空间多只狗的场地不要传：哪路摄像头拍到哪只狗事先不知道，'
+                         '全排列是有意义的')
     ap.add_argument('--no-precheck', action='store_true',
                     help='跳过开录前的设备预检。预检是为了避免"参数写错→录一整天空 CSV"，'
                          '只有确认设备稍后才会上线之类的特殊情况才该关掉')
@@ -842,6 +866,26 @@ def main():
     if args.probe:
         run_probe(args, args.camera, devices)
         return
+
+    # --pair 解析成 {(cam标签, imu标签)} 的集合；空集合 = 不限制、全排列
+    pair_filter = set()
+    for spec in args.pair:
+        if ':' not in spec:
+            print(f'--pair 格式应为 camN:imuM，收到: {spec!r}')
+            sys.exit(1)
+        c, i = spec.split(':', 1)
+        pair_filter.add((c.strip().lower(), i.strip().lower()))
+    if pair_filter:
+        # 写错了要立刻报，别等录完一小时才发现一个配对文件都没生成
+        cam_labels = {f'cam{n}' for n in range(1, len(args.camera) + 1)}
+        imu_labels = {f'imu{n}' for n in range(1, len(args.imu) + 1)}
+        bad = [f'{c}:{i}' for c, i in sorted(pair_filter)
+               if c not in cam_labels or i not in imu_labels]
+        if bad:
+            print(f'--pair 里这些配对不存在: {", ".join(bad)}')
+            print(f'  可用摄像头: {", ".join(sorted(cam_labels))}')
+            print(f'  可用设备:   {", ".join(sorted(imu_labels))}')
+            sys.exit(1)
 
     # 设备没到齐就别开录：录一整天出来 IMU 全是空 CSV，那一天补不回来。
     # 只在开录前拦一次，录起来之后掉线还是照常自动重连（狗跑远了要能恢复）。
@@ -883,7 +927,7 @@ def main():
         print('等待 BLE 连接中...')
         time.sleep(2.0)
 
-    run_cameras(args, cameras, devices)
+    run_cameras(args, cameras, devices, pair_filter)
 
     stop_event.set()
     if t is not None:

@@ -77,12 +77,12 @@ if [ -n "$SITE" ]; then
     # 场地文件里是直接赋值（IMUS="..."），source 之后会盖掉命令行上传进来的同名
     # 变量。想要的是反过来：文件当底、命令行临时覆盖。所以先把命令行给的存一份，
     # source 完再放回去。
-    for _v in IMUS DOG_NAMES CAMS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
+    for _v in IMUS DOG_NAMES CAMS PAIRS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
         eval "_saved_$_v=\${$_v:-}"
     done
     # shellcheck disable=SC1090
     . "$site_file"
-    for _v in IMUS DOG_NAMES CAMS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
+    for _v in IMUS DOG_NAMES CAMS PAIRS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
         eval "_s=\$_saved_$_v"
         [ -n "$_s" ] && eval "$_v=\$_s"
     done
@@ -134,6 +134,17 @@ for idx in $CAMS; do
     cam_args+=(--camera "$idx")
 done
 
+# PAIRS：只生成这些 cam x imu 配对。留空就是全排列（老行为）。
+# 一间一狗一摄像头的场地（狗场）必须设：cam_i 和 imu_i 严格一一对应，全排列
+# 出来大半是「A 房间的画面配 B 房间的狗」，纯废文件，而且每份都是一小时的
+# 720p 视频拷贝，磁盘成倍烧。
+# 一个大空间多只狗的场地（影棚）不要设：哪路摄像头拍到哪只狗事先不知道。
+PAIRS="${PAIRS:-}"
+pair_args=()
+for pr in $PAIRS; do
+    pair_args+=(--pair "$pr")
+done
+
 case "$RESAMPLE_MODE" in
     only)
         # 唯一一个会删原始数据的选项，删了不可逆，所以吵一句再走
@@ -150,7 +161,7 @@ esac
 python imu_camera_sync_multicam.py \
     "${imu_args[@]}" "${dog_name_args[@]}" \
     --align-hourly --resample-hz "$RESAMPLE_HZ" \
-    "${cam_args[@]}" \
+    "${cam_args[@]}" "${pair_args[@]+"${pair_args[@]}"}" \
     --width "$WIDTH" --height "$HEIGHT" \
     --capture-width "$CAPTURE_WIDTH" --capture-height "$CAPTURE_HEIGHT" \
     --loop "${resample_flag[@]}" --out-dir "$OUT_DIR" \
