@@ -1,0 +1,15 @@
+# 换行符按文件类型钉死，别靠各人的 git 配置。
+#
+# .bat 必须 CRLF：纯 LF 的批处理 cmd 会解析错乱，表现是注释里的文字被当成命令
+# 去执行（"'所以这一步...' is not recognized as an internal or external command"），
+# 而且只在某些行上翻车，看着完全不像换行符的问题。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# .sh 必须 LF：MSYS/Git Bash 读到 CRLF 会把 \r 当成命令的一部分，
+# 报 "$'\r': command not found"。Windows 上的 core.autocrlf=true 正好会
+# 把它们转成 CRLF，所以这条不能省。
+*.sh text eol=lf
+
+# Python 一律 LF，跨平台一致
+*.py text eol=lf

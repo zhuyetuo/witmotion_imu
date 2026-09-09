@@ -74,11 +74,16 @@ else
     echo "      从清华镜像下载安装包..."
     if curl -fL --retry 3 -o "$TMP/miniconda.exe" \
          "$CONDA_MIRROR/Miniconda3-latest-Windows-x86_64.exe"; then
-        echo "      静默安装到 $CONDA_ROOT ..."
-        # /D 必须放最后而且不能加引号（NSIS 的硬性要求），路径还得是 Windows 风格。
-        # MSYS_NO_PATHCONV=1 是为了 /InstallationType 这些参数不被当成路径翻译。
-        MSYS_NO_PATHCONV=1 cmd //c start //wait "" \
-            "$(cygpath -w "$TMP/miniconda.exe")" \
+        echo "      静默安装到 $(cygpath -w "$CONDA_ROOT") ..."
+        # 直接调 exe，不要套 cmd //c start //wait：
+        # MSYS_NO_PATHCONV=1 会连 // 开头的参数一起放过，于是 //wait 原样传给 cmd，
+        # cmd 不认，后面的参数跟着串位——现场报的是 'egisterPython' is not
+        # recognized，正是 /RegisterPython 被啃掉了开头的 /R。
+        # 而且从 bash 直接执行本来就会等进程退出，不需要 start //wait。
+        #
+        # /D 必须放最后、不能加引号（NSIS 的硬性要求），路径还得是 Windows 风格；
+        # MSYS_NO_PATHCONV=1 是为了 /InstallationType 这些不被当成路径翻译。
+        MSYS_NO_PATHCONV=1 "$TMP/miniconda.exe" \
             /InstallationType=JustMe /AddToPath=1 /RegisterPython=0 /S \
             /D="$(cygpath -w "$CONDA_ROOT")"
     else
@@ -114,7 +119,11 @@ else
         "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"
     do
         echo "      试 $url"
-        if curl -fL --retry 2 --max-time 600 -o "$TMP/ffmpeg.zip" "$url"; then got=1; break; fi
+        # --max-time 放到 40 分钟：现场实测 106MB 只跑到 100KB/s，预计要 16 分钟，
+        # 原来卡 10 分钟必然半途而废，还白下一半。真卡死的情况用 --speed-time/-limit
+        # 兜：连续 60 秒低于 10KB/s 才判失败，比一刀切的总时长合理。
+        if curl -fL --retry 2 --max-time 2400 --speed-time 60 --speed-limit 10240 \
+                -o "$TMP/ffmpeg.zip" "$url"; then got=1; break; fi
         echo "      这个源不行，换下一个"
     done
     if [ -n "$got" ]; then
