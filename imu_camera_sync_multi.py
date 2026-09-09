@@ -80,6 +80,35 @@ stop_event = threading.Event()
 # 任意一个设备来了新样本就 set，用于事件驱动抓帧（--no-imu-sync 可关闭改回固定定时器）
 _new_sample_event = threading.Event()
 
+def _warn_label_mismatch(device, ble_device):
+    """
+    连上之后核对一次：设备广播的名字（WT9、WT11…）跟配置里声明的编号对不对得上。
+
+    为什么值得做：文件名里的 imu 号决定平台把这段数据算到哪只狗身上，而这个号是
+    人在场地配置里填的。填错了没有任何症状——录像照录、数据照写，只是从此以后
+    这只狗的数据都记在别的狗名下，几周后从指标上看出不对时已经没法回溯了。
+    设备名本身就带号，连上就能核，没有理由不核。
+
+    只警告不中断：WT<数字> 这个命名约定不是硬性的（可能有设备没改名，或者用了
+    别的命名法），为这个把整场录制拦下来代价太大。真对不上的时候，日志里这几行
+    就是唯一的线索。
+    """
+    name = (getattr(ble_device, 'name', None) or '').strip()
+    m = re.fullmatch(r'WT(\d+)', name, re.IGNORECASE)
+    if not m:
+        return          # 没按 WT<数字> 命名，核不了，不吭声
+    lbl = re.fullmatch(r'imu(\d+)', device.label)
+    if not lbl:
+        return
+    dev_no, lbl_no = int(m.group(1)), int(lbl.group(1))
+    if dev_no != lbl_no:
+        print(f'[{device.label}] ⚠ 编号对不上：配置说这是 {device.label}，'
+              f'实际连上的设备广播名是 {name}（即 imu{dev_no}）')
+        print(f'[{device.label}]   文件名会写成 {device.label}，平台按这个号认是哪只狗——'
+              f'填错就是把数据记到别的狗名下')
+        print(f'[{device.label}]   去 sites/<场地>.env 核一下这一项的编号和 MAC')
+
+
 class SharedScanner:
     """
     整个录制过程共用一个常驻的 BLE 扫描器，取代"每个设备的重连协程各自反复
@@ -404,6 +433,7 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
             # 整个握手过程都套超时，绝不允许无限期卡住（见 CONNECT_TIMEOUT_S）
             await asyncio.wait_for(client.connect(), timeout=CONNECT_TIMEOUT_S)
             print(f'[{device.label}] WitMotion 已连接: {ble_device.name}  {ble_device.address}')
+            _warn_label_mismatch(device, ble_device)
             device.mac = ble_device.address
             subscribed = None
             for uuid in DEFAULT_NOTIFY_CANDIDATES:
