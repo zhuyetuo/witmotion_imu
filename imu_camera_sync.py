@@ -694,7 +694,10 @@ class _FfmpegVfrSink:
 
     def write(self, frame):
         try:
-            self.proc.stdin.write(frame.tobytes())
+            # 直接按 buffer 协议写，不要 tobytes()：那会为每一帧再拷一份
+            # （720p BGR 是 2.76MB），六路 x 每秒十几帧就是几百 MB/s 的白拷贝。
+            # 帧不连续时才退回 tobytes（cv2 出来的一般是连续的）。
+            self.proc.stdin.write(frame if frame.flags['C_CONTIGUOUS'] else frame.tobytes())
         except (BrokenPipeError, OSError):
             pass
 
