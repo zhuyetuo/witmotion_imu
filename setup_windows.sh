@@ -2,7 +2,10 @@
 # 装采集环境的主体部分（miniconda / ffmpeg / pip 依赖 / 电源设置）。
 #
 # 用法（Git Bash，仓库根目录）：
-#   ./setup_windows.sh
+#   ./setup_windows.sh                  装缺的，装过的跳过
+#   ./setup_windows.sh --reinstall      推倒重装 miniconda 和 ffmpeg
+#   ./setup_windows.sh --reinstall-conda
+#   ./setup_windows.sh --reinstall-ffmpeg
 #
 # 新机器上没有 Git Bash，先跑 setup_windows.bat——它负责提权、装 Git、拉仓库，
 # 然后回头调这个脚本。已经有 Git 的机器直接跑这个就行。
@@ -49,7 +52,38 @@ CONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.
 PIP_MIRROR="https://pypi.tuna.tsinghua.edu.cn/simple"
 PIP_HOST="pypi.tuna.tsinghua.edu.cn"
 
+# 重装：把装出来的目录删掉，让下面的检测走到"没装"那条路。
+# 只删装出来的东西，不碰 cache/ 和手动拷进来的安装包——重装的人要的是重新装，
+# 不是重新下 106MB。
+#
+# miniconda 尤其必须先删干净：它的安装器装进已存在的非空目录会出问题，
+# 而脚本又是"看到 python.exe 就跳过"，不删的话重装根本走不到安装那一步。
+RE_CONDA=""; RE_FF=""
+for a in "$@"; do
+    case "$a" in
+        --reinstall)         RE_CONDA=1; RE_FF=1 ;;
+        --reinstall-conda)   RE_CONDA=1 ;;
+        --reinstall-ffmpeg)  RE_FF=1 ;;
+        -h|--help)
+            sed -n '2,20p' "${BASH_SOURCE[0]}"
+            exit 0 ;;
+        *)
+            echo "不认识的参数：$a"
+            echo "可用：--reinstall / --reinstall-conda / --reinstall-ffmpeg"
+            exit 1 ;;
+    esac
+done
+
 mkdir -p "$CACHE"
+
+if [ -n "$RE_CONDA" ] && [ -d "$CONDA_ROOT" ]; then
+    echo "[重装] 删掉 $CONDA_ROOT"
+    rm -rf "$CONDA_ROOT"
+fi
+if [ -n "$RE_FF" ] && [ -d "$FFDIR" ]; then
+    echo "[重装] 删掉 $FFDIR"
+    rm -rf "$FFDIR"
+fi
 
 FAILED=()
 PY=""
@@ -98,11 +132,13 @@ fi
 echo "[1/4] Miniconda"
 if [ -x "$CONDA_ROOT/python.exe" ]; then
     echo "      已安装: $CONDA_ROOT"
-elif [ -x "$HOME/miniconda3/python.exe" ]; then
-    # 这台机器以前按老办法装过（装在用户目录下），继续用它，不重复装一份
+elif [ -z "$RE_CONDA" ] && [ -x "$HOME/miniconda3/python.exe" ]; then
+    # 这台机器以前按老办法装过（装在用户目录下），继续用它，不重复装一份。
+    # --reinstall 时跳过这两条：说了要重装，就该真的装一份新的到仓库里，
+    # 而不是又回去用外面那份旧的
     CONDA_ROOT="$HOME/miniconda3"
     echo "      已安装: $CONDA_ROOT"
-elif [ -x "${PROGRAMDATA:-/c/ProgramData}/miniconda3/python.exe" ]; then
+elif [ -z "$RE_CONDA" ] && [ -x "${PROGRAMDATA:-/c/ProgramData}/miniconda3/python.exe" ]; then
     CONDA_ROOT="${PROGRAMDATA:-/c/ProgramData}/miniconda3"
     echo "      已安装: $CONDA_ROOT"
 else
@@ -186,7 +222,7 @@ fi
 # 下压缩包解压 + 写 PATH，不走安装器：出问题删掉目录重来即可，不会在系统里
 # 留一堆卸载不干净的东西。
 echo "[2/4] ffmpeg"
-if command -v ffmpeg >/dev/null 2>&1; then
+if [ -z "$RE_FF" ] && command -v ffmpeg >/dev/null 2>&1; then
     echo "      已安装: $(command -v ffmpeg)"
 elif [ -x "$FFDIR_U/bin/ffmpeg.exe" ]; then
     echo "      已安装: $FFDIR"
