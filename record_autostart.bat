@@ -40,10 +40,9 @@ if exist .recording_disabled (
 )
 
 REM SITE comes from sites\.current, written by install_autostart.bat.
-REM EXTRA_ARGS_APPEND adds to the site config's EXTRA_ARGS instead of replacing
-REM it -- using EXTRA_ARGS here would silently drop any flag added to the site
-REM file later.
-"%BASH%" -lc "EXTRA_ARGS_APPEND=--no-preview ./record_multicam.sh"
+REM PREVIEW=0 keeps the preview windows shut at startup (they can still be
+REM toggled from the terminal, but nobody is watching this one).
+"%BASH%" -lc "PREVIEW=0 ./record_multicam.sh"
 
 if exist .recording_disabled (
     echo .recording_disabled found, stopping.

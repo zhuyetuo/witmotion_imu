@@ -6,6 +6,8 @@
 #   SITE=影棚 ./record_multicam.sh     ← 平时就用这个
 #   SITE=狗场 ./record_multicam.sh
 #
+#   PREVIEW=0 SITE=狗场 ./record_multicam.sh   ← 起手不开预览窗口
+#
 # SITE 会去读 sites/<名字>.env，那里写死了这个场地的设备 MAC、狗名、摄像头路数。
 # 为什么要有它：这个脚本原来的默认值是 IMUS="wit=WT901BLE68 wit=WTSDCL"、
 # CAMS="0 1"，那是很早以前两个出厂名设备加两个摄像头时留下的，现在影棚是 8 个
@@ -238,6 +240,23 @@ EXTRA_ARGS="${EXTRA_ARGS:-}"
 # 场地配置里加了别的开关就会被它悄悄顶掉，而且是不报错的那种。
 EXTRA_ARGS="$EXTRA_ARGS ${EXTRA_ARGS_APPEND:-}"
 
+# PREVIEW：启动时开不开预览窗口。默认开（1）。
+#   PREVIEW=0 SITE=狗场 ./record_multicam.sh
+#
+# 本来只能通过 EXTRA_ARGS=--no-preview 来关，那是个"知道底层有这个开关"才写得
+# 出来的写法。开不开画面是每次启动都要决定的事，值得有个自己的名字。
+#
+# 不管启动时是开是关，跑起来之后都能在终端敲 p + 回车 随时切——这个参数只决定
+# 起手是哪个状态。
+#
+# 什么时候该关：无人值守整晚录（没人看，六个 720p 窗口白吃四成帧率），以及
+# 排查蓝牙掉线时想让摄像头吞吐降下来做对照。
+case "$(echo "${PREVIEW:-1}" | tr 'A-Z' 'a-z')" in
+    0|no|off|false|n)  EXTRA_ARGS="$EXTRA_ARGS --no-preview"; _preview_say="关（PREVIEW=0）" ;;
+    1|yes|on|true|y)   _preview_say="开" ;;
+    *) echo "PREVIEW 只认 0/1（或 on/off、yes/no），收到: ${PREVIEW}"; exit 1 ;;
+esac
+
 PAIRS="${PAIRS:-}"
 pair_args=()
 for pr in $PAIRS; do
@@ -291,6 +310,7 @@ if [ -f "$LOCK" ] && [ "${FORCE:-0}" != "1" ]; then
     echo "清掉上次没删干净的锁文件（PID ${old:-空} 已经不在了）"
 fi
 echo $$ > "$LOCK"
+echo "预览窗口：$_preview_say（跑起来之后敲 p + 回车 随时切；PREVIEW=0 可以起手就关）"
 trap 'rm -f "$LOCK"' EXIT
 
 python imu_camera_sync_multicam.py \

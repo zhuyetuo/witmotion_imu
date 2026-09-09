@@ -905,8 +905,17 @@ install_autostart.bat /uninstall    REM 撤掉
 一次启动能跑几个月。`record_autostart.bat` 在外面又包了一层：进程崩了（USB 掉线、
 蓝牙栈卡死）等 30 秒自动重开，不会出现凌晨三点停了、第二天早上才发现。
 
-**自动跑的时候不开预览窗口**（`--no-preview`）：没人坐在那儿按 `p`，六个 720p 窗口
+**自动跑的时候不开预览窗口**（`PREVIEW=0`）：没人坐在那儿按 `p`，六个 720p 窗口
 白白吃掉四成帧率。要看画面就手动跑一次 `SITE=狗场 ./record_multicam.sh`。
+
+手动跑的时候用 `PREVIEW` 决定起手开不开：
+
+```bash
+SITE=狗场 ./record_multicam.sh             # 默认开着，方便认摄像头
+PREVIEW=0 SITE=狗场 ./record_multicam.sh   # 起手就关，帧率直接拉满
+```
+
+跑起来之后不管起手是哪个状态，都能敲 `p` + 回车随时切。
 
 **想暂时停掉**，不用动任务计划：在仓库根目录建一个空的 `.recording_disabled` 文件，
 再把正在跑的 python 结束掉；删掉这个文件就恢复。归档那边同理是 `.archive_disabled`。
