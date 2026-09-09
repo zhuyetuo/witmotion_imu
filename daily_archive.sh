@@ -43,7 +43,21 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 # 场地配置：跟 record_multicam.sh 读同一份 sites/<名字>.env，KEEP_PAIRS 写在那里。
 # 不共用一份的话，录制端改了配对、归档端还按老的挑文件，结果是默默漏传——
 # 而且是几天后才从平台上样本数不对发现。
+# 场地名：命令行没给就读 sites/.current。
+#
+# 为什么要这个文件：每日归档是计划任务跑的，没法每次手敲 SITE=狗场；而
+# daily_archive.bat 是仓库里的文件，在它里面写死场地名的话，每台机器都要改一次，
+# 而且 git pull 每次都冲突。.current 是每台机器自己的一行小文件、不进版本库，
+# 配一次就完事，两个脚本都读它。
+#
+# 设置：  echo 狗场 > sites/.current
+#
+# tr 去掉 \r：这文件多半是在 Windows 上用记事本建的，带 CRLF，不去掉的话
+# 场地名会变成 "狗场\r"，找不到 sites/狗场\r.env，报错还看不出哪儿不对。
 SITE="${SITE:-}"
+if [ -z "$SITE" ] && [ -f "sites/.current" ]; then
+    SITE="$(tr -d '\r\n ' < sites/.current)"
+fi
 if [ -n "$SITE" ] && [ -f "sites/${SITE}.env" ]; then
     _saved_keep="${KEEP_PAIRS:-}"
     # shellcheck disable=SC1090
