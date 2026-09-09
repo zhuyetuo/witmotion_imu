@@ -116,11 +116,12 @@ CAMS="${CAMS:-}"
 # 没有默认值可以退：这两项填错不会报错，只会安静地录一整天废数据，
 # 所以宁可不启动
 if [ -z "$IMUS" ] && [ -z "${DEVICES:-}" ]; then
-    echo "没有配置 IMU 设备。三选一："
-    echo "  1) 记住这台机器的场地（推荐，之后录制和归档都不用再传）："
-    echo "       echo 狗场 > sites/.current"
-    echo "  2) 这一次指定场地：  SITE=狗场 ./record_multicam.sh"
-    echo "  3) 自己传设备：      IMUS=\"wit=MAC ...\" CAMS=\"0 1\" ./record_multicam.sh"
+    echo "没有指定场地。用："
+    echo "    SITE=狗场 ./record_multicam.sh"
+    echo "  归档同理：SITE=狗场 ./daily_archive.sh"
+    echo
+    echo "  （也可以把场地记在这台机器上，之后不用每次传：echo 狗场 > sites/.current"
+    echo "    命令行传的 SITE= 优先级更高，随时能盖过它）"
     echo "现有场地：$(ls sites/*.env 2>/dev/null | sed 's|sites/||;s|\.env||' | paste -sd' ')"
     echo "拿设备 MAC：python wit_ble_live.py --scan"
     exit 1
