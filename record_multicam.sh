@@ -77,12 +77,12 @@ if [ -n "$SITE" ]; then
     # 场地文件里是直接赋值（IMUS="..."），source 之后会盖掉命令行上传进来的同名
     # 变量。想要的是反过来：文件当底、命令行临时覆盖。所以先把命令行给的存一份，
     # source 完再放回去。
-    for _v in IMUS IMU_IDS DEVICES DOG_NAMES CAMS PAIRS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
+    for _v in IMUS IMU_IDS DEVICES DOG_NAMES CAMS PAIRS EXTRA_ARGS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
         eval "_saved_$_v=\${$_v:-}"
     done
     # shellcheck disable=SC1090
     . "$site_file"
-    for _v in IMUS IMU_IDS DEVICES DOG_NAMES CAMS PAIRS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
+    for _v in IMUS IMU_IDS DEVICES DOG_NAMES CAMS PAIRS EXTRA_ARGS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
         eval "_s=\$_saved_$_v"
         [ -n "$_s" ] && eval "$_v=\$_s"
     done
@@ -187,6 +187,11 @@ done
 # 出来大半是「A 房间的画面配 B 房间的狗」，纯废文件，而且每份都是一小时的
 # 720p 视频拷贝，磁盘成倍烧。
 # 一个大空间多只狗的场地（影棚）不要设：哪路摄像头拍到哪只狗事先不知道。
+# EXTRA_ARGS：临时往底层脚本多传几个参数，不用为了试一个开关改脚本。
+# 比如查帧率瓶颈：EXTRA_ARGS=--profile SITE=狗场 ./record_multicam.sh
+# 故意不加引号展开（下面 $EXTRA_ARGS 按空格分词），这样能一次传多个。
+EXTRA_ARGS="${EXTRA_ARGS:-}"
+
 PAIRS="${PAIRS:-}"
 pair_args=()
 for pr in $PAIRS; do
@@ -214,4 +219,5 @@ python imu_camera_sync_multicam.py \
     --capture-width "$CAPTURE_WIDTH" --capture-height "$CAPTURE_HEIGHT" \
     --loop "${resample_flag[@]}" --out-dir "$OUT_DIR" \
     --warmup-sec "$WARMUP_SEC" --cam-fps "$CAM_FPS" \
-    --reconnect-max-backoff "$RECONNECT_MAX_BACKOFF"
+    --reconnect-max-backoff "$RECONNECT_MAX_BACKOFF" \
+    $EXTRA_ARGS
