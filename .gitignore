@@ -10,3 +10,8 @@
 
 __pycache__/
 *.pyc
+
+# 这台机器是哪个场地（狗场 / 影棚）。每台机器自己一份，不进版本库——
+# 进了的话每台都要改一次，而且 git pull 每次冲突。
+#   echo 狗场 > sites/.current
+/sites/.current

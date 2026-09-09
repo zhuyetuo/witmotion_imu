@@ -66,7 +66,21 @@ if [ -x ".tools/miniconda3/python.exe" ] && ! command -v python >/dev/null 2>&1;
 fi
 
 # 先读场地配置，再让环境变量覆盖它——命令行上临时改一项不用去动文件
+# 场地名：命令行没给就读 sites/.current。
+#
+# 为什么要这个文件：每日归档是计划任务跑的，没法每次手敲 SITE=狗场；而
+# daily_archive.bat 是仓库里的文件，在它里面写死场地名的话，每台机器都要改一次，
+# 而且 git pull 每次都冲突。.current 是每台机器自己的一行小文件、不进版本库，
+# 配一次就完事，两个脚本都读它。
+#
+# 设置：  echo 狗场 > sites/.current
+#
+# tr 去掉 \r：这文件多半是在 Windows 上用记事本建的，带 CRLF，不去掉的话
+# 场地名会变成 "狗场\r"，找不到 sites/狗场\r.env，报错还看不出哪儿不对。
 SITE="${SITE:-}"
+if [ -z "$SITE" ] && [ -f "sites/.current" ]; then
+    SITE="$(tr -d '\r\n ' < sites/.current)"
+fi
 if [ -n "$SITE" ]; then
     site_file="sites/${SITE}.env"
     if [ ! -f "$site_file" ]; then
@@ -102,7 +116,12 @@ CAMS="${CAMS:-}"
 # 没有默认值可以退：这两项填错不会报错，只会安静地录一整天废数据，
 # 所以宁可不启动
 if [ -z "$IMUS" ] && [ -z "${DEVICES:-}" ]; then
-    echo "没有配置 IMU 设备。用 SITE=影棚 ./record_multicam.sh，或者自己传 IMUS=\"wit=MAC ...\"。"
+    echo "没有配置 IMU 设备。三选一："
+    echo "  1) 记住这台机器的场地（推荐，之后录制和归档都不用再传）："
+    echo "       echo 狗场 > sites/.current"
+    echo "  2) 这一次指定场地：  SITE=狗场 ./record_multicam.sh"
+    echo "  3) 自己传设备：      IMUS=\"wit=MAC ...\" CAMS=\"0 1\" ./record_multicam.sh"
+    echo "现有场地：$(ls sites/*.env 2>/dev/null | sed 's|sites/||;s|\.env||' | paste -sd' ')"
     echo "拿设备 MAC：python wit_ble_live.py --scan"
     exit 1
 fi
