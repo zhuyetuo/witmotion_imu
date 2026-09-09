@@ -50,6 +50,7 @@ BLE GATT UUID:
 import argparse
 import asyncio
 import os
+import struct
 import sys
 import time
 import csv

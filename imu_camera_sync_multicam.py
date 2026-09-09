@@ -394,7 +394,8 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice], pai
                     print(f'\n════ 第 {segment_no} 段录制开始（本段到 {end_at} 整点结束）════')
                 else:
                     print(f'\n════ 第 {segment_no} 段录制开始 ════')
-            should_stop = _run_one_segment(args, cameras, devices, target_fps, record_mode, duration_seconds)
+            should_stop = _run_one_segment(args, cameras, devices, target_fps, record_mode,
+                                            duration_seconds, pair_filter)
             if not loop_mode or should_stop or stop_event.is_set():
                 break
     except KeyboardInterrupt:
@@ -410,7 +411,8 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice], pai
 
 
 def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice],
-                      target_fps: int, record_mode: bool, duration_seconds: float = 0) -> bool:
+                      target_fps: int, record_mode: bool, duration_seconds: float = 0,
+                      pair_filter=None) -> bool:
     """录制一段，返回是否应该整体停止（True=用户退出/出错，False=正常到时结束）。
     duration_seconds: 这一段实际要录多久——普通模式下就是 --duration；
     --align-hourly 模式下是"到下一个整点还剩多少秒"（每段都重新算一次，
