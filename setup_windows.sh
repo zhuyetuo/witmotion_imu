@@ -22,20 +22,34 @@ set -uo pipefail   # 故意不开 -e：某一步失败要能继续走完后面�
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
 INSTALL_DIR="$(pwd)"
-# ffmpeg 装在仓库外面：装仓库里的话 git clone 会因为目标目录非空失败，
-# 而且重新 clone 一次就得重下一遍
-FFDIR="${LOCALAPPDATA:-$HOME/AppData/Local}/ffmpeg"
-FFDIR_U="$(cygpath -u "$FFDIR" 2>/dev/null || echo "$FFDIR")"
-CONDA_ROOT="$HOME/miniconda3"
 
-# 国内直连 PyPI / Anaconda 慢到经常超时，默认走清华镜像
+# 装出来的东西全放在仓库下的 .tools/：
+#   .tools/cache/     下载的安装包和压缩包（下次重跑不用再下一遍）
+#   .tools/miniconda3/
+#   .tools/ffmpeg/
+#
+# 为什么收进仓库：一台机器上就这一份，删掉仓库等于卸载干净，不会在
+# %USERPROFILE% 和 %LOCALAPPDATA% 各留一坨没人记得的东西。更实际的是缓存——
+# ffmpeg 那个包 106MB，网慢的时候要十几分钟，下到一半失败重跑又从头来，
+# 有了 cache 就能接着用。
+#
+# （早先 ffmpeg 放在仓库外，是因为那时 .bat 先装 ffmpeg 再 clone，仓库目录
+# 非空会让 git clone 直接失败。现在 clone 挪到了 .bat 里、在这个脚本之前，
+# 这个顾虑没有了。）
+TOOLS="$INSTALL_DIR/.tools"
+CACHE="$TOOLS/cache"
+FFDIR="$TOOLS/ffmpeg"
+FFDIR_U="$FFDIR"
+CONDA_ROOT="$TOOLS/miniconda3"
+
+# Miniconda 走官方源：就一个安装包，下一次的事，实测速度够用。
+CONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe"
+# pip 必须走镜像：直连 PyPI 装 opencv/numpy/scipy 这几个大包经常超时，
+# 而且以后每次装包都要走，不是一次性的。
 PIP_MIRROR="https://pypi.tuna.tsinghua.edu.cn/simple"
 PIP_HOST="pypi.tuna.tsinghua.edu.cn"
-CONDA_MIRROR="https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda"
 
-TMPDIR_W="${TEMP:-$HOME}/wit_setup"
-TMP="$(cygpath -u "$TMPDIR_W" 2>/dev/null || echo "$TMPDIR_W")"
-mkdir -p "$TMP"
+mkdir -p "$CACHE"
 
 FAILED=()
 PY=""
@@ -67,13 +81,23 @@ fi
 echo "[1/4] Miniconda"
 if [ -x "$CONDA_ROOT/python.exe" ]; then
     echo "      已安装: $CONDA_ROOT"
+elif [ -x "$HOME/miniconda3/python.exe" ]; then
+    # 这台机器以前按老办法装过（装在用户目录下），继续用它，不重复装一份
+    CONDA_ROOT="$HOME/miniconda3"
+    echo "      已安装: $CONDA_ROOT"
 elif [ -x "${PROGRAMDATA:-/c/ProgramData}/miniconda3/python.exe" ]; then
     CONDA_ROOT="${PROGRAMDATA:-/c/ProgramData}/miniconda3"
     echo "      已安装: $CONDA_ROOT"
 else
-    echo "      从清华镜像下载安装包..."
-    if curl -fL --retry 3 -o "$TMP/miniconda.exe" \
-         "$CONDA_MIRROR/Miniconda3-latest-Windows-x86_64.exe"; then
+    # -C - 断点续传，配合 cache 里留下的半截文件：网断了重跑能接着下
+    if [ -s "$CACHE/miniconda.exe" ]; then
+        echo "      用缓存的安装包（$CACHE/miniconda.exe）"
+    else
+        echo "      从官方源下载安装包..."
+        curl -fL --retry 3 -C - -o "$CACHE/miniconda.exe" "$CONDA_URL"
+    fi
+    if [ -s "$CACHE/miniconda.exe" ]; then
+        tried_conda_install=1
         echo "      静默安装到 $(cygpath -w "$CONDA_ROOT") ..."
         # 直接调 exe，不要套 cmd //c start //wait：
         # MSYS_NO_PATHCONV=1 会连 // 开头的参数一起放过，于是 //wait 原样传给 cmd，
@@ -83,7 +107,7 @@ else
         #
         # /D 必须放最后、不能加引号（NSIS 的硬性要求），路径还得是 Windows 风格；
         # MSYS_NO_PATHCONV=1 是为了 /InstallationType 这些不被当成路径翻译。
-        MSYS_NO_PATHCONV=1 "$TMP/miniconda.exe" \
+        MSYS_NO_PATHCONV=1 "$CACHE/miniconda.exe" \
             /InstallationType=JustMe /AddToPath=1 /RegisterPython=0 /S \
             /D="$(cygpath -w "$CONDA_ROOT")"
     else
@@ -100,6 +124,16 @@ elif command -v python >/dev/null 2>&1; then
 else
     fail Miniconda "装完找不到 python.exe"
 fi
+# 这次确实跑了安装器、却没装出 python.exe，说明缓存那个包是坏的（下了一半 /
+# 下错了）。删掉，下次重跑会重新下载——不删的话每次都"用缓存的安装包"、
+# 每次都装不出来，永远卡在同一处。
+#
+# 判断条件挂在"装没装出来"上，不是挂在上面那个 fail 上：机器里本来就有
+# python 时会走 [退让] 分支、不算失败，但那个坏包照样是坏的，也该清掉。
+if [ -n "${tried_conda_install:-}" ] && [ ! -x "$CONDA_ROOT/python.exe" ]; then
+    rm -f "$CACHE/miniconda.exe"
+    echo "      已清掉缓存的安装包，下次重跑会重新下载"
+fi
 
 # ── 2. ffmpeg ────────────────────────────────────────────────────────────
 # 录像是把每一帧喂给 ffmpeg 管道写 VFR mp4 的，没有 ffmpeg 完全录不了视频。
@@ -112,9 +146,13 @@ elif [ -x "$FFDIR_U/bin/ffmpeg.exe" ]; then
     echo "      已安装: $FFDIR"
     export PATH="$FFDIR_U/bin:$PATH"
 else
-    echo "      下载压缩包..."
     got=""
-    for url in \
+    if [ -s "$CACHE/ffmpeg.zip" ]; then
+        echo "      用缓存的压缩包（$CACHE/ffmpeg.zip）"
+        got=1
+    fi
+    [ -z "$got" ] && echo "      下载压缩包..."
+    [ -n "$got" ] || for url in \
         "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" \
         "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"
     do
@@ -122,15 +160,16 @@ else
         # --max-time 放到 40 分钟：现场实测 106MB 只跑到 100KB/s，预计要 16 分钟，
         # 原来卡 10 分钟必然半途而废，还白下一半。真卡死的情况用 --speed-time/-limit
         # 兜：连续 60 秒低于 10KB/s 才判失败，比一刀切的总时长合理。
-        if curl -fL --retry 2 --max-time 2400 --speed-time 60 --speed-limit 10240 \
-                -o "$TMP/ffmpeg.zip" "$url"; then got=1; break; fi
+        # -C - 断点续传：106MB 在慢网上很容易断，重跑能接着下而不是从头来
+        if curl -fL --retry 2 -C - --max-time 2400 --speed-time 60 --speed-limit 10240 \
+                -o "$CACHE/ffmpeg.zip" "$url"; then got=1; break; fi
         echo "      这个源不行，换下一个"
     done
     if [ -n "$got" ]; then
-        rm -rf "$TMP/ffx"
-        unzip_to "$TMP/ffmpeg.zip" "$TMP/ffx" >/dev/null
+        rm -rf "$CACHE/ffx"
+        unzip_to "$CACHE/ffmpeg.zip" "$CACHE/ffx" >/dev/null
         # 压缩包里是一层带版本号的目录，把它整个挪成 $FFDIR
-        inner="$(find "$TMP/ffx" -mindepth 1 -maxdepth 1 -type d | head -1)"
+        inner="$(find "$CACHE/ffx" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)"
         if [ -n "$inner" ]; then
             rm -rf "$FFDIR_U"
             mkdir -p "$(dirname "$FFDIR_U")"
@@ -142,11 +181,16 @@ else
         echo "      完成: $FFDIR"
     else
         fail ffmpeg "没装上。没有 ffmpeg 录不了视频，必须补上"
+        # 同上：解压不出东西说明缓存的包是坏的，清掉才不会每次重跑都卡在同一处
+        [ -n "$got" ] && rm -f "$CACHE/ffmpeg.zip" && \
+            echo "             已清掉缓存的压缩包，下次重跑会重新下载"
         echo "             手动办法：下 ffmpeg-release-essentials.zip 解压到 $FFDIR"
         echo "             解压后应该能看到 $FFDIR\\bin\\ffmpeg.exe"
     fi
 fi
-# 写进用户 PATH（不动系统 PATH，影响面小），新开的命令行才生效
+# 写进用户 PATH（不动系统 PATH，影响面小），新开的命令行才生效。
+# 注意这条指向仓库里的 .tools/ffmpeg——仓库整个挪走或删掉，这条就失效了。
+# 所以 record_multicam.sh 里也会自己找一次 .tools/ffmpeg/bin，不光靠 PATH。
 if [ -x "$FFDIR_U/bin/ffmpeg.exe" ]; then
     powershell -NoProfile -ExecutionPolicy Bypass -Command \
       "\$p=[Environment]::GetEnvironmentVariable('Path','User'); if (\$null -eq \$p) { \$p='' };

@@ -48,6 +48,14 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
+# setup_windows.sh 把 ffmpeg 装在仓库的 .tools/ffmpeg 下。它虽然也往用户 PATH
+# 里写了一条，但那条是"新开的命令行才生效"，而且仓库一挪位置就失效。这里自己
+# 找一次，录制就不依赖 PATH 配没配对——没有 ffmpeg 是完全录不了视频的，
+# 不值得为这个再排查一轮环境变量。
+if [ -x ".tools/ffmpeg/bin/ffmpeg.exe" ] && ! command -v ffmpeg >/dev/null 2>&1; then
+    export PATH="$(pwd)/.tools/ffmpeg/bin:$PATH"
+fi
+
 # 先读场地配置，再让环境变量覆盖它——命令行上临时改一项不用去动文件
 SITE="${SITE:-}"
 if [ -n "$SITE" ]; then
