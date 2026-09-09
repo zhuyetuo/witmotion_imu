@@ -45,8 +45,24 @@ FFDIR="$TOOLS/ffmpeg"
 FFDIR_U="$FFDIR"
 CONDA_ROOT="$TOOLS/miniconda3"
 
-# Miniconda 走官方源：就一个安装包，下一次的事，实测速度够用。
-CONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe"
+# Miniconda 走官方源，但**版本钉死**，不用 -latest-。
+#
+# 用 latest 踩过一次：它现在带的是 Python 3.14，而 bleak 0.x 全系要求 <3.13，
+# pip 直接装不上（numpy/scipy/pandas 都有 3.14 的轮子，opencv 是 abi3 也没事，
+# 只有 bleak 卡住）。而"今天的 latest 带什么 Python"是会变的——这跟之前踩的
+# 那些坑是同一类：不确定性留在环境里，哪天自己变了才发现。
+#
+# 为什么是 3.13：bleak 0.22.3 的 requires-python 是 >=3.8,<3.14，3.13 正好在
+# 范围内——换个 Python 版本就够了，bleak 不用升、采集代码一行不用动。
+# （bleak 1.0 的破坏性变更我逐条对过源码，确实都没踩到；但这是无人值守跑几天
+# 的 BLE 代码，Windows 蓝牙这块已经花掉不少调试时间，跨大版本的未文档化行为
+# 变化不值得赌，两个场地跑不同的栈也会让以后任何抖动都难归因。）
+#
+# 其余几个包在 3.13 上都没问题：numpy/scipy/pandas 有 cp313 轮子，
+# opencv-python 是 abi3（cp37 标签），3.13 照装。
+CONDA_PY="3.13"
+CONDA_INSTALLER="Miniconda3-py313_26.7.1-1-Windows-x86_64.exe"
+CONDA_URL="https://repo.anaconda.com/miniconda/$CONDA_INSTALLER"
 # pip 必须走镜像：直连 PyPI 装 opencv/numpy/scipy 这几个大包经常超时，
 # 而且以后每次装包都要走，不是一次性的。
 PIP_MIRROR="https://pypi.tuna.tsinghua.edu.cn/simple"
@@ -144,16 +160,21 @@ elif [ -z "$RE_CONDA" ] && [ -x "${PROGRAMDATA:-/c/ProgramData}/miniconda3/pytho
 else
     # 本地已经有安装包就直接用，别再下一遍。自己下的会落在 cache/miniconda.exe，
     # 手动拷进来的多半是官方原名 Miniconda3-*.exe、丢在 .tools/ 下
-    CONDA_EXE="$(find_local \
-        "$TOOLS/Miniconda3-*.exe" "$TOOLS/miniconda*.exe" \
-        "$CACHE/Miniconda3-*.exe" "$CACHE/miniconda.exe")" || CONDA_EXE=""
+    # 先找钉死的那个版本；找不到再退而求其次用本地任意一个 Miniconda 安装包，
+    # 但要说清楚它带的 Python 版本未知
+    CONDA_EXE="$(find_local "$TOOLS/$CONDA_INSTALLER" "$CACHE/$CONDA_INSTALLER")" || CONDA_EXE=""
     if [ -n "$CONDA_EXE" ]; then
         echo "      用本地安装包（$CONDA_EXE）"
     else
-        echo "      本地没有，从官方源下载..."
-        # -C - 断点续传：网断了重跑能接着下
-        curl -fL --retry 3 -C - -o "$CACHE/miniconda.exe" "$CONDA_URL" \
-            && CONDA_EXE="$CACHE/miniconda.exe"
+        OTHER="$(find_local "$TOOLS/Miniconda3-*.exe" "$CACHE/Miniconda3-*.exe" "$CACHE/miniconda.exe")" || OTHER=""
+        echo "      本地没有 $CONDA_INSTALLER，从官方源下载..."
+        if curl -fL --retry 3 -C - -o "$CACHE/$CONDA_INSTALLER" "$CONDA_URL"; then
+            CONDA_EXE="$CACHE/$CONDA_INSTALLER"
+        elif [ -n "$OTHER" ]; then
+            echo "      下载失败，改用本地的 $OTHER"
+            echo "      注意：它不是钉死的那一版，带的 Python 版本可能不是 $CONDA_PY"
+            CONDA_EXE="$OTHER"
+        fi
     fi
     if [ -n "$CONDA_EXE" ] && [ -s "$CONDA_EXE" ]; then
         tried_conda_install=1
@@ -193,7 +214,30 @@ fi
 if [ -x "$CONDA_ROOT/python.exe" ]; then
     PY="$CONDA_ROOT/python.exe"
     export PATH="$CONDA_ROOT:$CONDA_ROOT/Scripts:$PATH"
-    echo "      完成"
+    GOT_PY="$("$PY" -c "import sys;print('%d.%d'%sys.version_info[:2])" 2>/dev/null)"
+    if [ "$GOT_PY" != "$CONDA_PY" ]; then
+        # 版本不对就地换，不用重下 90MB 的安装包——conda 本来就能改 base 的
+        # Python 版本，只需要下 python 这个包本身及其依赖。
+        # 会走到这儿的情况：机器上早先装的是别的版本（比如 latest 带的 3.14），
+        # 或者钉死的安装包没下下来、退而用了本地别的包。
+        echo "      当前是 Python $GOT_PY，要的是 $CONDA_PY，就地改..."
+        CONDA_BIN="$CONDA_ROOT/Scripts/conda.exe"
+        if [ -x "$CONDA_BIN" ]; then
+            "$CONDA_BIN" install -y "python=$CONDA_PY"
+            GOT_PY="$("$PY" -c "import sys;print('%d.%d'%sys.version_info[:2])" 2>/dev/null)"
+        else
+            echo "      找不到 $CONDA_BIN，改不了"
+        fi
+    fi
+    if [ "$GOT_PY" = "$CONDA_PY" ]; then
+        echo "      完成（Python $GOT_PY）"
+    else
+        # 不算失败——装是装上了，后面的 pip 会不会炸取决于具体的包。但要先说一声，
+        # 不然 pip 报"找不到满足要求的版本"时根本想不到是 Python 版本的事。
+        # bleak 0.22.3 的 requires-python 是 >=3.8,<3.14，3.14 就正好被挡在外面。
+        echo "      完成（Python $GOT_PY，不是要的 $CONDA_PY，没改成）"
+        echo "      下面 pip 如果报「Could not find a version that satisfies」，就是这个原因"
+    fi
 elif command -v python >/dev/null 2>&1; then
     PY="python"
     echo "      [退让] 用系统里已有的 python"

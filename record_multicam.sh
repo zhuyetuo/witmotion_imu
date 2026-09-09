@@ -56,6 +56,15 @@ if [ -x ".tools/ffmpeg/bin/ffmpeg.exe" ] && ! command -v ffmpeg >/dev/null 2>&1;
     export PATH="$(pwd)/.tools/ffmpeg/bin:$PATH"
 fi
 
+# 同理找 python。setup_windows.sh 装 miniconda 时用的是 /AddToPath=0（官方默认，
+# 也是对的：那份 conda 装在仓库里、跟着仓库走，写进用户 PATH 的话仓库一挪一删
+# PATH 就指向空目录，还会悄悄接管这台机器上所有命令行的 python）。
+# 代价是新开的终端里 python 不在 PATH 上，而下面就是直接调 python 的——
+# 所以这里自己找一次。
+if [ -x ".tools/miniconda3/python.exe" ] && ! command -v python >/dev/null 2>&1; then
+    export PATH="$(pwd)/.tools/miniconda3:$(pwd)/.tools/miniconda3/Scripts:$PATH"
+fi
+
 # 先读场地配置，再让环境变量覆盖它——命令行上临时改一项不用去动文件
 SITE="${SITE:-}"
 if [ -n "$SITE" ]; then
