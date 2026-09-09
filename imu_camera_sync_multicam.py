@@ -522,6 +522,14 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
     last_tick_ts_ms = None
     max_lag_ms = 3 * (1000.0 / target_fps)
 
+    # --profile：把每个环节的耗时测出来。之前靠猜——先怀疑采集分辨率，改成 720p
+    # 直采之后帧率只从 5 涨到 8，等于猜错了。与其继续猜不如测。
+    prof = {k: 0.0 for k in ('读摄像头', '取IMU+写CSV', '画叠加信息', '写给ffmpeg', '显示窗口', 'waitKey')} \
+        if getattr(args, 'profile', False) else None
+    if prof:
+        prof['_n'] = 0
+        prof['_last'] = time.perf_counter()
+
     try:
         while not stop_event.is_set():
             if imu_sync:
@@ -558,10 +566,14 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
             frames = []
             cam_missing = []
             read_failed = False
+            _t = time.perf_counter() if prof else 0.0
             for cam in cameras:
                 frame, ok = cam.read_resilient(tick_ts)
                 frames.append(frame)
                 cam_missing.append(0 if ok else 1)
+            if prof:
+                prof['读摄像头'] += time.perf_counter() - _t
+                _t = time.perf_counter()
 
             tick_ts_str = datetime.fromtimestamp(tick_ts).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
             cam_fps_list = [cam.fps_tick(tick_ts) if ok == 0 else 0.0 for cam, ok in zip(cameras, cam_missing)]
@@ -593,16 +605,30 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 csv_writer.writerow(csv_row)
             if meta_writer:
                 meta_writer.writerow(meta_row)
+            if prof:
+                prof['取IMU+写CSV'] += time.perf_counter() - _t
 
             down_cams = [f'{c.label} DOWN {_fmt_duration(c.down_seconds(tick_ts))}' for c in cameras if c.down]
             for cam, frame, cam_fps in zip(cameras, frames, cam_fps_list):
-                display = draw_overlay(frame.copy(), cam.label, cam_fps, target_fps, imu_info, elapsed, frame_idx,
+                # 这一路只显示跟它配对的那几只狗。狗场是一间一狗一摄像头，
+                # 六只全列在每个画面上纯是噪声——盯 cam1 的人只关心 cam1 那间的狗。
+                # 影棚没设 pair_filter，全显示（那边一个大空间，哪路都可能拍到哪只）。
+                cam_imu_info = ([x for x in imu_info if (cam.label, x[0].label) in pair_filter]
+                                if pair_filter else imu_info)
+                if prof: _t = time.perf_counter()
+                display = draw_overlay(frame.copy(), cam.label, cam_fps, target_fps, cam_imu_info, elapsed, frame_idx,
                                         show_imu_values=args.show_imu_values,
                                         show_frame_info=args.show_frame_info,
                                         down_cams=down_cams if not cam.down else None,
                                         alpha=args.overlay_alpha)
+                if prof:
+                    prof['画叠加信息'] += time.perf_counter() - _t
+                    _t = time.perf_counter()
                 if cam.video_writer:
                     cam.video_writer.write(display if save_overlay else frame)
+                if prof:
+                    prof['写给ffmpeg'] += time.perf_counter() - _t
+                    _t = time.perf_counter()
                 try:
                     cv2.imshow(f'IMU(multicam) {cam.label}', display)
                 except cv2.error:
@@ -610,6 +636,8 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                         print('cv2.imshow 不支持（可能是 headless 版本）。')
                         read_failed = True
                         should_stop[0] = True
+                if prof:
+                    prof['显示窗口'] += time.perf_counter() - _t
 
             if read_failed:
                 break
@@ -618,10 +646,25 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 print(f'\n已达到录制时长 {duration_seconds:.0f}s，停止。')
                 break
 
+            if prof: _t = time.perf_counter()
             try:
                 key = cv2.waitKey(1) & 0xFF
             except cv2.error:
                 key = 0xFF
+            if prof:
+                prof['waitKey'] += time.perf_counter() - _t
+                prof['_n'] += 1
+                if time.perf_counter() - prof['_last'] >= 5.0:
+                    n = max(prof['_n'], 1)
+                    span = time.perf_counter() - prof['_last']
+                    parts = ' '.join(f'{k}={prof[k] / n * 1000:.1f}ms'
+                                     for k in ('读摄像头', '取IMU+写CSV', '画叠加信息', '写给ffmpeg', '显示窗口', 'waitKey'))
+                    print(f'[profile] {n / span:.1f} tick/s  每 tick: {parts}')
+                    for k in list(prof):
+                        if not k.startswith('_'):
+                            prof[k] = 0.0
+                    prof['_n'] = 0
+                    prof['_last'] = time.perf_counter()
             if key in (ord('q'), ord('Q'), 27):
                 should_stop[0] = True
                 break
@@ -877,6 +920,9 @@ def main():
                          '（12:00→13:00→14:00...），配合 --loop 就能一直按小时切文件。跟 --duration 是'
                          '二选一：加了这个参数 --duration 会被忽略；不加这个参数，--duration 的固定秒数'
                          '用法完全不受影响。')
+    ap.add_argument('--profile', action='store_true',
+                    help='每 5 秒打印一次每个 tick 各环节的平均耗时（读摄像头/画叠加/写给ffmpeg/'
+                         '显示窗口/waitKey）。帧率上不去时用它定位瓶颈，别靠猜')
     ap.add_argument('--imu-label', action='append', default=[], metavar='imuN',
                     help='每个设备在文件名/列名里用的编号，顺序跟 --imu 一一对应，'
                          '例如 --imu-label imu9 --imu-label imu11。不传就按位置排 imu1、imu2…'
