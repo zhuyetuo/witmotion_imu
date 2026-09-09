@@ -639,7 +639,11 @@ def precheck_devices(devices: list[ImuDevice], scan_timeout: float = 12.0) -> li
         elif dev is None:
             problems.append(f'{d.label} ({d.ident}): 没扫到')
         else:
-            note = '' if (dev.name or '').lower() == d.ident.lower() else '  ← 名字不完全一致，确认是不是这个'
+            # 只有按名字指定时才提醒"名字对不严实"。按 MAC 指定时 ident 是
+            # MAC、dev.name 是设备名，永远不相等，拿来比就是每台设备都误报一句
+            note = ''
+            if not _MAC_RE.match(d.ident) and (dev.name or '').lower() != d.ident.lower():
+                note = '  ← 名字不完全一致，确认是不是这个'
             print(f'  {d.label} = {dev.name}({dev.address}){note}')
     if problems:
         print('\n预检没过：')
