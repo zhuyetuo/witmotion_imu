@@ -342,6 +342,36 @@ def _seconds_to_next_hour(now: datetime) -> float:
     return (next_hour - now).total_seconds()
 
 
+def parse_pairs(specs, n_cams, device_labels):
+    """
+    把 --pair camN:imuM 解析成 {(cam标签, imu标签)} 的集合。
+    返回 (集合, 错误信息列表)；集合为空 = 不限制、全排列。
+
+    抽成纯函数是为了能测：它出过一次错——设备编号改成真号（imu9、imu11）之后，
+    这里还在拿位置序号 imu1..imuN 去比对，于是完全正确的 --pair 全被判成
+    "配对不存在"，直接退出、根本录不了。那种错语法检查和 NameError 检查都抓不到，
+    只有真拿数据跑一遍才看得见。
+    """
+    pair_filter, errs = set(), []
+    for spec in specs:
+        if ':' not in spec:
+            errs.append(f'--pair 格式应为 camN:imuM，收到: {spec!r}')
+            continue
+        c, i = spec.split(':', 1)
+        pair_filter.add((c.strip().lower(), i.strip().lower()))
+    if pair_filter and not errs:
+        # 写错了要立刻报，别等录完一小时才发现一个配对文件都没生成
+        cams = {f'cam{n}' for n in range(1, n_cams + 1)}
+        # 用设备实际的 label，不是位置序号——加了 --imu-label 之后设备就叫 imu9 了
+        imus = set(device_labels)
+        bad = [f'{c}:{i}' for c, i in sorted(pair_filter) if c not in cams or i not in imus]
+        if bad:
+            errs.append(f'--pair 里这些配对不存在: {", ".join(bad)}')
+            errs.append(f'  可用摄像头: {", ".join(sorted(cams))}')
+            errs.append(f'  可用设备:   {", ".join(sorted(imus))}')
+    return pair_filter, errs
+
+
 def _pairs_for(cameras, device, pair_filter):
     """这个设备要跟哪几路摄像头配对。pair_filter 为空 = 全排列（老行为）。
 
@@ -909,25 +939,11 @@ def main():
         run_probe(args, args.camera, devices)
         return
 
-    # --pair 解析成 {(cam标签, imu标签)} 的集合；空集合 = 不限制、全排列
-    pair_filter = set()
-    for spec in args.pair:
-        if ':' not in spec:
-            print(f'--pair 格式应为 camN:imuM，收到: {spec!r}')
-            sys.exit(1)
-        c, i = spec.split(':', 1)
-        pair_filter.add((c.strip().lower(), i.strip().lower()))
-    if pair_filter:
-        # 写错了要立刻报，别等录完一小时才发现一个配对文件都没生成
-        cam_labels = {f'cam{n}' for n in range(1, len(args.camera) + 1)}
-        imu_labels = {f'imu{n}' for n in range(1, len(args.imu) + 1)}
-        bad = [f'{c}:{i}' for c, i in sorted(pair_filter)
-               if c not in cam_labels or i not in imu_labels]
-        if bad:
-            print(f'--pair 里这些配对不存在: {", ".join(bad)}')
-            print(f'  可用摄像头: {", ".join(sorted(cam_labels))}')
-            print(f'  可用设备:   {", ".join(sorted(imu_labels))}')
-            sys.exit(1)
+    pair_filter, errs = parse_pairs(args.pair, len(args.camera), [d.label for d in devices])
+    if errs:
+        for e in errs:
+            print(e)
+        sys.exit(1)
 
     # 设备没到齐就别开录：录一整天出来 IMU 全是空 CSV，那一天补不回来。
     # 只在开录前拦一次，录起来之后掉线还是照常自动重连（狗跑远了要能恢复）。
