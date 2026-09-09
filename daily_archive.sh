@@ -32,6 +32,8 @@
 #   KEEP_PAIRS   要传的配对，默认 "cam1_imu1 cam2_imu2 cam3_imu3 cam1_imu4:csv"
 #                （:csv / :mp4 后缀表示只要其中一种，跟 cleanup 脚本一个写法）
 #   NAS_DEST     NAS 目标目录，默认 //192.168.2.249/ai_data/data_raw
+#   NAS_DAY_SUFFIX  NAS 上日期目录的后缀，默认 _<场地名>（2026_9_9_狗场）；
+#                设成空串退回不加后缀的老行为
 #   DATA_DIR     本地数据根目录，默认 data/multicam_multiimu
 #   STAGE_ROOT   暂存目录根，默认 data/_upload
 #   SETTLE_MIN   处理"今天"时，最近一次文件改动要超过这么多分钟，默认 20
@@ -70,6 +72,22 @@ fi
 # 否则会漏传一多半。
 KEEP_PAIRS="${KEEP_PAIRS:-cam1_imu1 cam2_imu2 cam3_imu3 cam1_imu4:csv}"
 NAS_DEST="${NAS_DEST:-//192.168.2.249/ai_data/data_raw}"
+
+# NAS 上的目录名 = 日期 + 这个后缀，比如 2026_9_9_狗场。
+#
+# 为什么要加：两个场地是两台机器，各自往 NAS 传，日期目录是同一个。文件本身
+# 不会互相覆盖（文件名里的 imu 号是全局唯一的，时间戳还精确到毫秒），但一个
+# 2026_9_9 里混着两个场地的东西，想确认"狗场今天传全了没有"只能自己按 imu 号
+# 挑。加个后缀就一眼看得出来。
+#
+# 默认取场地名，不用在每个 sites/*.env 里各写一行。
+# 万一 Windows 上中文目录名出问题（robocopy 走的是 cygpath 转出来的路径），
+# 在 sites/<场地>.env 里写一行 NAS_DAY_SUFFIX="_gouchang" 换成 ASCII 就行。
+# 设成空串就退回老行为（不加后缀）。
+#
+# 注意：这只影响以后传的。NAS 上已经有的那些不带后缀的日期目录原地不动，
+# 平台扫描用的是 os.walk（递归），新旧两种目录名都能扫到，不用改后端。
+NAS_DAY_SUFFIX="${NAS_DAY_SUFFIX-${SITE:+_$SITE}}"
 DATA_DIR="${DATA_DIR:-data/multicam_multiimu}"
 STAGE_ROOT="${STAGE_ROOT:-data/_upload}"
 SETTLE_MIN="${SETTLE_MIN:-20}"        # 处理"今天"时要求的静默分钟数
@@ -190,7 +208,7 @@ build_stage() {
 nas_precheck() {
     local day="$1"
     local stage="$STAGE_ROOT/$day"
-    local dest="$NAS_DEST/$day"
+    local dest="$NAS_DEST/${day}${NAS_DAY_SUFFIX}"
 
     PRECHECK=go
     if [ ! -d "$dest" ]; then
@@ -231,7 +249,7 @@ nas_precheck() {
 sync_stage() {
     local day="$1"
     local stage="$STAGE_ROOT/$day"
-    local dest="$NAS_DEST/$day"
+    local dest="$NAS_DEST/${day}${NAS_DAY_SUFFIX}"
     local n_local rc
     n_local=$(find "$stage" -maxdepth 1 -type f ! -name '.*' | wc -l)
 
@@ -288,7 +306,7 @@ process_day() {
         for f in "$src"/*; do
             [ -f "$f" ] && want_file "$(basename "$f")" && n=$((n + 1))
         done
-        say "  (DRY_RUN) 会把 $n 个文件放进 $stage 再传到 $NAS_DEST/$day，原始数据不动"
+        say "  (DRY_RUN) 会把 $n 个文件放进 $stage 再传到 $NAS_DEST/${day}${NAS_DAY_SUFFIX}，原始数据不动"
         return 0
     fi
 
@@ -321,7 +339,7 @@ process_day() {
         # 传完了才删暂存——删的是硬链接，原始数据一个不少
         rm -rf "$stage"
         rm -f "$src/$PENDING"
-        echo "$(date '+%Y-%m-%d %H:%M:%S') 已传到 $NAS_DEST/$day" > "$src/$ARCHIVED"
+        echo "$(date '+%Y-%m-%d %H:%M:%S') 已传到 $NAS_DEST/${day}${NAS_DAY_SUFFIX}" > "$src/$ARCHIVED"
         say "  ✓ 暂存已清理，原始数据原样保留在 $src"
         return 0
     fi
