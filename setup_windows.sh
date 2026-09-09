@@ -145,6 +145,63 @@ if ! net session >/dev/null 2>&1; then
 fi
 
 # ── 1. Miniconda ─────────────────────────────────────────────────────────
+
+# 找安装包：先找钉死的那一版，没有就下，下不动再退而用本地任意一个
+# （那种情况带的 Python 版本未知，要说清楚）
+get_conda_installer() {
+    CONDA_EXE="$(find_local "$TOOLS/$CONDA_INSTALLER" "$CACHE/$CONDA_INSTALLER")" && return 0
+    local other
+    other="$(find_local "$TOOLS/Miniconda3-*.exe" "$CACHE/Miniconda3-*.exe" "$CACHE/miniconda.exe")" || other=""
+    echo "      本地没有 $CONDA_INSTALLER，从官方源下载..."
+    if curl -fL --retry 3 -C - -o "$CACHE/$CONDA_INSTALLER" "$CONDA_URL"; then
+        CONDA_EXE="$CACHE/$CONDA_INSTALLER"
+        return 0
+    fi
+    if [ -n "$other" ]; then
+        echo "      下载失败，改用本地的 $other"
+        echo "      注意：它不是钉死的那一版，带的 Python 版本可能不是 $CONDA_PY"
+        CONDA_EXE="$other"
+        return 0
+    fi
+    CONDA_EXE=""
+    return 1
+}
+
+# 跑安装器。官方文档（Advanced install → Silent mode）规定的用法：
+#   /InstallationType=[JustMe|AllUsers]   默认 JustMe
+#   /AddToPath=[0|1]                      默认 0
+#   /RegisterPython=[0|1]                 默认 0
+#   /S                                    静默
+#   /D=<path>   必须是最后一个参数、不能加引号、静默安装时必填
+#   所有参数大小写敏感
+#
+# /AddToPath 必须是 0（官方默认也是 0，示例里压根没传）。这份 conda 装在仓库里、
+# 跟着仓库走——写进用户 PATH 的话仓库一挪一删 PATH 就指向空目录，还会悄悄接管
+# 这台机器上所有命令行的 python。脚本自己 export PATH 给本进程用就够了，
+# record_multicam.sh 也会自己找一次。
+#
+# 直接调 exe，不套 cmd //c start //wait：MSYS_NO_PATHCONV=1 会连 // 开头的参数
+# 一起放过，//wait 原样传给 cmd，cmd 不认、后面参数整体串位——之前现场报的
+# 'egisterPython' is not recognized 就是这么来的。从 bash 直接执行本来就会等
+# 进程退出。
+run_conda_installer() {  # run_conda_installer <exe> <prefix>
+    local exe="$1" prefix="$2" prefix_win
+    prefix_win="$(cygpath -w "$prefix")"
+    if [ "$prefix_win" != "${prefix_win// /}" ]; then
+        # /D 不能加引号，而 MSYS 给带空格的参数自动补引号——两条撞在一起，
+        # NSIS 会收到带引号的路径然后装到别处去。与其装错不如不装。
+        fail Miniconda "安装路径里有空格（$prefix_win），NSIS 的 /D 不支持"
+        echo "             把仓库挪到没有空格的路径下再跑，例如 C:\\wit\\witmotion_imu"
+        return 1
+    fi
+    echo "      静默安装到 $prefix_win ..."
+    MSYS_NO_PATHCONV=1 "$exe" \
+        /InstallationType=JustMe /AddToPath=0 /RegisterPython=0 /S \
+        /D=$prefix_win
+}
+
+py_ver() { "$1" -c "import sys;print('%d.%d'%sys.version_info[:2])" 2>/dev/null; }
+
 echo "[1/4] Miniconda"
 if [ -x "$CONDA_ROOT/python.exe" ]; then
     echo "      已安装: $CONDA_ROOT"
@@ -158,84 +215,62 @@ elif [ -z "$RE_CONDA" ] && [ -x "${PROGRAMDATA:-/c/ProgramData}/miniconda3/pytho
     CONDA_ROOT="${PROGRAMDATA:-/c/ProgramData}/miniconda3"
     echo "      已安装: $CONDA_ROOT"
 else
-    # 本地已经有安装包就直接用，别再下一遍。自己下的会落在 cache/miniconda.exe，
-    # 手动拷进来的多半是官方原名 Miniconda3-*.exe、丢在 .tools/ 下
-    # 先找钉死的那个版本；找不到再退而求其次用本地任意一个 Miniconda 安装包，
-    # 但要说清楚它带的 Python 版本未知
-    CONDA_EXE="$(find_local "$TOOLS/$CONDA_INSTALLER" "$CACHE/$CONDA_INSTALLER")" || CONDA_EXE=""
-    if [ -n "$CONDA_EXE" ]; then
-        echo "      用本地安装包（$CONDA_EXE）"
-    else
-        OTHER="$(find_local "$TOOLS/Miniconda3-*.exe" "$CACHE/Miniconda3-*.exe" "$CACHE/miniconda.exe")" || OTHER=""
-        echo "      本地没有 $CONDA_INSTALLER，从官方源下载..."
-        if curl -fL --retry 3 -C - -o "$CACHE/$CONDA_INSTALLER" "$CONDA_URL"; then
-            CONDA_EXE="$CACHE/$CONDA_INSTALLER"
-        elif [ -n "$OTHER" ]; then
-            echo "      下载失败，改用本地的 $OTHER"
-            echo "      注意：它不是钉死的那一版，带的 Python 版本可能不是 $CONDA_PY"
-            CONDA_EXE="$OTHER"
-        fi
-    fi
-    if [ -n "$CONDA_EXE" ] && [ -s "$CONDA_EXE" ]; then
+    if get_conda_installer; then
         tried_conda_install=1
-        CONDA_WIN="$(cygpath -w "$CONDA_ROOT")"
-        echo "      静默安装到 $CONDA_WIN ..."
-        # 官方文档（Advanced install → Silent mode）规定的用法：
-        #   /InstallationType=[JustMe|AllUsers]   默认 JustMe
-        #   /AddToPath=[0|1]                      默认 0
-        #   /RegisterPython=[0|1]                 默认 0
-        #   /S                                    静默
-        #   /D=<path>   必须是最后一个参数、不能加引号、静默安装时必填
-        #   所有参数大小写敏感
-        #
-        # /AddToPath 必须是 0（官方默认也是 0，示例里压根没传）。这份 conda 装在
-        # 仓库里，跟着仓库走——写进用户 PATH 的话，仓库一挪一删，PATH 就指向空目录，
-        # 而且会悄悄接管这台机器上所有命令行的 python。脚本自己 export PATH 给
-        # 本进程用就够了。
-        #
-        # 直接调 exe，不套 cmd //c start //wait：MSYS_NO_PATHCONV=1 会连 // 开头
-        # 的参数一起放过，//wait 原样传给 cmd，cmd 不认、后面参数整体串位——
-        # 之前现场报的 'egisterPython' is not recognized 就是这么来的。
-        # 从 bash 直接执行本来就会等进程退出。
-        if [ "$CONDA_WIN" != "${CONDA_WIN// /}" ]; then
-            # /D 不能加引号，而 MSYS 给带空格的参数自动补引号——两条撞在一起，
-            # NSIS 会收到带引号的路径然后装到别处去。与其装错不如不装。
-            fail Miniconda "安装路径里有空格（$CONDA_WIN），NSIS 的 /D 不支持"
-            echo "             把仓库挪到没有空格的路径下再跑，例如 C:\\wit\\witmotion_imu"
-        else
-            MSYS_NO_PATHCONV=1 "$CONDA_EXE" \
-                /InstallationType=JustMe /AddToPath=0 /RegisterPython=0 /S \
-                /D=$CONDA_WIN
-        fi
+        echo "      用安装包（$CONDA_EXE）"
+        run_conda_installer "$CONDA_EXE" "$CONDA_ROOT"
     else
-        fail Miniconda "下载不下来"
+        fail Miniconda "下载不下来，本地也没有安装包"
     fi
 fi
+
 if [ -x "$CONDA_ROOT/python.exe" ]; then
     PY="$CONDA_ROOT/python.exe"
     export PATH="$CONDA_ROOT:$CONDA_ROOT/Scripts:$PATH"
-    GOT_PY="$("$PY" -c "import sys;print('%d.%d'%sys.version_info[:2])" 2>/dev/null)"
+    GOT_PY="$(py_ver "$PY")"
+
     if [ "$GOT_PY" != "$CONDA_PY" ]; then
-        # 版本不对就地换，不用重下 90MB 的安装包——conda 本来就能改 base 的
-        # Python 版本，只需要下 python 这个包本身及其依赖。
-        # 会走到这儿的情况：机器上早先装的是别的版本（比如 latest 带的 3.14），
-        # 或者钉死的安装包没下下来、退而用了本地别的包。
-        echo "      当前是 Python $GOT_PY，要的是 $CONDA_PY，就地改..."
+        # 版本不对。先试就地换（只下 python 包本身，比重下 90MB 的安装包省），
+        # 换不动再退回"下钉死的安装包重装"。
+        #
+        echo "      当前是 Python $GOT_PY，要的是 $CONDA_PY，先试就地改..."
         CONDA_BIN="$CONDA_ROOT/Scripts/conda.exe"
         if [ -x "$CONDA_BIN" ]; then
-            "$CONDA_BIN" install -y "python=$CONDA_PY"
-            GOT_PY="$("$PY" -c "import sys;print('%d.%d'%sys.version_info[:2])" 2>/dev/null)"
-        else
-            echo "      找不到 $CONDA_BIN，改不了"
+            # 新版 conda 用默认频道前要先接受服务条款，不接受就直接报
+            #   CondaToSNonInteractiveError: Terms of Service have not been accepted
+            # 打印出来再执行，不藏着：这是接受 Anaconda 的频道服务条款，
+            # 注意默认频道对一定规模以上的公司另有商业授权要求。
+            # （不想接受也能装：下面那条"用钉死的安装包重装"根本不碰 conda 频道。）
+            echo "      接受 conda 默认频道的服务条款（Anaconda ToS）..."
+            for ch in main r msys2; do
+                "$CONDA_BIN" tos accept --override-channels \
+                    --channel "https://repo.anaconda.com/pkgs/$ch" >/dev/null 2>&1 || true
+            done
+            "$CONDA_BIN" install -y "python=$CONDA_PY" || true
+            GOT_PY="$(py_ver "$PY")"
         fi
     fi
+
+    if [ "$GOT_PY" != "$CONDA_PY" ]; then
+        echo "      就地改没成，改成用 $CONDA_PY 的安装包重装一遍"
+        if get_conda_installer && [ -s "$CONDA_EXE" ]; then
+            tried_conda_install=1
+            rm -rf "$CONDA_ROOT"          # NSIS 装进非空目录会出问题
+            run_conda_installer "$CONDA_EXE" "$CONDA_ROOT"
+            if [ -x "$CONDA_ROOT/python.exe" ]; then
+                PY="$CONDA_ROOT/python.exe"
+                GOT_PY="$(py_ver "$PY")"
+            fi
+        fi
+    fi
+
     if [ "$GOT_PY" = "$CONDA_PY" ]; then
         echo "      完成（Python $GOT_PY）"
     else
         # 不算失败——装是装上了，后面的 pip 会不会炸取决于具体的包。但要先说一声，
         # 不然 pip 报"找不到满足要求的版本"时根本想不到是 Python 版本的事。
         # bleak 0.22.3 的 requires-python 是 >=3.8,<3.14，3.14 就正好被挡在外面。
-        echo "      完成（Python $GOT_PY，不是要的 $CONDA_PY，没改成）"
+        echo "      完成（Python $GOT_PY，不是要的 $CONDA_PY）"
         echo "      下面 pip 如果报「Could not find a version that satisfies」，就是这个原因"
     fi
 elif command -v python >/dev/null 2>&1; then
@@ -253,12 +288,13 @@ fi
 if [ -n "${tried_conda_install:-}" ] && [ ! -x "$CONDA_ROOT/python.exe" ]; then
     # 只删自己下的那份。手动拷进来的不动——那是人特意放的，删了等于把人家
     # 刚拷进来的东西吞掉，而且下次重跑又要重下一遍
-    if [ "$CONDA_EXE" = "$CACHE/miniconda.exe" ]; then
-        rm -f "$CACHE/miniconda.exe"
-        echo "      已清掉下载的安装包，下次重跑会重新下载"
-    else
-        echo "      装不出来，但 $CONDA_EXE 是手动放的，没动它"
-    fi
+    case "$CONDA_EXE" in
+        "$CACHE"/*)
+            rm -f "$CONDA_EXE"
+            echo "      已清掉下载的安装包，下次重跑会重新下载" ;;
+        *)
+            [ -n "$CONDA_EXE" ] && echo "      装不出来，但 $CONDA_EXE 是手动放的，没动它" ;;
+    esac
 fi
 
 # ── 2. ffmpeg ────────────────────────────────────────────────────────────
