@@ -56,6 +56,23 @@ PY=""
 
 fail() { FAILED+=("$1"); echo "      [失败] $2"; }
 
+# 找一个已经放在本地的安装包，找到就打印路径、返回 0。
+# 先翻 .tools/ 再翻 .tools/cache/：人手动拷进来时自然会丢在 .tools/ 下，
+# 没道理逼着按脚本的目录规矩摆。文件名用通配匹配——官方包名带版本号
+# （ffmpeg-8.1.1-essentials_build.zip），不可能猜得准。
+find_local() {  # find_local <glob> ...
+    local g
+    for g in "$@"; do
+        local hit
+        hit="$(ls -1 $g 2>/dev/null | head -1)"
+        if [ -n "$hit" ] && [ -s "$hit" ]; then
+            echo "$hit"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # 解压统一走 PowerShell 的 Expand-Archive：Git for Windows 不一定带 unzip，
 # 而 MSYS 的 GNU tar 不认 zip
 unzip_to() {  # unzip_to <zip> <目标目录>
@@ -89,27 +106,50 @@ elif [ -x "${PROGRAMDATA:-/c/ProgramData}/miniconda3/python.exe" ]; then
     CONDA_ROOT="${PROGRAMDATA:-/c/ProgramData}/miniconda3"
     echo "      已安装: $CONDA_ROOT"
 else
-    # -C - 断点续传，配合 cache 里留下的半截文件：网断了重跑能接着下
-    if [ -s "$CACHE/miniconda.exe" ]; then
-        echo "      用缓存的安装包（$CACHE/miniconda.exe）"
+    # 本地已经有安装包就直接用，别再下一遍。自己下的会落在 cache/miniconda.exe，
+    # 手动拷进来的多半是官方原名 Miniconda3-*.exe、丢在 .tools/ 下
+    CONDA_EXE="$(find_local \
+        "$TOOLS/Miniconda3-*.exe" "$TOOLS/miniconda*.exe" \
+        "$CACHE/Miniconda3-*.exe" "$CACHE/miniconda.exe")" || CONDA_EXE=""
+    if [ -n "$CONDA_EXE" ]; then
+        echo "      用本地安装包（$CONDA_EXE）"
     else
-        echo "      从官方源下载安装包..."
-        curl -fL --retry 3 -C - -o "$CACHE/miniconda.exe" "$CONDA_URL"
+        echo "      本地没有，从官方源下载..."
+        # -C - 断点续传：网断了重跑能接着下
+        curl -fL --retry 3 -C - -o "$CACHE/miniconda.exe" "$CONDA_URL" \
+            && CONDA_EXE="$CACHE/miniconda.exe"
     fi
-    if [ -s "$CACHE/miniconda.exe" ]; then
+    if [ -n "$CONDA_EXE" ] && [ -s "$CONDA_EXE" ]; then
         tried_conda_install=1
-        echo "      静默安装到 $(cygpath -w "$CONDA_ROOT") ..."
-        # 直接调 exe，不要套 cmd //c start //wait：
-        # MSYS_NO_PATHCONV=1 会连 // 开头的参数一起放过，于是 //wait 原样传给 cmd，
-        # cmd 不认，后面的参数跟着串位——现场报的是 'egisterPython' is not
-        # recognized，正是 /RegisterPython 被啃掉了开头的 /R。
-        # 而且从 bash 直接执行本来就会等进程退出，不需要 start //wait。
+        CONDA_WIN="$(cygpath -w "$CONDA_ROOT")"
+        echo "      静默安装到 $CONDA_WIN ..."
+        # 官方文档（Advanced install → Silent mode）规定的用法：
+        #   /InstallationType=[JustMe|AllUsers]   默认 JustMe
+        #   /AddToPath=[0|1]                      默认 0
+        #   /RegisterPython=[0|1]                 默认 0
+        #   /S                                    静默
+        #   /D=<path>   必须是最后一个参数、不能加引号、静默安装时必填
+        #   所有参数大小写敏感
         #
-        # /D 必须放最后、不能加引号（NSIS 的硬性要求），路径还得是 Windows 风格；
-        # MSYS_NO_PATHCONV=1 是为了 /InstallationType 这些不被当成路径翻译。
-        MSYS_NO_PATHCONV=1 "$CACHE/miniconda.exe" \
-            /InstallationType=JustMe /AddToPath=1 /RegisterPython=0 /S \
-            /D="$(cygpath -w "$CONDA_ROOT")"
+        # /AddToPath 必须是 0（官方默认也是 0，示例里压根没传）。这份 conda 装在
+        # 仓库里，跟着仓库走——写进用户 PATH 的话，仓库一挪一删，PATH 就指向空目录，
+        # 而且会悄悄接管这台机器上所有命令行的 python。脚本自己 export PATH 给
+        # 本进程用就够了。
+        #
+        # 直接调 exe，不套 cmd //c start //wait：MSYS_NO_PATHCONV=1 会连 // 开头
+        # 的参数一起放过，//wait 原样传给 cmd，cmd 不认、后面参数整体串位——
+        # 之前现场报的 'egisterPython' is not recognized 就是这么来的。
+        # 从 bash 直接执行本来就会等进程退出。
+        if [ "$CONDA_WIN" != "${CONDA_WIN// /}" ]; then
+            # /D 不能加引号，而 MSYS 给带空格的参数自动补引号——两条撞在一起，
+            # NSIS 会收到带引号的路径然后装到别处去。与其装错不如不装。
+            fail Miniconda "安装路径里有空格（$CONDA_WIN），NSIS 的 /D 不支持"
+            echo "             把仓库挪到没有空格的路径下再跑，例如 C:\\wit\\witmotion_imu"
+        else
+            MSYS_NO_PATHCONV=1 "$CONDA_EXE" \
+                /InstallationType=JustMe /AddToPath=0 /RegisterPython=0 /S \
+                /D=$CONDA_WIN
+        fi
     else
         fail Miniconda "下载不下来"
     fi
@@ -131,8 +171,14 @@ fi
 # 判断条件挂在"装没装出来"上，不是挂在上面那个 fail 上：机器里本来就有
 # python 时会走 [退让] 分支、不算失败，但那个坏包照样是坏的，也该清掉。
 if [ -n "${tried_conda_install:-}" ] && [ ! -x "$CONDA_ROOT/python.exe" ]; then
-    rm -f "$CACHE/miniconda.exe"
-    echo "      已清掉缓存的安装包，下次重跑会重新下载"
+    # 只删自己下的那份。手动拷进来的不动——那是人特意放的，删了等于把人家
+    # 刚拷进来的东西吞掉，而且下次重跑又要重下一遍
+    if [ "$CONDA_EXE" = "$CACHE/miniconda.exe" ]; then
+        rm -f "$CACHE/miniconda.exe"
+        echo "      已清掉下载的安装包，下次重跑会重新下载"
+    else
+        echo "      装不出来，但 $CONDA_EXE 是手动放的，没动它"
+    fi
 fi
 
 # ── 2. ffmpeg ────────────────────────────────────────────────────────────
@@ -146,12 +192,16 @@ elif [ -x "$FFDIR_U/bin/ffmpeg.exe" ]; then
     echo "      已安装: $FFDIR"
     export PATH="$FFDIR_U/bin:$PATH"
 else
+    # 本地已经有压缩包就直接用。手动拷进来的多半是官方原名、带版本号
+    # （ffmpeg-8.1.1-essentials_build.zip），所以按通配找，不能只认 ffmpeg.zip
+    FF_ZIP="$(find_local \
+        "$TOOLS/ffmpeg*.zip" "$CACHE/ffmpeg*.zip")" || FF_ZIP=""
     got=""
-    if [ -s "$CACHE/ffmpeg.zip" ]; then
-        echo "      用缓存的压缩包（$CACHE/ffmpeg.zip）"
+    if [ -n "$FF_ZIP" ]; then
+        echo "      用本地压缩包（$FF_ZIP）"
         got=1
     fi
-    [ -z "$got" ] && echo "      下载压缩包..."
+    [ -z "$got" ] && echo "      本地没有，下载压缩包..."
     [ -n "$got" ] || for url in \
         "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" \
         "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"
@@ -162,12 +212,12 @@ else
         # 兜：连续 60 秒低于 10KB/s 才判失败，比一刀切的总时长合理。
         # -C - 断点续传：106MB 在慢网上很容易断，重跑能接着下而不是从头来
         if curl -fL --retry 2 -C - --max-time 2400 --speed-time 60 --speed-limit 10240 \
-                -o "$CACHE/ffmpeg.zip" "$url"; then got=1; break; fi
+                -o "$CACHE/ffmpeg.zip" "$url"; then got=1; FF_ZIP="$CACHE/ffmpeg.zip"; break; fi
         echo "      这个源不行，换下一个"
     done
     if [ -n "$got" ]; then
         rm -rf "$CACHE/ffx"
-        unzip_to "$CACHE/ffmpeg.zip" "$CACHE/ffx" >/dev/null
+        unzip_to "$FF_ZIP" "$CACHE/ffx" >/dev/null
         # 压缩包里是一层带版本号的目录，把它整个挪成 $FFDIR
         inner="$(find "$CACHE/ffx" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1)"
         if [ -n "$inner" ]; then
@@ -181,9 +231,14 @@ else
         echo "      完成: $FFDIR"
     else
         fail ffmpeg "没装上。没有 ffmpeg 录不了视频，必须补上"
-        # 同上：解压不出东西说明缓存的包是坏的，清掉才不会每次重跑都卡在同一处
-        [ -n "$got" ] && rm -f "$CACHE/ffmpeg.zip" && \
-            echo "             已清掉缓存的压缩包，下次重跑会重新下载"
+        # 同上：解压不出东西说明这个包是坏的。但只删自己下的那份，
+        # 手动拷进来的不动
+        if [ "$FF_ZIP" = "$CACHE/ffmpeg.zip" ] && [ -n "$got" ]; then
+            rm -f "$CACHE/ffmpeg.zip"
+            echo "             已清掉下载的压缩包，下次重跑会重新下载"
+        elif [ -n "$FF_ZIP" ]; then
+            echo "             $FF_ZIP 是手动放的，没动它；解压不出来的话检查一下这个包完不完整"
+        fi
         echo "             手动办法：下 ffmpeg-release-essentials.zip 解压到 $FFDIR"
         echo "             解压后应该能看到 $FFDIR\\bin\\ffmpeg.exe"
     fi
