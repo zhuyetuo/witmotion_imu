@@ -659,6 +659,21 @@ def _ffmpeg_has_encoder(name: str) -> bool:
     return _ffmpeg_encoder_cache[name]
 
 
+_ffmpeg_opt_cache = {}
+
+
+def _ffmpeg_has_option(name: str) -> bool:
+    """ffmpeg 认不认某个选项（用来在新旧写法之间选）。"""
+    if name not in _ffmpeg_opt_cache:
+        try:
+            r = subprocess.run(['ffmpeg', '-hide_banner', '-h', 'full'],
+                               capture_output=True, timeout=15)
+            _ffmpeg_opt_cache[name] = name.encode() in r.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            _ffmpeg_opt_cache[name] = False
+    return _ffmpeg_opt_cache[name]
+
+
 def _no_ctrl_c_kwargs():
     """让子进程不跟着挨 Ctrl-C 的 Popen 参数（Windows 和 POSIX 写法不同）。"""
     if os.name == 'nt':
@@ -666,6 +681,30 @@ def _no_ctrl_c_kwargs():
         return {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP}
     # POSIX：新建会话，SIGINT 只发给前台进程组
     return {'start_new_session': True}
+
+
+def _passthrough_args():
+    """
+    "每一帧都写出去，一帧不丢不重"。
+
+    原来用的是 -vsync vfr，而 ffmpeg 对它的定义是：帧按自己的时间戳透传，
+    **或者为了避免两帧时间戳相同而丢弃**。时间戳来自 -use_wallclock_as_timestamps，
+    也就是 ffmpeg 从管道读到那一帧的时刻——不是我们写的时刻。ffmpeg 稍微落后
+    一点、再一口气追读几帧时，这几帧的时间戳几乎相同，就被当成重复帧丢掉了。
+
+    后果是视频帧数少于组合 CSV 行数（现场 3470 对 3483）。而这套采集的对齐前提
+    就是"第 N 帧 ↔ 第 N 行"——差 13 帧就是差半秒，抓挠片段本身才两三秒。
+    脚本里那个自动对齐校验就是专门盯这件事的，它报了 ✘。
+
+    以前没暴露是因为帧率低（5fps）且节奏均匀，ffmpeg 不会追读；提到 21fps
+    并且六路突发写入之后就频繁了。
+
+    passthrough 的语义是"原样透传，不丢不重"，正是这里要的。
+    新 ffmpeg 用 -fps_mode passthrough，老的只有 -vsync 0，探测一下用哪个。
+    """
+    if _ffmpeg_has_option('fps_mode'):
+        return ['-fps_mode', 'passthrough']
+    return ['-vsync', '0']
 
 
 class _FfmpegVfrSink:
@@ -719,7 +758,7 @@ class _FfmpegVfrSink:
                 '-f', 'rawvideo', '-pix_fmt', 'bgr24', '-s', f'{width}x{height}',
                 '-use_wallclock_as_timestamps', '1',
                 '-i', '-',
-                *codec_args, '-pix_fmt', pix_fmt, '-vsync', 'vfr',
+                *codec_args, '-pix_fmt', pix_fmt, *_passthrough_args(),
                 path,
             ],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
