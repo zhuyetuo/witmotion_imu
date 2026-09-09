@@ -597,13 +597,39 @@ def precheck_devices(devices: list[ImuDevice], scan_timeout: float = 12.0) -> li
         return match_by_name(d.ident, candidates)
 
     print(f'开录前预检：确认 {len(wit)} 个 IMU 设备都在（最多扫 {scan_timeout:.0f} 秒）...')
-    loop = asyncio.new_event_loop()
-    try:
-        asyncio.set_event_loop(loop)
-        candidates = loop.run_until_complete(_scan())
-    finally:
-        loop.close()
-        asyncio.set_event_loop(None)
+
+    # 必须放到独立线程里跑，不能用主线程。
+    #
+    # bleak 的 WinRT 后端要求所在线程是 MTA（多线程套间）。这个函数是在摄像头
+    # 都打开之后才调用的，那时候 OpenCV 已经把主线程初始化成 GUI(STA) 了，
+    # 直接在主线程 start() 扫描器会炸：
+    #   BleakError: Thread is configured for Windows GUI but callbacks are not working.
+    # 录制那条路（ble_thread_main）本来就是起一个新线程，从来没碰到这个问题；
+    # 预检照做即可。新起的线程默认还没定套间，bleak 会自己按 MTA 初始化。
+    box: dict = {}
+
+    def _runner():
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            box['candidates'] = loop.run_until_complete(_scan())
+        except Exception as e:  # noqa: BLE001 预检自己出错不该把录制拦下来
+            box['error'] = e
+        finally:
+            loop.close()
+
+    th = threading.Thread(target=_runner, daemon=True)
+    th.start()
+    # 扫描最多 scan_timeout，留一倍余量给启动/收尾；真卡住了也不能无限等
+    th.join(timeout=scan_timeout * 2 + 15.0)
+    if th.is_alive():
+        print('  预检扫描没能在预期时间内结束，跳过预检直接开录（录起来之后设备照常自动重连）')
+        return []
+    if 'error' in box:
+        # 预检是个保险，不是必经之路。它自己坏了就让开，别把能录的一天挡在门外
+        print(f'  预检扫描出错，跳过预检直接开录（录起来之后设备照常自动重连）：{box["error"]}')
+        return []
+    candidates = box.get('candidates', [])
 
     problems = []
     for d in wit:

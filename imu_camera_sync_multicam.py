@@ -817,6 +817,20 @@ def main():
         run_probe(args, args.camera, devices)
         return
 
+    # 设备没到齐就别开录：录一整天出来 IMU 全是空 CSV，那一天补不回来。
+    # 只在开录前拦一次，录起来之后掉线还是照常自动重连（狗跑远了要能恢复）。
+    #
+    # 放在打开摄像头**之前**：一是设备不齐就不用白白初始化三路 1080p；二是
+    # OpenCV 打开摄像头会把主线程初始化成 Windows GUI(STA)，而 bleak 的 WinRT
+    # 后端要求 MTA，之后再扫描会直接炸（Thread is configured for Windows GUI
+    # but callbacks are not working）。precheck_devices 内部另起线程也躲开了
+    # 这个问题，这里再顺手把顺序也摆对。
+    if devices and not args.no_precheck:
+        problems = precheck_devices(devices, scan_timeout=max(args.scan_timeout, 12.0))
+        if problems:
+            print('\n没有开始录制。改对 --imu 参数再来，或者加 --no-precheck 强行开录。')
+            sys.exit(1)
+
     autofocus = {'on': True, 'off': False}.get(args.autofocus)
     auto_wb = {'on': True, 'off': False}.get(args.auto_wb)
     cameras = []
@@ -829,14 +843,6 @@ def main():
                                          show_settings_dialog=args.show_settings_dialog))
         except RuntimeError as e:
             print(e)
-            sys.exit(1)
-
-    # 设备没到齐就别开录：录一整天出来 IMU 全是空 CSV，那一天补不回来。
-    # 只在开录前拦一次，录起来之后掉线还是照常自动重连（狗跑远了要能恢复）。
-    if devices and not args.probe and not args.no_precheck:
-        problems = precheck_devices(devices, scan_timeout=max(args.scan_timeout, 12.0))
-        if problems:
-            print('\n没有开始录制。改对 --imu 参数再来，或者加 --no-precheck 强行开录。')
             sys.exit(1)
 
     t = None
