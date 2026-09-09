@@ -40,6 +40,20 @@
 set -uo pipefail        # 故意不开 -e：某一步失败要能继续走补传/收尾
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
+# 场地配置：跟 record_multicam.sh 读同一份 sites/<名字>.env，KEEP_PAIRS 写在那里。
+# 不共用一份的话，录制端改了配对、归档端还按老的挑文件，结果是默默漏传——
+# 而且是几天后才从平台上样本数不对发现。
+SITE="${SITE:-}"
+if [ -n "$SITE" ] && [ -f "sites/${SITE}.env" ]; then
+    _saved_keep="${KEEP_PAIRS:-}"
+    # shellcheck disable=SC1090
+    . "sites/${SITE}.env"
+    [ -n "$_saved_keep" ] && KEEP_PAIRS="$_saved_keep"
+    say_site="（场地：$SITE）"
+fi
+
+# 默认值是影棚的形状。狗场是 6 路摄像头 6 只狗，必须靠 SITE= 或显式传 KEEP_PAIRS，
+# 否则会漏传一多半。
 KEEP_PAIRS="${KEEP_PAIRS:-cam1_imu1 cam2_imu2 cam3_imu3 cam1_imu4:csv}"
 NAS_DEST="${NAS_DEST:-//192.168.2.249/ai_data/data_raw}"
 DATA_DIR="${DATA_DIR:-data/multicam_multiimu}"
