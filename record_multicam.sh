@@ -14,10 +14,19 @@
 #   CAMS="0 1" ./record_multicam.sh
 #
 # 降采样怎么处理，用 RESAMPLE_MODE 控制：
-#   only（默认）：只保留降采样后的 camX_imuY_resampled{HZ}hz.mp4/.csv 配对文件，
-#                 删除原始的 {base}_camN.mp4/.csv/_meta.csv/_{imu}_raw.csv
-#   none        ：只保留原始文件，不生成任何降采样配对文件（--no-resample）
+#   none（默认）：只保留原始文件，不生成任何降采样配对文件（--no-resample）
 #   both        ：原始文件和降采样配对文件都保留（不传 --resample-only 也不传 --no-resample）
+#   only        ：只保留降采样后的 camX_imuY_resampled{HZ}hz.mp4/.csv 配对文件，
+#                 **当场删掉**原始的 {base}_camN.mp4/.csv/_meta.csv/_{imu}_raw.csv
+#
+# 默认从 only 改成了 none。only 是不可逆的：原始流水在每段录完时就删在本地，
+# 早于归档上传，NAS 上和暂存目录里都不会有（暂存是硬链接，链的就是降采样版）。
+# 而降采样回不去——16Hz 的奈奎斯特频率是 8Hz，8Hz 以上的成分存盘那一刻就没了，
+# 插值只能把点变密，不会把信息变回来。抓挠的判据恰好是陀螺仪 4–8Hz 的能量占比，
+# 正卡在这个频带的上沿，谐波全丢。
+#
+# 硬盘便宜，重录一遍那几个月不可能。要省地方就用 both，或者事后再降采样
+# （resample_csv_hz.py），别在采集这一步就把原件删了。
 #
 # 画面上想显示狗狗名字而不是 imu1/imu2 这种编号，用 DOG_NAMES 传（空格分隔，
 # 顺序要跟 IMUS 一一对应，第几个名字对应第几个IMU），比如：
@@ -38,7 +47,7 @@ RESAMPLE_HZ="${RESAMPLE_HZ:-16}"
 CAM_FPS="${CAM_FPS:-25}"
 WARMUP_SEC="${WARMUP_SEC:-10}"
 OUT_DIR="${OUT_DIR:-data/multicam_multiimu}"
-RESAMPLE_MODE="${RESAMPLE_MODE:-only}"
+RESAMPLE_MODE="${RESAMPLE_MODE:-none}"
 # 设备一直连不上时重连间隔的封顶秒数（指数退避2→4→8→...封顶这个值），默认
 # 300秒（5分钟）；长时间无人值守录制建议保持默认或调更高，避免频繁反复扫描
 # 把Windows蓝牙栈拖垮（症状：整个蓝牙适配器搜不到任何设备，得重启电脑）。
@@ -60,7 +69,13 @@ for idx in $CAMS; do
 done
 
 case "$RESAMPLE_MODE" in
-    only) resample_flag=(--resample-only) ;;
+    only)
+        # 唯一一个会删原始数据的选项，删了不可逆，所以吵一句再走
+        echo "警告：RESAMPLE_MODE=only 会在每段录完后删掉原始 ${RESAMPLE_HZ}Hz 之上的流水文件，不可恢复。"
+        echo "      想同时留原始和降采样版用 RESAMPLE_MODE=both。5 秒后继续，要停按 Ctrl-C。"
+        sleep 5
+        resample_flag=(--resample-only)
+        ;;
     none) resample_flag=(--no-resample) ;;
     both) resample_flag=() ;;
     *) echo "RESAMPLE_MODE 只能是 only/none/both，收到的是: $RESAMPLE_MODE"; exit 1 ;;
