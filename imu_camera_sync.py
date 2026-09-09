@@ -659,6 +659,15 @@ def _ffmpeg_has_encoder(name: str) -> bool:
     return _ffmpeg_encoder_cache[name]
 
 
+def _no_ctrl_c_kwargs():
+    """让子进程不跟着挨 Ctrl-C 的 Popen 参数（Windows 和 POSIX 写法不同）。"""
+    if os.name == 'nt':
+        # Windows：新建进程组，CTRL_C_EVENT 就不会传给它
+        return {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP}
+    # POSIX：新建会话，SIGINT 只发给前台进程组
+    return {'start_new_session': True}
+
+
 class _FfmpegVfrSink:
     _encoder_reported = False   # 只在第一路摄像头时打印一次用了哪个编码器
     """
@@ -714,6 +723,17 @@ class _FfmpegVfrSink:
                 path,
             ],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            # 让 ffmpeg 不接收 Ctrl-C。
+            #
+            # 不隔离的话：Ctrl-C 是发给整个进程组的，ffmpeg 跟 Python 同时被打断，
+            # 来不及把 mp4 的 moov 索引写完——那一段视频就是坏的或截断的。
+            # 现场表现是停止时刷出一串 "ffmpeg 写入视频失败 (exit 255)"。
+            # 加了 --no-preview 之后这条路更要紧：没有窗口就没法按 q 退出，
+            # 停止手段只剩 Ctrl-C，而无人值守录制迟早要这么停。
+            #
+            # 隔离之后 Ctrl-C 只打到 Python，Python 走正常收尾：关 stdin ->
+            # ffmpeg 看到输入结束 -> 自己写完索引退出。
+            **_no_ctrl_c_kwargs(),
         )
 
     def write(self, frame):
