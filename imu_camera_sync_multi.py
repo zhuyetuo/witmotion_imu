@@ -71,6 +71,9 @@ from imu_camera_sync import (
     _FfmpegVfrSink, _Cv2CfrSink, _measure_actual_fps, probe_camera, resample_raw_imu,
 )
 
+# 名字匹配规则跟各种小工具共用一份（见 ble_utils.match_by_name 的说明）
+from ble_utils import match_by_name
+
 _MAC_RE = re.compile(r'^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$')
 
 stop_event = threading.Event()
@@ -118,6 +121,7 @@ class SharedScanner:
         self.restarts = 0
         self._restart_lock = asyncio.Lock()
         self._last_restart = 0.0
+        self._last_match_err = None
 
     def _on_detect(self, device, _adv_data):
         now = time.monotonic()
@@ -187,13 +191,29 @@ class SharedScanner:
                 return entry[0]
             return None
         if name_filter:
-            nf = name_filter.lower()
-            best, best_ts = None, -1.0
-            for dev, ts in self._seen.values():
-                if dev.name and nf in dev.name.lower() and now - ts <= self.max_age_s and ts > best_ts:
-                    best, best_ts = dev, ts
-            return best
+            fresh = [(dev, ts) for dev, ts in self._seen.values() if now - ts <= self.max_age_s]
+            dev, err = match_by_name(name_filter, fresh)
+            if err:
+                # 每次重连都会走到这儿，不限流的话一秒刷一屏。只在说法变了时再喊一次
+                if err != self._last_match_err:
+                    print(f'[BLE] {err}')
+                    self._last_match_err = err
+                return None
+            if dev is not None and dev.name and dev.name.lower() != name_filter.lower():
+                # 名字对不严实但只有它一个候选，还是连上——写半截名字（WT901BLE68
+                # 只写 WT901）是常见用法。但要说一声：万一是想连 WT1 而现场只有
+                # WT10，不吭声就等于悄悄连错设备，数据会记到别的狗名下
+                warn = f'"{name_filter}" 没有同名设备，按包含匹配连的是 {dev.name}({dev.address})'
+                if warn != self._last_match_err:
+                    print(f'[BLE] {warn}')
+                    self._last_match_err = warn
+            return dev
         return None
+
+    def snapshot(self):
+        """当前还新鲜的广播，(设备, 时间) 列表。开录前的预检要用。"""
+        now = time.monotonic()
+        return [(dev, ts) for dev, ts in self._seen.values() if now - ts <= self.max_age_s]
 
 # 原始IMU流水csv的表头：timestamp 是格式化时间字符串（跟降采样输出的
 # timestamp 列格式一致，%Y-%m-%d %H:%M:%S.fff），给人看/直接拖进 Label
@@ -533,6 +553,76 @@ async def run_hicc_device(device: ImuDevice, scan_timeout: float, reconnect_max_
             continue
         break
     print(f'[{device.label}] HICC 已断开')
+
+
+def precheck_devices(devices: list[ImuDevice], scan_timeout: float = 12.0) -> list[str]:
+    """
+    开录前先确认每个 wit 设备真的在。返回问题清单，空列表 = 都没问题。
+
+    为什么值得单独扫一次：设备连不上时，重连循环会一直退避重试（这是对的，
+    狗跑远了/项圈没电了要能自己恢复），但如果是**参数写错了**——名字打错、
+    默认值还是出厂的 WT901BLE68、设备根本没开机——那就会安安静静录一整天，
+    视频齐全而 IMU 的 CSV 一行数据都没有。这种样本导进平台就是"无 CSV 数据"，
+    只能删掉重来，而那一天已经过去了。
+
+    hicc 设备按 MAC 直连、不走扫描，这里不管。
+    """
+    wit = [d for d in devices if d.dev_type == 'wit']
+    if not wit:
+        return []
+
+    async def _scan():
+        seen = {}
+
+        def _cb(dev, _adv):
+            seen[dev.address.upper()] = (dev, time.monotonic())
+
+        scanner = BleakScanner(detection_callback=_cb)
+        await scanner.start()
+        try:
+            deadline = time.time() + scan_timeout
+            while time.time() < deadline:
+                await asyncio.sleep(0.5)
+                # 全找齐了就不用把时间耗满
+                if all(_resolve(d, list(seen.values()))[0] is not None for d in wit):
+                    break
+        finally:
+            await scanner.stop()
+        return list(seen.values())
+
+    def _resolve(d, candidates):
+        if _MAC_RE.match(d.ident):
+            hit = [x for x, _ in candidates if x.address.upper() == d.ident.upper()]
+            return (hit[0] if hit else None), None
+        return match_by_name(d.ident, candidates)
+
+    print(f'开录前预检：确认 {len(wit)} 个 IMU 设备都在（最多扫 {scan_timeout:.0f} 秒）...')
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        candidates = loop.run_until_complete(_scan())
+    finally:
+        loop.close()
+        asyncio.set_event_loop(None)
+
+    problems = []
+    for d in wit:
+        dev, err = _resolve(d, candidates)
+        if err:
+            problems.append(f'{d.label} ({d.ident}): {err}')
+        elif dev is None:
+            problems.append(f'{d.label} ({d.ident}): 没扫到')
+        else:
+            note = '' if (dev.name or '').lower() == d.ident.lower() else '  ← 名字不完全一致，确认是不是这个'
+            print(f'  {d.label} = {dev.name}({dev.address}){note}')
+    if problems:
+        print('\n预检没过：')
+        for p in problems:
+            print(f'  ✘ {p}')
+        print('\n现场扫到的设备：')
+        for dev, _ in sorted(candidates, key=lambda x: (x[0].name or '~')):
+            print(f'  {(dev.name or "(无名称)"):<30s} {dev.address}')
+    return problems
 
 
 def ble_thread_main(devices: list[ImuDevice], scan_timeout: float, reconnect_max_backoff: float = 300.0):

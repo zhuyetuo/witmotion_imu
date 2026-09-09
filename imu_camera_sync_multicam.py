@@ -61,7 +61,7 @@ from imu_camera_sync import (
     write_anchored_raw_csv,
 )
 from imu_camera_sync_multi import (
-    ImuDevice, ble_thread_main, parse_imu_spec, stop_event, _new_sample_event, RAW_CSV_HEADER,
+    ImuDevice, ble_thread_main, parse_imu_spec, precheck_devices, stop_event, _new_sample_event, RAW_CSV_HEADER,
 )
 
 
@@ -786,6 +786,9 @@ def main():
                          '（12:00→13:00→14:00...），配合 --loop 就能一直按小时切文件。跟 --duration 是'
                          '二选一：加了这个参数 --duration 会被忽略；不加这个参数，--duration 的固定秒数'
                          '用法完全不受影响。')
+    ap.add_argument('--no-precheck', action='store_true',
+                    help='跳过开录前的设备预检。预检是为了避免"参数写错→录一整天空 CSV"，'
+                         '只有确认设备稍后才会上线之类的特殊情况才该关掉')
     ap.add_argument('--probe', action='store_true',
                     help='只探测硬件能力（每路摄像头 + 各IMU设备当前实际输出频率），不录制，探测完直接退出')
     args = ap.parse_args()
@@ -826,6 +829,14 @@ def main():
                                          show_settings_dialog=args.show_settings_dialog))
         except RuntimeError as e:
             print(e)
+            sys.exit(1)
+
+    # 设备没到齐就别开录：录一整天出来 IMU 全是空 CSV，那一天补不回来。
+    # 只在开录前拦一次，录起来之后掉线还是照常自动重连（狗跑远了要能恢复）。
+    if devices and not args.probe and not args.no_precheck:
+        problems = precheck_devices(devices, scan_timeout=max(args.scan_timeout, 12.0))
+        if problems:
+            print('\n没有开始录制。改对 --imu 参数再来，或者加 --no-precheck 强行开录。')
             sys.exit(1)
 
     t = None

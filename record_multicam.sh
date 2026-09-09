@@ -3,6 +3,17 @@
 # 按整点自动切分文件，循环录制直到手动停止。
 #
 # 用法:
+#   SITE=影棚 ./record_multicam.sh     ← 平时就用这个
+#   SITE=狗场 ./record_multicam.sh
+#
+# SITE 会去读 sites/<名字>.env，那里写死了这个场地的设备 MAC、狗名、摄像头路数。
+# 为什么要有它：这个脚本原来的默认值是 IMUS="wit=WT901BLE68 wit=WTSDCL"、
+# CAMS="0 1"，那是很早以前两个出厂名设备加两个摄像头时留下的，现在影棚是 8 个
+# 设备 3 路摄像头、狗场 12 个设备 6 路摄像头，两个场地也不一样——一套默认值
+# 不可能同时对。而这些默认值错了不会报错，只会安静地录一整天空数据。
+# 所以默认值撤掉，配置按场地放进文件里，谁改了都能在 git 里看见。
+#
+# 不用 SITE 也行，环境变量照旧（调试/临时用）：
 #   ./record_multicam.sh
 #   （不想改这个文件的话，也可以用环境变量覆盖，比如:
 #    OUT_DIR=data/multicam_multiimu2 CAM_FPS=30 ./record_multicam.sh）
@@ -35,10 +46,47 @@
 # 只影响画面显示，不影响文件名（文件名还是固定用 imu1/imu2...）。
 
 set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
 
-IMUS="${IMUS:-wit=WT901BLE68 wit=WTSDCL}"
+# 先读场地配置，再让环境变量覆盖它——命令行上临时改一项不用去动文件
+SITE="${SITE:-}"
+if [ -n "$SITE" ]; then
+    site_file="sites/${SITE}.env"
+    if [ ! -f "$site_file" ]; then
+        echo "找不到场地配置 $site_file。现有的："
+        ls sites/*.env 2>/dev/null | sed 's|^|  |' || echo "  （一个都没有）"
+        exit 1
+    fi
+    # 场地文件里是直接赋值（IMUS="..."），source 之后会盖掉命令行上传进来的同名
+    # 变量。想要的是反过来：文件当底、命令行临时覆盖。所以先把命令行给的存一份，
+    # source 完再放回去。
+    for _v in IMUS DOG_NAMES CAMS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
+        eval "_saved_$_v=\${$_v:-}"
+    done
+    # shellcheck disable=SC1090
+    . "$site_file"
+    for _v in IMUS DOG_NAMES CAMS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
+        eval "_s=\$_saved_$_v"
+        [ -n "$_s" ] && eval "$_v=\$_s"
+    done
+    echo "场地：$SITE（$site_file）"
+fi
+
+IMUS="${IMUS:-}"
 DOG_NAMES="${DOG_NAMES:-}"
-CAMS="${CAMS:-0 1}"
+CAMS="${CAMS:-}"
+
+# 没有默认值可以退：这两项填错不会报错，只会安静地录一整天废数据，
+# 所以宁可不启动
+if [ -z "$IMUS" ]; then
+    echo "没有配置 IMU 设备。用 SITE=影棚 ./record_multicam.sh，或者自己传 IMUS=\"wit=MAC ...\"。"
+    echo "拿设备 MAC：python wit_ble_live.py --scan"
+    exit 1
+fi
+if [ -z "$CAMS" ]; then
+    echo "没有配置摄像头。用 SITE=... 或者传 CAMS=\"0 1 2\"。"
+    exit 1
+fi
 WIDTH="${WIDTH:-1280}"
 HEIGHT="${HEIGHT:-720}"
 CAPTURE_WIDTH="${CAPTURE_WIDTH:-1920}"
@@ -47,6 +95,7 @@ RESAMPLE_HZ="${RESAMPLE_HZ:-16}"
 CAM_FPS="${CAM_FPS:-25}"
 WARMUP_SEC="${WARMUP_SEC:-10}"
 OUT_DIR="${OUT_DIR:-data/multicam_multiimu}"
+
 RESAMPLE_MODE="${RESAMPLE_MODE:-none}"
 # 设备一直连不上时重连间隔的封顶秒数（指数退避2→4→8→...封顶这个值），默认
 # 300秒（5分钟）；长时间无人值守录制建议保持默认或调更高，避免频繁反复扫描
