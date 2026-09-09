@@ -703,15 +703,21 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 cam_imu_info = ([x for x in imu_info if (cam.label, x[0].label) in pair_filter]
                                 if pair_filter else imu_info)
                 if prof: _t = time.perf_counter()
-                # save_overlay 时原始帧后面用不到了（写进视频的就是带叠加的这张），
-                # 直接就地画，省掉每路每 tick 一次 2.76MB 的整帧拷贝。
-                # 不 save_overlay 时才需要留一张干净的原图写视频。
-                canvas = frame if save_overlay else frame.copy()
-                display = draw_overlay(canvas, cam.label, cam_fps, target_fps, cam_imu_info, elapsed, frame_idx,
-                                        show_imu_values=args.show_imu_values,
-                                        show_frame_info=args.show_frame_info,
-                                        down_cams=down_cams if not cam.down else None,
-                                        alpha=args.overlay_alpha)
+                if not save_overlay and args.no_preview:
+                    # 既不写进视频、也没有窗口看——画了直接扔。
+                    # 实测 draw_overlay 只有 0.31ms/路（六路 1.9ms），省不了多少，
+                    # 但纯浪费的活没有留着的理由。
+                    display = frame
+                else:
+                    # save_overlay 时原始帧后面用不到了（写进视频的就是带叠加的
+                    # 这张），直接就地画，省掉每路每 tick 一次 2.76MB 的整帧拷贝。
+                    # 不 save_overlay 但要预览时，才需要留一张干净的原图写视频。
+                    canvas = frame if save_overlay else frame.copy()
+                    display = draw_overlay(canvas, cam.label, cam_fps, target_fps, cam_imu_info, elapsed, frame_idx,
+                                            show_imu_values=args.show_imu_values,
+                                            show_frame_info=args.show_frame_info,
+                                            down_cams=down_cams if not cam.down else None,
+                                            alpha=args.overlay_alpha)
                 if prof:
                     prof['画叠加信息'] += time.perf_counter() - _t
                     _t = time.perf_counter()
