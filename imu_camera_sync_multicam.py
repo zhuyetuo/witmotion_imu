@@ -453,6 +453,43 @@ def parse_pairs(specs, n_cams, device_labels):
     return pair_filter, errs
 
 
+class PreviewSwitch:
+    """
+    预览窗口的开关，录制过程中可以随时切。
+
+    为什么按键要从终端读，不用 cv2.waitKey：waitKey 只在有窗口且窗口有焦点时
+    才收得到按键——窗口一旦全关掉，就再也按不开了，等于单向开关。
+    从终端读 stdin 就没这个问题，窗口开着关着都能收。
+
+    代价是要按回车（stdin 是行缓冲的）。想免回车就得用 msvcrt，但 Git Bash
+    的 mintty 不是 Windows 控制台，msvcrt.kbhit 在那儿收不到东西，反而更糟。
+
+    为什么值得做成可切换：6 路 720p 的 imshow 加 waitKey 实测吃掉每 tick
+    30 多毫秒，开着大概掉四成帧率。但调试时又必须看——不看画面根本不知道
+    cam1 对应的是哪个物理摄像头，也没法确认六只狗都在镜头里。
+    """
+
+    def __init__(self, on: bool):
+        self.on = on
+        self.stop_requested = False
+        self._t = threading.Thread(target=self._reader, daemon=True)
+        self._t.start()
+
+    def _reader(self):
+        # 没有 stdin 的时候（nohup / 后台跑）这个循环立刻结束，线程退出，
+        # 开关就固定在启动值上——不会报错，也不会占着不放。
+        for line in sys.stdin:
+            cmd = line.strip().lower()
+            if cmd in ('p', 'v'):
+                self.on = not self.on
+                print(f'[预览] {"打开" if self.on else "关掉"}'
+                      + ('（帧率会降，看完再按 p + 回车关掉）' if self.on else '（帧率恢复）'))
+            elif cmd == 'q':
+                print('[预览] 收到 q，正在停止录制...')
+                self.stop_requested = True
+                return
+
+
 def _pairs_for(cameras, device, pair_filter):
     """这个设备要跟哪几路摄像头配对。pair_filter 为空 = 全排列（老行为）。
 
@@ -469,9 +506,14 @@ def _pairs_for(cameras, device, pair_filter):
 
 def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice], pair_filter=None):
     target_fps = args.cam_fps
+    preview = PreviewSwitch(on=not args.no_preview)
 
     for cam in cameras:
         print(f'{cam.label} ({cam.index}): {cam.actual_w}x{cam.actual_h}  目标帧率: {target_fps}fps')
+
+    print(f'[预览] 现在是{"开着的" if preview.on else "关着的"}。'
+          '在这个终端敲 p + 回车 可以随时开关；敲 q + 回车 停止录制。'
+          + ('（开着大概掉四成帧率，认完哪路摄像头是哪间就按 p 关掉）' if preview.on else ''))
 
     record_mode = (args.duration and args.duration > 0) or args.align_hourly
     loop_mode = args.loop and record_mode
@@ -511,7 +553,7 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice], pai
                 else:
                     print(f'\n════ 第 {segment_no} 段录制开始 ════')
             should_stop = _run_one_segment(args, cameras, devices, target_fps, record_mode,
-                                            duration_seconds, pair_filter)
+                                            duration_seconds, pair_filter, preview)
             if not loop_mode or should_stop or stop_event.is_set():
                 break
     except KeyboardInterrupt:
@@ -529,12 +571,17 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice], pai
 
 def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice],
                       target_fps: int, record_mode: bool, duration_seconds: float = 0,
-                      pair_filter=None) -> bool:
+                      pair_filter=None, preview=None) -> bool:
     """录制一段，返回是否应该整体停止（True=用户退出/出错，False=正常到时结束）。
     duration_seconds: 这一段实际要录多久——普通模式下就是 --duration；
     --align-hourly 模式下是"到下一个整点还剩多少秒"（每段都重新算一次，
     所以第一段可能不足一小时，后面每段都是整整一小时）。"""
     should_stop = [False]
+    if preview is None:
+        preview = PreviewSwitch(on=not args.no_preview)
+    # 窗口是 imshow 顺手建的，关预览时得自己拆掉——否则六个窗口会僵在那儿，
+    # 画面停在关掉的那一瞬间，看着像卡死了。只在"开→关"的那一 tick 拆一次。
+    windows_up = preview.on
     frame_interval = 1.0 / target_fps
     save_overlay = not args.no_save_overlay
     # 事件驱动同步依赖IMU来新样本时唤醒 _new_sample_event；没有任何IMU设备时
@@ -703,7 +750,7 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 cam_imu_info = ([x for x in imu_info if (cam.label, x[0].label) in pair_filter]
                                 if pair_filter else imu_info)
                 if prof: _t = time.perf_counter()
-                if not save_overlay and args.no_preview:
+                if not save_overlay and not preview.on:
                     # 既不写进视频、也没有窗口看——画了直接扔。
                     # 实测 draw_overlay 只有 0.31ms/路（六路 1.9ms），省不了多少，
                     # 但纯浪费的活没有留着的理由。
@@ -726,7 +773,7 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 if prof:
                     prof['写给ffmpeg'] += time.perf_counter() - _t
                     _t = time.perf_counter()
-                if not args.no_preview:
+                if preview.on:
                     try:
                         cv2.imshow(f'IMU(multicam) {cam.label}', display)
                     except cv2.error:
@@ -744,9 +791,24 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 print(f'\n已达到录制时长 {duration_seconds:.0f}s，停止。')
                 break
 
+            if preview.stop_requested:
+                print('\n收到 q，停止录制。')
+                should_stop[0] = True
+                break
+
+            if windows_up and not preview.on:
+                try:
+                    cv2.destroyAllWindows()
+                    cv2.waitKey(1)  # 不再泵一次事件循环，窗口只是"被要求关闭"，不会真消失
+                except cv2.error:
+                    pass
+                windows_up = False
+            elif preview.on:
+                windows_up = True
+
             if prof: _t = time.perf_counter()
             # 没有窗口就不用 waitKey（它只为窗口事件循环服务），那一下也不便宜
-            if args.no_preview:
+            if not preview.on:
                 key = 0xFF
             else:
                 try:
@@ -1023,9 +1085,11 @@ def main():
                          '二选一：加了这个参数 --duration 会被忽略；不加这个参数，--duration 的固定秒数'
                          '用法完全不受影响。')
     ap.add_argument('--no-preview', action='store_true',
-                    help='不开预览窗口。6 路 720p 的 imshow 加 waitKey 现场实测吃掉每 tick '
-                         '30 多毫秒（25fps 的预算一共才 40ms），而无人值守录制根本没人看那些窗口。'
-                         '关掉之后仍然可以按 Ctrl-C 停止')
+                    help='启动时不开预览窗口（默认是开着的，方便先认一遍哪路摄像头对着哪个单间）。'
+                         '6 路 720p 的 imshow 加 waitKey 现场实测吃掉每 tick 30 多毫秒'
+                         '（25fps 的预算一共才 40ms），认完之后就该关掉。'
+                         '不管带不带这个参数，录制中都可以在终端敲 p + 回车 随时开关预览、'
+                         'q + 回车 停止录制')
     ap.add_argument('--profile', action='store_true',
                     help='每 5 秒打印一次每个 tick 各环节的平均耗时（读摄像头/画叠加/写给ffmpeg/'
                          '显示窗口/waitKey）。帧率上不去时用它定位瓶颈，别靠猜')
