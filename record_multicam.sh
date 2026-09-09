@@ -77,12 +77,12 @@ if [ -n "$SITE" ]; then
     # 场地文件里是直接赋值（IMUS="..."），source 之后会盖掉命令行上传进来的同名
     # 变量。想要的是反过来：文件当底、命令行临时覆盖。所以先把命令行给的存一份，
     # source 完再放回去。
-    for _v in IMUS IMU_IDS DOG_NAMES CAMS PAIRS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
+    for _v in IMUS IMU_IDS DEVICES DOG_NAMES CAMS PAIRS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
         eval "_saved_$_v=\${$_v:-}"
     done
     # shellcheck disable=SC1090
     . "$site_file"
-    for _v in IMUS IMU_IDS DOG_NAMES CAMS PAIRS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
+    for _v in IMUS IMU_IDS DEVICES DOG_NAMES CAMS PAIRS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
         eval "_s=\$_saved_$_v"
         [ -n "$_s" ] && eval "$_v=\$_s"
     done
@@ -95,7 +95,7 @@ CAMS="${CAMS:-}"
 
 # 没有默认值可以退：这两项填错不会报错，只会安静地录一整天废数据，
 # 所以宁可不启动
-if [ -z "$IMUS" ]; then
+if [ -z "$IMUS" ] && [ -z "${DEVICES:-}" ]; then
     echo "没有配置 IMU 设备。用 SITE=影棚 ./record_multicam.sh，或者自己传 IMUS=\"wit=MAC ...\"。"
     echo "拿设备 MAC：python wit_ble_live.py --scan"
     exit 1
@@ -119,6 +119,32 @@ RESAMPLE_MODE="${RESAMPLE_MODE:-none}"
 # 把Windows蓝牙栈拖垮（症状：整个蓝牙适配器搜不到任何设备，得重启电脑）。
 RECONNECT_MAX_BACKOFF="${RECONNECT_MAX_BACKOFF:-300}"
 
+
+# DEVICES：一行一个设备，「真实编号 MAC 狗名」。优先于 IMUS/IMU_IDS/DOG_NAMES。
+#
+# 为什么换成一张表：那三个是平行数组，要靠人手工对齐——错位一格不会报错，
+# 只是从此以后 A 狗的数据记在 B 狗名下。而"真实编号"这件事本来就该跟 MAC
+# 写在同一行，分成三处填就是在制造错位的机会。
+if [ -n "${DEVICES:-}" ]; then
+    IMUS=""; IMU_IDS=""; DOG_NAMES=""
+    while IFS= read -r _line; do
+        # 先砍掉行尾注释，再切三列。不砍的话 read 会把 # 后面整段都塞进狗名，
+        # 而狗名是要画到画面上的，出来就是一长串乱码
+        _line="${_line%%#*}"
+        # 用数组读，不要 set --：set -- 会把脚本自己的位置参数覆盖掉
+        read -ra _f <<< "$_line"
+        [ ${#_f[@]} -eq 0 ] && continue
+        if [ ${#_f[@]} -ne 3 ]; then
+            echo "DEVICES 这一行应该是「编号 MAC 狗名」三列，收到 ${#_f[@]} 列: $_line"
+            exit 1
+        fi
+        IMU_IDS="$IMU_IDS ${_f[0]#imu}"
+        IMUS="$IMUS wit=${_f[1]}"
+        DOG_NAMES="$DOG_NAMES ${_f[2]}"
+    done <<< "$DEVICES"
+fi
+
+
 imu_args=()
 for spec in $IMUS; do
     imu_args+=(--imu "$spec")
@@ -134,6 +160,17 @@ imu_label_args=()
 for gid in $IMU_IDS; do
     imu_label_args+=(--imu-label "imu${gid#imu}")
 done
+
+# 没给真实编号就只能按位置排 imu1、imu2…，而位置是会漂的：今天 imu1 是 WT9，
+# 明天顺序一改就成了别的设备，文件名却看不出任何差别。平台是按这个号认狗的，
+# 所以这不是小事，喊一声。
+if [ -z "$IMU_IDS" ]; then
+    echo "⚠ 没有设 DEVICES/IMU_IDS，文件名里的 imu 号将按 IMUS 的位置排（imu1、imu2…）。"
+    echo "  位置序号会漂：调换 IMUS 的顺序，同一个 imu1 就变成另一台设备，而文件名看不出来；"
+    echo "  两个场地也会撞（各自都从 imu1 开始）。平台按这个号认是哪只狗。"
+    echo "  正确做法：在 sites/<场地>.env 里用 DEVICES 写「真实编号 MAC 狗名」。"
+    echo
+fi
 
 dog_name_args=()
 for name in $DOG_NAMES; do
