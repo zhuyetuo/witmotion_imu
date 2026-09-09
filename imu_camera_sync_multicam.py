@@ -148,6 +148,9 @@ class CameraStream:
         self._latest_lock = threading.Lock()
         self._cap_lock = threading.Lock()
         self._reader_stop = threading.Event()
+        # 主循环取走上一帧后才解下一帧。初值 set：先解一帧出来垫底
+        self._want = threading.Event()
+        self._want.set()
         self._reader = threading.Thread(target=self._reader_loop, daemon=True)
         self._reader.start()
 
@@ -158,19 +161,39 @@ class CameraStream:
             self._reader = None
 
     def _reader_loop(self):
+        """
+        grab() 一直抓（便宜，不解码），只在主循环真要用时才 retrieve() 解一帧。
+
+        第一版是无脑 cap.read() 全速跑，结果比串行读还糟：read() = grab + 解码，
+        六路各按摄像头的 30fps 解 MJPEG 就是 180 帧/秒，而主循环只消费得了 8 帧/秒
+        ——95% 解出来直接扔，白烧的 CPU 正好从主循环身上抢走。现场表现是
+        "读摄像头"从 90ms 降到 3ms，但"画叠加"从 23 涨到 47、"写给ffmpeg"从 15
+        涨到 36，总时间几乎没变。
+
+        原来串行读时反而没这问题：没被读走的帧驱动直接丢，压根不解码。
+        所以这里要把这个特性显式做出来——grab 保持画面新鲜，retrieve 按需。
+        """
         while not self._reader_stop.is_set():
             with self._cap_lock:
                 cap = self.cap
             try:
-                ret, frame = cap.read()
+                ok = cap.grab()
+                if not ok:
+                    with self._latest_lock:
+                        self._latest = (False, None)
+                    time.sleep(0.01)
+                    continue
+                if not self._want.is_set():
+                    continue        # 主循环还没消费上一帧，这一帧不解码，直接扔
+                ret, frame = cap.retrieve()
             except Exception:  # noqa: BLE001 驱动层什么都可能抛，交给上面的重连逻辑
                 ret, frame = False, None
             if ret and self.need_resize:
                 frame = cv2.resize(frame, (self.actual_w, self.actual_h))
             with self._latest_lock:
                 self._latest = (ret, frame)
+            self._want.clear()
             if not ret:
-                # 读失败就别空转烧 CPU，等一下让重连逻辑有机会介入
                 time.sleep(0.01)
 
     def read(self):
@@ -181,7 +204,9 @@ class CameraStream:
                 frame = cv2.resize(frame, (self.actual_w, self.actual_h))
             return ret, frame
         with self._latest_lock:
-            return self._latest
+            latest = self._latest
+        self._want.set()          # 取走了，可以解下一帧
+        return latest
 
     def _placeholder(self, now: float):
         """掉线期间的占位帧：黑底 + 提示文字，写进视频保持帧数对齐，画面上也一眼能看出这路断了。"""
@@ -678,7 +703,11 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 cam_imu_info = ([x for x in imu_info if (cam.label, x[0].label) in pair_filter]
                                 if pair_filter else imu_info)
                 if prof: _t = time.perf_counter()
-                display = draw_overlay(frame.copy(), cam.label, cam_fps, target_fps, cam_imu_info, elapsed, frame_idx,
+                # save_overlay 时原始帧后面用不到了（写进视频的就是带叠加的这张），
+                # 直接就地画，省掉每路每 tick 一次 2.76MB 的整帧拷贝。
+                # 不 save_overlay 时才需要留一张干净的原图写视频。
+                canvas = frame if save_overlay else frame.copy()
+                display = draw_overlay(canvas, cam.label, cam_fps, target_fps, cam_imu_info, elapsed, frame_idx,
                                         show_imu_values=args.show_imu_values,
                                         show_frame_info=args.show_frame_info,
                                         down_cams=down_cams if not cam.down else None,
@@ -691,13 +720,14 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 if prof:
                     prof['写给ffmpeg'] += time.perf_counter() - _t
                     _t = time.perf_counter()
-                try:
-                    cv2.imshow(f'IMU(multicam) {cam.label}', display)
-                except cv2.error:
-                    if not record_mode:
-                        print('cv2.imshow 不支持（可能是 headless 版本）。')
-                        read_failed = True
-                        should_stop[0] = True
+                if not args.no_preview:
+                    try:
+                        cv2.imshow(f'IMU(multicam) {cam.label}', display)
+                    except cv2.error:
+                        if not record_mode:
+                            print('cv2.imshow 不支持（可能是 headless 版本）。')
+                            read_failed = True
+                            should_stop[0] = True
                 if prof:
                     prof['显示窗口'] += time.perf_counter() - _t
 
@@ -709,10 +739,14 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 break
 
             if prof: _t = time.perf_counter()
-            try:
-                key = cv2.waitKey(1) & 0xFF
-            except cv2.error:
+            # 没有窗口就不用 waitKey（它只为窗口事件循环服务），那一下也不便宜
+            if args.no_preview:
                 key = 0xFF
+            else:
+                try:
+                    key = cv2.waitKey(1) & 0xFF
+                except cv2.error:
+                    key = 0xFF
             if prof:
                 prof['waitKey'] += time.perf_counter() - _t
                 prof['_n'] += 1
@@ -982,6 +1016,10 @@ def main():
                          '（12:00→13:00→14:00...），配合 --loop 就能一直按小时切文件。跟 --duration 是'
                          '二选一：加了这个参数 --duration 会被忽略；不加这个参数，--duration 的固定秒数'
                          '用法完全不受影响。')
+    ap.add_argument('--no-preview', action='store_true',
+                    help='不开预览窗口。6 路 720p 的 imshow 加 waitKey 现场实测吃掉每 tick '
+                         '30 多毫秒（25fps 的预算一共才 40ms），而无人值守录制根本没人看那些窗口。'
+                         '关掉之后仍然可以按 Ctrl-C 停止')
     ap.add_argument('--profile', action='store_true',
                     help='每 5 秒打印一次每个 tick 各环节的平均耗时（读摄像头/画叠加/写给ffmpeg/'
                          '显示窗口/waitKey）。帧率上不去时用它定位瓶颈，别靠猜')
