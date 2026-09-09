@@ -236,36 +236,53 @@ class CameraStream:
 
 def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame_idx,
                   show_imu_values: bool = False, show_frame_info: bool = False,
-                  down_cams: list[str] | None = None):
-    # 不再画半透明底框——纯文字叠加，字体带描边（先画黑色粗一点当描边、
-    # 再画正常颜色）保证在任意背景色的画面上都看得清，不遮挡画面内容。
-    def put(text, row, color=(200, 255, 200)):
+                  down_cams: list[str] | None = None, alpha: float = 0.45):
+    """
+    画面左上角的叠加信息。
+
+    分两档画，规则是「常态信息做水印，异常信息不打折」：
+
+    - 常态（时间、机位、fps、每只狗的名字/编号/采样率）半透明，alpha 默认 0.45。
+      这些东西是录一整天都在的，画满不透明的字等于在每一帧上永久糊掉左上角，
+      而那块位置照样是画面——狗真会走到那儿去。淡一点仍然读得出来，需要核对
+      时定格看就行。
+    - 异常（某个设备 MISSING、某路摄像头掉线）不透明。它们是要人立刻去处理的，
+      淡化了就等于藏起来。
+
+    半透明的做法：把常态那几行画到 frame 的副本上，再整幅按 alpha 混合回去。
+    没画字的像素两边一模一样，混合完还是原样，只有字的地方变淡。
+    """
+    def _put(canvas, text, row, color):
         pos = (12, 28 + row * 26)
-        cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
+        # 先画黑色粗一点当描边，再画正常颜色：不加描边的话，字压到浅色背景
+        # （白墙、地板反光）上就完全看不见了，何况现在还要再淡一层
+        cv2.putText(canvas, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(canvas, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
+
+    watermark = frame.copy()   # 常态信息画这上面，最后整幅淡入
+    alarms = []                # (文字, 行号, 颜色)，混合之后再画，保持不透明
 
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:23]
     # #frame_idx（同步tick序号，核对丢帧用）/ t=elapsed（这一段已经录了多久）
     # 平时看画面用不上，默认不显示，排查对齐/丢帧问题时加 --show-frame-info 打开。
     if show_frame_info:
-        put(f'{ts}  [{cam_label}]  #{frame_idx}  t={elapsed:.1f}s  {cam_fps:.1f}/{target_fps}fps', 0, (255, 255, 100))
+        _put(watermark, f'{ts}  [{cam_label}]  #{frame_idx}  t={elapsed:.1f}s  {cam_fps:.1f}/{target_fps}fps', 0, (255, 255, 100))
     else:
-        put(f'{ts}  [{cam_label}]  {cam_fps:.1f}/{target_fps}fps', 0, (255, 255, 100))
+        _put(watermark, f'{ts}  [{cam_label}]  {cam_fps:.1f}/{target_fps}fps', 0, (255, 255, 100))
+
     row = 1
     for device, hz, lag_ms, missing, imu_row in imu_info:
+        # 名字后面跟上 imu 编号：文件名和 CSV 列名用的都是 imu1/imu2，画面上
+        # 只有狗名的话，回头对着录像核"这条曲线是谁"还得再去翻当时的启动参数
+        who = f'{device.display_name}/{device.label}' if device.display_name != device.label else device.label
         if missing or imu_row is None:
-            color = (80, 80, 255)
-            text = f'[{device.display_name}] MISSING'
-        elif lag_ms < 50:
-            color = (100, 255, 100)
-            text = f'[{device.display_name}] {hz:.1f}Hz  lag={lag_ms:.0f}ms'
-        elif lag_ms < 150:
-            color = (50, 200, 255)
-            text = f'[{device.display_name}] {hz:.1f}Hz  lag={lag_ms:.0f}ms'
+            alarms.append((f'[{who}] MISSING', row, (80, 80, 255)))
         else:
-            color = (80, 80, 255)
-            text = f'[{device.display_name}] {hz:.1f}Hz  lag={lag_ms:.0f}ms !'
-        put(text, row, color)
+            # lag 的数值不再显示——它每帧都在跳，盯着也没有可操作性，真掉线了
+            # 看 MISSING 就够。但还是拿它决定颜色：绿=跟得上，黄=有点滞后，
+            # 红=明显滞后，扫一眼就知道健康不健康，不占任何字宽。
+            color = (100, 255, 100) if lag_ms < 50 else (50, 200, 255) if lag_ms < 150 else (80, 80, 255)
+            _put(watermark, f'[{who}] {hz:.1f}Hz', row, color)
         row += 1
         # 6轴实时数值：方便肉眼判断设备是不是静置在桌上没戴（加速度接近
         # (0,0,1g)、角速度接近0）还是真的戴在狗身上有动作。默认不显示（太占
@@ -275,14 +292,19 @@ def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame
                         f'Z={imu_row["acc_z"]:+.3f} g')
             gyro_text = (f'  Gyro X={imu_row["gyro_x"]:+7.2f} Y={imu_row["gyro_y"]:+7.2f} '
                          f'Z={imu_row["gyro_z"]:+7.2f} °/s')
-            put(acc_text, row, (200, 200, 200))
+            _put(watermark, acc_text, row, (200, 200, 200))
             row += 1
-            put(gyro_text, row, (200, 200, 200))
+            _put(watermark, gyro_text, row, (200, 200, 200))
             row += 1
+
     # 别的摄像头断了，在每一路画面上都挂一条红字——断掉那路的窗口是黑的没人看，
     # 得让盯着任何一个窗口的人都能看见"有一路掉了，去插线"
     if down_cams:
-        put('!! ' + '  '.join(down_cams) + '  <- check cable', row, (60, 60, 255))
+        alarms.append(('!! ' + '  '.join(down_cams) + '  <- check cable', row, (60, 60, 255)))
+
+    cv2.addWeighted(watermark, alpha, frame, 1.0 - alpha, 0, frame)
+    for text, r, color in alarms:
+        _put(frame, text, r, color)
     return frame
 
 
@@ -515,7 +537,8 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 display = draw_overlay(frame.copy(), cam.label, cam_fps, target_fps, imu_info, elapsed, frame_idx,
                                         show_imu_values=args.show_imu_values,
                                         show_frame_info=args.show_frame_info,
-                                        down_cams=down_cams if not cam.down else None)
+                                        down_cams=down_cams if not cam.down else None,
+                                        alpha=args.overlay_alpha)
                 if cam.video_writer:
                     cam.video_writer.write(display if save_overlay else frame)
                 try:
@@ -763,6 +786,9 @@ def main():
                          '恢复）；长时间无人值守录制（比如整晚8小时以上）建议保持默认或调更高。')
     ap.add_argument('--no-save-overlay', action='store_true', help='保存干净视频（不含叠加信息）')
     ap.add_argument('--no-imu-sync', action='store_true', help='关闭事件驱动同步，改用固定定时器抓帧')
+    ap.add_argument('--overlay-alpha', type=float, default=0.45,
+                    help='画面上常态叠加信息（时间/机位/各设备Hz）的不透明度，0~1，默认 0.45。'
+                         '设 1 就是完全不透明。MISSING 和摄像头掉线的告警不受这个影响，始终不透明')
     ap.add_argument('--show-imu-values', action='store_true',
                     help='画面上显示每个IMU设备的实时6轴数值（加速度+角速度），默认不显示（比较占'
                          '画面）；只在需要肉眼确认设备有没有戴好、是不是在动的时候临时打开。')
