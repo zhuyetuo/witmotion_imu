@@ -44,6 +44,7 @@ import log_setup
 import argparse
 import csv
 import os
+import re
 import shutil
 import sys
 import threading
@@ -243,58 +244,62 @@ def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame
     分两档画，规则是「常态信息做水印，异常信息不打折」：
 
     - 常态（时间、机位、fps、每只狗的名字/编号/采样率）半透明，alpha 默认 0.45。
-      这些东西是录一整天都在的，画满不透明的字等于在每一帧上永久糊掉左上角，
-      而那块位置照样是画面——狗真会走到那儿去。淡一点仍然读得出来，需要核对
-      时定格看就行。
+      这些字是录一整天都在的，画满不透明等于在每一帧上永久糊掉左上角，
+      而那块位置照样是画面，狗真会走到那儿去。
     - 异常（某个设备 MISSING、某路摄像头掉线）不透明。它们是要人立刻去处理的，
       淡化了就等于藏起来。
 
-    半透明的做法：把常态那几行画到 frame 的副本上，再整幅按 alpha 混合回去。
-    没画字的像素两边一模一样，混合完还是原样，只有字的地方变淡。
+    半透明只混合文字覆盖的那一小块，不动整帧。
+    第一版是整帧 copy() + addWeighted，在 6 路 25fps 下就是每秒 150 次全帧
+    （1280x720x3）的拷贝加混合，纯属白烧 CPU——文字实际只占左上角一小块。
+    先用 getTextSize 量出真正要盖多大，只在那块 ROI 上混。
     """
-    def _put(canvas, text, row, color):
-        pos = (12, 28 + row * 26)
-        # 先画黑色粗一点当描边，再画正常颜色：不加描边的话，字压到浅色背景
-        # （白墙、地板反光）上就完全看不见了，何况现在还要再淡一层
-        cv2.putText(canvas, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(canvas, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
+    font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1
 
-    watermark = frame.copy()   # 常态信息画这上面，最后整幅淡入
-    alarms = []                # (文字, 行号, 颜色)，混合之后再画，保持不透明
+    def pos(row):
+        return (12, 28 + row * 26)
+
+    def _put(canvas, text, row, color):
+        p = pos(row)
+        # 先画黑色粗一点当描边，再画正常颜色：不加描边的话，字压到浅色背景
+        # （白墙、地板反光）上就完全看不见了，何况还要再淡一层
+        cv2.putText(canvas, text, p, font, scale, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(canvas, text, p, font, scale, color, thick, cv2.LINE_AA)
+
+    marks = []   # 常态：(文字, 行号, 颜色)，混合后变淡
+    alarms = []  # 异常：同上，但不打折
 
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:23]
     # #frame_idx（同步tick序号，核对丢帧用）/ t=elapsed（这一段已经录了多久）
     # 平时看画面用不上，默认不显示，排查对齐/丢帧问题时加 --show-frame-info 打开。
     if show_frame_info:
-        _put(watermark, f'{ts}  [{cam_label}]  #{frame_idx}  t={elapsed:.1f}s  {cam_fps:.1f}/{target_fps}fps', 0, (255, 255, 100))
+        marks.append((f'{ts}  [{cam_label}]  #{frame_idx}  t={elapsed:.1f}s  {cam_fps:.1f}/{target_fps}fps', 0, (255, 255, 100)))
     else:
-        _put(watermark, f'{ts}  [{cam_label}]  {cam_fps:.1f}/{target_fps}fps', 0, (255, 255, 100))
+        marks.append((f'{ts}  [{cam_label}]  {cam_fps:.1f}/{target_fps}fps', 0, (255, 255, 100)))
 
     row = 1
     for device, hz, lag_ms, missing, imu_row in imu_info:
-        # 名字后面跟上 imu 编号：文件名和 CSV 列名用的都是 imu1/imu2，画面上
-        # 只有狗名的话，回头对着录像核"这条曲线是谁"还得再去翻当时的启动参数
+        # 名字后面跟上 imu 编号：文件名和 CSV 列名用的都是 imu1/imu2，画面上只有
+        # 狗名的话，回头对着录像核"这条曲线是谁"还得再去翻当时的启动参数
         who = f'{device.display_name}/{device.label}' if device.display_name != device.label else device.label
         if missing or imu_row is None:
             alarms.append((f'[{who}] MISSING', row, (80, 80, 255)))
         else:
-            # lag 的数值不再显示——它每帧都在跳，盯着也没有可操作性，真掉线了
-            # 看 MISSING 就够。但还是拿它决定颜色：绿=跟得上，黄=有点滞后，
-            # 红=明显滞后，扫一眼就知道健康不健康，不占任何字宽。
+            # lag 的数值不再显示——它每帧都在跳，盯着也没有可操作性，真掉线了看
+            # MISSING 就够。但还是拿它决定颜色：绿=跟得上，黄=有点滞后，红=明显
+            # 滞后，扫一眼就知道健康不健康，不占任何字宽。
             color = (100, 255, 100) if lag_ms < 50 else (50, 200, 255) if lag_ms < 150 else (80, 80, 255)
-            _put(watermark, f'[{who}] {hz:.1f}Hz', row, color)
+            marks.append((f'[{who}] {hz:.1f}Hz', row, color))
         row += 1
         # 6轴实时数值：方便肉眼判断设备是不是静置在桌上没戴（加速度接近
-        # (0,0,1g)、角速度接近0）还是真的戴在狗身上有动作。默认不显示（太占
-        # 画面），需要看的时候加 --show-imu-values 打开。
+        # (0,0,1g)、角速度接近0）还是真的戴在狗身上有动作。默认不显示（太占画面），
+        # 需要看的时候加 --show-imu-values 打开。
         if show_imu_values and not missing and imu_row is not None:
-            acc_text = (f'  Acc  X={imu_row["acc_x"]:+.3f} Y={imu_row["acc_y"]:+.3f} '
-                        f'Z={imu_row["acc_z"]:+.3f} g')
-            gyro_text = (f'  Gyro X={imu_row["gyro_x"]:+7.2f} Y={imu_row["gyro_y"]:+7.2f} '
-                         f'Z={imu_row["gyro_z"]:+7.2f} °/s')
-            _put(watermark, acc_text, row, (200, 200, 200))
+            marks.append((f'  Acc  X={imu_row["acc_x"]:+.3f} Y={imu_row["acc_y"]:+.3f} '
+                          f'Z={imu_row["acc_z"]:+.3f} g', row, (200, 200, 200)))
             row += 1
-            _put(watermark, gyro_text, row, (200, 200, 200))
+            marks.append((f'  Gyro X={imu_row["gyro_x"]:+7.2f} Y={imu_row["gyro_y"]:+7.2f} '
+                          f'Z={imu_row["gyro_z"]:+7.2f} °/s', row, (200, 200, 200)))
             row += 1
 
     # 别的摄像头断了，在每一路画面上都挂一条红字——断掉那路的窗口是黑的没人看，
@@ -302,7 +307,18 @@ def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame
     if down_cams:
         alarms.append(('!! ' + '  '.join(down_cams) + '  <- check cable', row, (60, 60, 255)))
 
-    cv2.addWeighted(watermark, alpha, frame, 1.0 - alpha, 0, frame)
+    if marks:
+        h, w = frame.shape[:2]
+        # 量出常态文字真正占多大，只在这块上混合。+16 给描边和抗锯齿留边，
+        # 少了会把最右边一列像素切掉，看着像字被啃了一口
+        x1 = min(w, max(cv2.getTextSize(t, font, scale, 3)[0][0] for t, _, _ in marks) + 12 + 16)
+        y1 = min(h, pos(max(r for _, r, _ in marks))[1] + 12)
+        roi = frame[0:y1, 0:x1]
+        wm = roi.copy()
+        for text, r, color in marks:
+            _put(wm, text, r, color)
+        cv2.addWeighted(wm, alpha, roi, 1.0 - alpha, 0, roi)
+
     for text, r, color in alarms:
         _put(frame, text, r, color)
     return frame
@@ -829,6 +845,15 @@ def main():
                          '（12:00→13:00→14:00...），配合 --loop 就能一直按小时切文件。跟 --duration 是'
                          '二选一：加了这个参数 --duration 会被忽略；不加这个参数，--duration 的固定秒数'
                          '用法完全不受影响。')
+    ap.add_argument('--imu-label', action='append', default=[], metavar='imuN',
+                    help='每个设备在文件名/列名里用的编号，顺序跟 --imu 一一对应，'
+                         '例如 --imu-label imu9 --imu-label imu11。不传就按位置排 imu1、imu2…'
+                         '\n'
+                         '为什么需要：位置序号是每个场地各自从 1 开始的，两个场地的文件名会撞。'
+                         '狗场的第一个设备叫 imu1，影棚的第一个也叫 imu1，而平台那边是靠文件名里的'
+                         'imu 号去认是哪只狗的（狗档案登记的是全局唯一的 IMU1..IMU20）——撞了就会把'
+                         '一个场地的数据算到另一个场地的狗身上，皮肤评估那张按（日期,imu,来源）'
+                         '唯一的表还会直接撞行写不进去。')
     ap.add_argument('--pair', action='append', default=[], metavar='camN:imuM',
                     help='只生成这些 cam x imu 配对，可重复传，例如 --pair cam1:imu1 --pair cam2:imu2。'
                          '不传就按老规矩全排列。'
@@ -861,7 +886,22 @@ def main():
             print(e)
             sys.exit(1)
         dog_name = args.dog_name[i - 1] if i - 1 < len(args.dog_name) else None
-        devices.append(ImuDevice(dev_type, ident, label=f'imu{i}', display_name=dog_name))
+        label = args.imu_label[i - 1] if i - 1 < len(args.imu_label) else f'imu{i}'
+        if not re.fullmatch(r'imu\d+', label):
+            print(f'--imu-label 应该长这样：imu9，收到: {label!r}')
+            sys.exit(1)
+        devices.append(ImuDevice(dev_type, ident, label=label, display_name=dog_name))
+
+    if args.imu_label and len(args.imu_label) != len(args.imu):
+        # 只给一半更危险：没给的那些退回位置序号，一份录制里混着两套编号体系，
+        # 事后根本看不出哪个 imu3 是哪个意思
+        print(f'--imu-label 给了 {len(args.imu_label)} 个，但有 {len(args.imu)} 个设备——'
+              f'要么全给，要么一个都不给')
+        sys.exit(1)
+    dup = [x for x in {d.label for d in devices} if [d.label for d in devices].count(x) > 1]
+    if dup:
+        print(f'设备编号重复: {", ".join(sorted(dup))}')
+        sys.exit(1)
 
     if args.probe:
         run_probe(args, args.camera, devices)

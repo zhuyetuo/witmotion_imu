@@ -77,12 +77,12 @@ if [ -n "$SITE" ]; then
     # 场地文件里是直接赋值（IMUS="..."），source 之后会盖掉命令行上传进来的同名
     # 变量。想要的是反过来：文件当底、命令行临时覆盖。所以先把命令行给的存一份，
     # source 完再放回去。
-    for _v in IMUS DOG_NAMES CAMS PAIRS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
+    for _v in IMUS IMU_IDS DOG_NAMES CAMS PAIRS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
         eval "_saved_$_v=\${$_v:-}"
     done
     # shellcheck disable=SC1090
     . "$site_file"
-    for _v in IMUS DOG_NAMES CAMS PAIRS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
+    for _v in IMUS IMU_IDS DOG_NAMES CAMS PAIRS OUT_DIR CAM_FPS RESAMPLE_MODE RESAMPLE_HZ WIDTH HEIGHT; do
         eval "_s=\$_saved_$_v"
         [ -n "$_s" ] && eval "$_v=\$_s"
     done
@@ -124,6 +124,17 @@ for spec in $IMUS; do
     imu_args+=(--imu "$spec")
 done
 
+# IMU_IDS：每个设备在文件名里用的全局编号，顺序跟 IMUS 一一对应。
+# 不设就按位置排 imu1、imu2…——那样两个场地会撞：狗场的第一个设备叫 imu1，
+# 影棚的第一个也叫 imu1，而平台是靠文件名里的 imu 号认是哪只狗的
+# （狗档案登记的是全局唯一的 IMU1..IMU20）。撞了就会把一个场地的数据算到另一个
+# 场地的狗身上，皮肤评估那张按（日期,imu,来源）唯一的表还会直接撞行写不进去。
+IMU_IDS="${IMU_IDS:-}"
+imu_label_args=()
+for gid in $IMU_IDS; do
+    imu_label_args+=(--imu-label "imu${gid#imu}")
+done
+
 dog_name_args=()
 for name in $DOG_NAMES; do
     dog_name_args+=(--dog-name "$name")
@@ -159,7 +170,7 @@ case "$RESAMPLE_MODE" in
 esac
 
 python imu_camera_sync_multicam.py \
-    "${imu_args[@]}" "${dog_name_args[@]}" \
+    "${imu_args[@]}" "${imu_label_args[@]+"${imu_label_args[@]}"}" "${dog_name_args[@]}" \
     --align-hourly --resample-hz "$RESAMPLE_HZ" \
     "${cam_args[@]}" "${pair_args[@]+"${pair_args[@]}"}" \
     --width "$WIDTH" --height "$HEIGHT" \
