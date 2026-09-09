@@ -32,8 +32,8 @@
 #   KEEP_PAIRS   要传的配对，默认 "cam1_imu1 cam2_imu2 cam3_imu3 cam1_imu4:csv"
 #                （:csv / :mp4 后缀表示只要其中一种，跟 cleanup 脚本一个写法）
 #   NAS_DEST     NAS 目标目录，默认 //192.168.2.249/ai_data/data_raw
-#   NAS_DAY_SUFFIX  NAS 上日期目录的后缀，默认 _<场地名>（2026_9_9_狗场）；
-#                设成空串退回不加后缀的老行为
+#   NAS_DAY_SUFFIX  NAS 上日期目录的后缀，写在 sites/<场地>.env 里，只能用
+#                ASCII（狗场 _gouchang → 2026_9_9_gouchang）。不设就不加后缀
 #   DATA_DIR     本地数据根目录，默认 data/multicam_multiimu
 #   STAGE_ROOT   暂存目录根，默认 data/_upload
 #   SETTLE_MIN   处理"今天"时，最近一次文件改动要超过这么多分钟，默认 20
@@ -73,21 +73,25 @@ fi
 KEEP_PAIRS="${KEEP_PAIRS:-cam1_imu1 cam2_imu2 cam3_imu3 cam1_imu4:csv}"
 NAS_DEST="${NAS_DEST:-//192.168.2.249/ai_data/data_raw}"
 
-# NAS 上的目录名 = 日期 + 这个后缀，比如 2026_9_9_狗场。
+# NAS 上的目录名 = 日期 + 这个后缀，比如 2026_9_9_gouchang。
 #
 # 为什么要加：两个场地是两台机器，各自往 NAS 传，日期目录是同一个。文件本身
 # 不会互相覆盖（文件名里的 imu 号是全局唯一的，时间戳还精确到毫秒），但一个
 # 2026_9_9 里混着两个场地的东西，想确认"狗场今天传全了没有"只能自己按 imu 号
 # 挑。加个后缀就一眼看得出来。
 #
-# 默认取场地名，不用在每个 sites/*.env 里各写一行。
-# 万一 Windows 上中文目录名出问题（robocopy 走的是 cygpath 转出来的路径），
-# 在 sites/<场地>.env 里写一行 NAS_DAY_SUFFIX="_gouchang" 换成 ASCII 就行。
-# 设成空串就退回老行为（不加后缀）。
+# 后缀写在 sites/<场地>.env 里，而且一律用 ASCII，不跟着场地名走。
+# 场地名本身是中文（狗场/影棚），但这个是要落到 NAS 上的目录名，链路太长：
+# Git Bash → cygpath -w → robocopy → SMB → NAS 的文件系统 → 后端容器的挂载点，
+# 中间任何一环编码没对齐，目录名就会变成乱码或者干脆建不出来，而且是几天后
+# 才从平台上样本数不对发现。ASCII 全程没有这个问题。
+#
+# 没设的话就不加后缀（老行为），并且提醒一句——不设也能跑，只是两个场地又混
+# 到一个目录里去了。
 #
 # 注意：这只影响以后传的。NAS 上已经有的那些不带后缀的日期目录原地不动，
 # 平台扫描用的是 os.walk（递归），新旧两种目录名都能扫到，不用改后端。
-NAS_DAY_SUFFIX="${NAS_DAY_SUFFIX-${SITE:+_$SITE}}"
+NAS_DAY_SUFFIX="${NAS_DAY_SUFFIX-}"
 DATA_DIR="${DATA_DIR:-data/multicam_multiimu}"
 STAGE_ROOT="${STAGE_ROOT:-data/_upload}"
 SETTLE_MIN="${SETTLE_MIN:-20}"        # 处理"今天"时要求的静默分钟数
@@ -108,6 +112,18 @@ LOG_DIR="${IMU_LOG_DIR:-logs}"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/daily_archive_$(date +%Y-%m-%d).log"
 say() { printf '%s %s\n' "$(date +%H:%M:%S)" "$*" | tee -a "$LOG_FILE"; }
+
+# 后缀要落到 NAS 的目录名上，只放行 ASCII 字母数字和 _ -。挡在这里而不是
+# "尽力而为地传上去"：一个乱码目录名传完了才发现，比不传更难收拾。
+case "$NAS_DAY_SUFFIX" in
+    *[!A-Za-z0-9_-]*)
+        say "⚠ NAS_DAY_SUFFIX=\"$NAS_DAY_SUFFIX\" 有非 ASCII 或特殊字符，已忽略（只认 A-Z a-z 0-9 _ -）"
+        NAS_DAY_SUFFIX=""
+        ;;
+esac
+if [ -z "$NAS_DAY_SUFFIX" ]; then
+    say "提示：没设 NAS_DAY_SUFFIX，NAS 上就是纯日期目录，两个场地会混在一起"
+fi
 
 ARCHIVED=".archived"        # 传完了
 PENDING=".upload_pending"   # 试过但没传成功（NAS 不通/传一半），下次自动重试
