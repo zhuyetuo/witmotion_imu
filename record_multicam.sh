@@ -9,6 +9,14 @@
 #   PREVIEW=0 SITE=狗场 ./record_multicam.sh   ← 起手不开预览窗口
 #   DEBUG=1   SITE=狗场 ./record_multicam.sh   ← 只看画面，什么都不存
 #
+# 命令行上多写的参数会原样传给 imu_camera_sync_multicam.py，接在 EXTRA_ARGS 后面
+# （所以能盖过场地配置里的同名开关）：
+#   SITE=影棚 ./record_multicam.sh --no-precheck
+#   SITE=影棚 ./record_multicam.sh --profile --scan-timeout 20
+#
+# 这里以前是不传的——脚本从头到尾没用过 "$@"，命令行上写的参数被安静吞掉，
+# 你以为加了 --no-precheck，预检照样把你拦下来，还看不出为什么。
+#
 # SITE 会去读 sites/<名字>.env，那里写死了这个场地的设备 MAC、狗名、摄像头路数。
 # 为什么要有它：这个脚本原来的默认值是 IMUS="wit=WT901BLE68 wit=WTSDCL"、
 # CAMS="0 1"，那是很早以前两个出厂名设备加两个摄像头时留下的，现在影棚是 8 个
@@ -356,4 +364,4 @@ python imu_camera_sync_multicam.py \
     --warmup-sec "$WARMUP_SEC" --cam-fps "$CAM_FPS" \
     --day-suffix "$DAY_SUFFIX" \
     --reconnect-max-backoff "$RECONNECT_MAX_BACKOFF" \
-    $EXTRA_ARGS
+    $EXTRA_ARGS "${@}"
