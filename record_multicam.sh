@@ -89,7 +89,23 @@ fi
 # tr 去掉 \r：这文件多半是在 Windows 上用记事本建的，带 CRLF，不去掉的话
 # 场地名会变成 "狗场\r"，找不到 sites/狗场\r.env，报错还看不出哪儿不对。
 SITE="${SITE:-}"
-if [ -z "$SITE" ] && [ -f "sites/.current" ]; then
+
+# 命令行上直接把设备写清楚了，就是手动跑，不去读 sites/.current。
+#
+# 这条是修一个回归。老的稳定用法是纯环境变量、不带 SITE：
+#   IMUS="wit=WT6 wit=WT5 wit=WT1 wit=WT4" DOG_NAMES="Bibi Bali lulu Xima" \
+#     RESAMPLE_MODE=none ./record_multicam.sh
+# 它一直好好的。后来我把 CAMS 的默认值 "0 1" 删了（#137，理由是场地配置错了
+# 会安静录一整天废数据），于是这条命令没了 CAMS，退回去读 sites/.current，
+# 拿到影棚的 CAMS="0 1 2" 去开第三路摄像头——直接 Segmentation fault。
+#
+# 那条命令从头到尾没要过第三个摄像头。它把 IMUS、DOG_NAMES 都写死了，
+# 意思很明确就是"按我说的来"，不该被一个它没提过的场地文件接管。
+# 显式优先于隐式：写了 IMUS 就当手动跑，.current 不生效（SITE= 照样管用）。
+_MANUAL_RUN=0
+if [ -n "${IMUS:-}" ] && [ -z "$SITE" ]; then
+    _MANUAL_RUN=1
+elif [ -z "$SITE" ] && [ -f "sites/.current" ]; then
     SITE="$(tr -d '\r\n ' < sites/.current)"
 fi
 # SITE 可以写 ASCII 别名（gouchang / yingpeng），跟中文场地名等价。
@@ -136,6 +152,12 @@ fi
 
 IMUS="${IMUS:-}"
 DOG_NAMES="${DOG_NAMES:-}"
+# 手动跑（命令行给了 IMUS、没给 SITE）时 CAMS 退回老默认值 "0 1"。
+# 场地模式下仍然不给默认值——那边填错是安静录一整天废数据，宁可不启动。
+if [ "$_MANUAL_RUN" = "1" ] && [ -z "${CAMS:-}" ]; then
+    CAMS="0 1"
+    echo "手动模式（没传 SITE）：摄像头用默认的 CAMS=\"$CAMS\"，要几路自己传 CAMS=\"0 1 2\""
+fi
 CAMS="${CAMS:-}"
 
 # 没有默认值可以退：这两项填错不会报错，只会安静地录一整天废数据，
