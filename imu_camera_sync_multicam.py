@@ -93,9 +93,21 @@ class CameraStream:
         self._open_kwargs = dict(index=index, width=capture_width or width, height=capture_height or height,
                                  fps=target_fps, backend=backend, fourcc=fourcc, autofocus=autofocus,
                                  auto_wb=auto_wb, show_settings_dialog=False)
+        # 开之前先报一声，而且立刻刷出去。
+        # open_camera 走的是 OpenCV 的原生后端（Windows 上是 MSMF/DSHOW），
+        # 那一层崩了是 Segmentation fault——没有 Python 异常、没有 traceback，
+        # 进程直接没。这种时候终端上最后一行输出就是唯一的线索，所以必须在
+        # 调用之前打、而且 flush，不然缓冲区里的字跟着进程一起消失，
+        # 只能看到"打开了两路然后 Segmentation fault"，猜不出死在哪一路。
+        print(f'{label}: 正在打开（设备 {index}，{self._open_kwargs["width"]}x'
+              f'{self._open_kwargs["height"]} {backend}）...', flush=True)
         self.cap = open_camera(**{**self._open_kwargs, 'show_settings_dialog': show_settings_dialog})
         if not self.cap.isOpened():
-            raise RuntimeError(f'无法打开摄像头 {index}（{label}），可以试试 --backend dshow/msmf')
+            raise RuntimeError(
+                f'无法打开摄像头 {index}（{label}）。\n'
+                f'  换后端试试:   SITE=... ./record_multicam.sh --backend dshow\n'
+                f'  确认设备存在: 设备管理器 → 照相机；或者先只开前几路 CAMS="0 1"'
+            )
         self._after_open()
         self.video_writer = None
         self.ts_window: list[float] = []
