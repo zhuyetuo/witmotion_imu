@@ -966,14 +966,31 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                     if d.label in dead_devices:
                         print(f'  跳过 {d.label}：整段没有数据，不生成配对文件')
                         continue
-                    for cam in _pairs_for(cameras, d, pair_filter):
+                    want = _pairs_for(cameras, d, pair_filter)
+                    if not want:
+                        continue
+                    # 同一个设备配几路摄像头，裁出来的 CSV 内容是**完全一样**的
+                    # （同一份原始流水、同一个裁剪窗口），只是文件名不同。
+                    # 所以只裁一次，其余硬链接过去——加了公共那路之后每个设备要配
+                    # 两路，原来是实打实写两遍：一小时 50Hz 的流水十几 MB，六只狗
+                    # 一天下来白写好几 G。
+                    # 降采样那条路本来就是这么做的（第一路算、其余复制），
+                    # 只有这条 raw 路一直没跟上。
+                    first_base = f'{base}_{want[0].label}_{d.label}_raw'
+                    try:
+                        write_anchored_raw_csv(
+                            f'{base}_{d.label}_raw.csv', f'{first_base}.csv',
+                            t_start_ms=first_tick_ts_ms, t_end_ms=last_tick_ts_ms,
+                        )
+                    except OSError as e:
+                        print(f'生成 {first_base}.csv 失败: {e}')
+                        continue
+                    for cam in want:
                         pair_base = f'{base}_{cam.label}_{d.label}_raw'
                         try:
                             _link_or_copy(f'{base}_{cam.label}_raw.mp4', f'{pair_base}.mp4')
-                            write_anchored_raw_csv(
-                                f'{base}_{d.label}_raw.csv', f'{pair_base}.csv',
-                                t_start_ms=first_tick_ts_ms, t_end_ms=last_tick_ts_ms,
-                            )
+                            if pair_base != first_base:
+                                _link_or_copy(f'{first_base}.csv', f'{pair_base}.csv')
                             print(f'  {pair_base}.mp4 / .csv（{cam.label} 原始视频 + {d.label} 原始数据，'
                                   f'文件名一致可直接拖拽配对）')
                         except OSError as e:
