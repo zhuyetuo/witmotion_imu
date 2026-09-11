@@ -2,21 +2,21 @@
 # 狗场专用清理：一次录制完，目录里除了配对好的 {base}_camX_imuY_raw.mp4/.csv
 # （样本平台就认这批），还会剩下一堆中间产物。这个脚本把那批中间产物删掉。
 #
-# 默认删这三类：
+# 默认删这四类：
 #   {base}_camN_raw.mp4     每路摄像头未配对的原始视频
 #   {base}.csv              合并后的总 IMU 流水
 #   {base}_meta.csv         录制元信息
+#   {base}_imuM_raw.csv     每个设备未裁剪的原始流水
 #
-# 不删 {base}_imuM_raw.csv（每个设备的未裁剪原始流水）。配对出来的
-# {base}_camN_imuM_raw.csv 是按视频起止裁过的，删了这份就再也拿不回整段数据，
-# 所以要删得显式加 --with-imu-raw。
+# 留一句在这：最后那类跟配对出来的 {base}_camN_imuM_raw.csv 不是一回事——配对
+# 那份是按视频起止裁过的，这份是整段。删了整段就拿不回来了。要留加 --keep-imu-raw。
 #
 # 用法:
-#   ./cleanup_gouchang.sh [-n] [-y] [--with-imu-raw] <目录> [<目录> ...]
+#   ./cleanup_gouchang.sh [-n] [-y] [--keep-imu-raw] <目录> [<目录> ...]
 #
 #   -n / --dry-run    只列清单，不删
 #   -y / --yes        跳过确认直接删（自动化用；手动跑别加）
-#   --with-imu-raw    连 {base}_imuM_raw.csv 一起删
+#   --keep-imu-raw    保留 {base}_imuM_raw.csv
 #
 # 安全检查：{base}_camN_raw.mp4 之所以能删，是因为 {base}_camN_imuM_raw.mp4
 # 是它的硬链接（同一份数据，删一个文件名不掉数据）。所以每删一路之前都会先确认
@@ -31,13 +31,13 @@ set -euo pipefail
 
 ASSUME_YES=0
 DRY_RUN=0
-WITH_IMU_RAW=0
+KEEP_IMU_RAW=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -y|--yes) ASSUME_YES=1; shift ;;
         -n|--dry-run) DRY_RUN=1; shift ;;
-        --with-imu-raw) WITH_IMU_RAW=1; shift ;;
+        --keep-imu-raw) KEEP_IMU_RAW=1; shift ;;
         -h|--help)
             sed -n '2,28p' "$0"
             exit 0 ;;
@@ -48,7 +48,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ "$#" -lt 1 ]; then
-    echo "用法: $0 [-n] [-y] [--with-imu-raw] <目录> [<目录> ...]"
+    echo "用法: $0 [-n] [-y] [--keep-imu-raw] <目录> [<目录> ...]"
     exit 1
 fi
 
@@ -110,8 +110,8 @@ for DIR in "$@"; do
         to_delete+=("$f")
     done < <(find "$DIR" -maxdepth 1 -type f -name '*.csv' 2>/dev/null)
 
-    # 3) 可选：每个设备未裁剪的原始流水
-    if [ "$WITH_IMU_RAW" = "1" ]; then
+    # 3) 每个设备未裁剪的原始流水
+    if [ "$KEEP_IMU_RAW" != "1" ]; then
         while IFS= read -r f; do
             [ -n "$f" ] || continue
             to_delete+=("$f")
@@ -134,8 +134,8 @@ fi
 echo "以下 ${#to_delete[@]} 个文件将被删除:"
 printf '  %s\n' "${to_delete[@]}"
 echo
-if [ "$WITH_IMU_RAW" != "1" ]; then
-    echo "(未裁剪的 {base}_imuM_raw.csv 已保留，要一起删加 --with-imu-raw)"
+if [ "$KEEP_IMU_RAW" = "1" ]; then
+    echo "(--keep-imu-raw 已指定，未裁剪的 {base}_imuM_raw.csv 保留)"
     echo
 fi
 
