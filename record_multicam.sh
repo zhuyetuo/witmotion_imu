@@ -288,6 +288,14 @@ case "$(echo "${PREVIEW:-1}" | tr 'A-Z' 'a-z')" in
     *) echo "PREVIEW 只认 0/1（或 on/off、yes/no），收到: ${PREVIEW}"; exit 1 ;;
 esac
 
+# ROTATE：把某几路画面转过来，空格分隔，比如 ROTATE="cam7:180"。
+# 天花板上倒装的那路要用——不转的话画面是反的，标注时判断方向更容易出错。
+ROTATE="${ROTATE:-}"
+rotate_args=()
+for r in $ROTATE; do
+    rotate_args+=(--rotate "$r")
+done
+
 PAIRS="${PAIRS:-}"
 pair_args=()
 for pr in $PAIRS; do
@@ -380,6 +388,7 @@ python imu_camera_sync_multicam.py \
     "${imu_args[@]}" "${imu_label_args[@]+"${imu_label_args[@]}"}" "${dog_name_args[@]}" \
     "${segment_args[@]}" --resample-hz "$RESAMPLE_HZ" \
     "${cam_args[@]}" "${pair_args[@]+"${pair_args[@]}"}" \
+    "${rotate_args[@]+"${rotate_args[@]}"}" \
     --width "$WIDTH" --height "$HEIGHT" \
     --capture-width "$CAPTURE_WIDTH" --capture-height "$CAPTURE_HEIGHT" \
     "${resample_flag[@]}" --out-dir "$OUT_DIR" \

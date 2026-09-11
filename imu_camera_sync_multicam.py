@@ -80,9 +80,17 @@ class CameraStream:
 
     def __init__(self, index: int, label: str, width: int, height: int, target_fps: int,
                  backend: str = 'auto', fourcc: str = 'MJPG', autofocus=None, auto_wb=None,
-                 capture_width: int = 0, capture_height: int = 0, show_settings_dialog: bool = False):
+                 capture_width: int = 0, capture_height: int = 0, show_settings_dialog: bool = False,
+                 rotate: int = 0):
         self.index = index
         self.label = label
+        # 画面旋转角（0/90/180/270）。吊在天花板上那路是倒着装的，不转过来人看着
+        # 别扭，标注时判断方向（狗往哪边走、爪子往哪儿挠）更容易出错。
+        # 转在采集这一步而不是事后：录进视频的就是转好的，后面所有环节
+        # （标注、AI 推理、导出）看到的都一致，不用各自记得再转一次。
+        self.rotate = rotate % 360
+        self._rot_code = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180,
+                          270: cv2.ROTATE_90_COUNTERCLOCKWISE}.get(self.rotate)
         # 采集分辨率（比如广角摄像头的原生2K）跟最终输出分辨率分开：直接向驱动
         # 请求较低分辨率时，很多广角摄像头给的是传感器中间裁切出来的一小块画面
         # （视野变窄），不是完整画幅等比缩小；按原生高分辨率采集、软件缩放到
@@ -109,6 +117,10 @@ class CameraStream:
                 f'  确认设备存在: 设备管理器 → 照相机；或者先只开前几路 CAMS="0 1"'
             )
         self._after_open()
+        # 转 90/270 之后宽高对调。不改这两个值的话，ffmpeg 按原尺寸开管道、实际
+        # 喂进去的是转置过的帧，画面会撕成斜条纹——而且不报错。
+        if self.rotate in (90, 270):
+            self.actual_w, self.actual_h = self.actual_h, self.actual_w
         self.video_writer = None
         self.ts_window: list[float] = []
         # 断联/重连状态：某一路摄像头中途掉了（USB 松了、供电不稳、驱动挂了）不能
@@ -202,6 +214,8 @@ class CameraStream:
                 ret, frame = False, None
             if ret and self.need_resize:
                 frame = cv2.resize(frame, (self.actual_w, self.actual_h))
+            if ret and self._rot_code is not None:
+                frame = cv2.rotate(frame, self._rot_code)
             with self._latest_lock:
                 self._latest = (ret, frame)
             self._want.clear()
@@ -214,6 +228,8 @@ class CameraStream:
             ret, frame = self.cap.read()
             if ret and self.need_resize:
                 frame = cv2.resize(frame, (self.actual_w, self.actual_h))
+            if ret and self._rot_code is not None:
+                frame = cv2.rotate(frame, self._rot_code)
             return ret, frame
         with self._latest_lock:
             latest = self._latest
@@ -500,6 +516,25 @@ class PreviewSwitch:
                 print('[预览] 收到 q，正在停止录制...')
                 self.stop_requested = True
                 return
+
+
+def _link_or_copy(src: str, dst: str) -> None:
+    """配对文件优先用硬链接，不行才真拷。
+
+    一路摄像头配几只狗，就要生成几份同样的视频。原来是整份拷贝——公共那路
+    （天花板上拍全场的）配 6 只狗，每小时就多出 6 份一模一样的整段视频，
+    一天下来几十 G，纯属白烧。
+
+    硬链接在同一块盘上是瞬间完成、不占额外空间的，而这些文件写完就不再改，
+    共享同一份内容没有副作用。归档脚本 daily_archive.sh 早就是这么做的。
+    跨盘或文件系统不支持时退回真拷贝。
+    """
+    try:
+        if os.path.exists(dst):
+            os.remove(dst)
+        os.link(src, dst)
+    except OSError:
+        shutil.copyfile(src, dst)
 
 
 def _pairs_for(cameras, device, pair_filter):
@@ -934,7 +969,7 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                     for cam in _pairs_for(cameras, d, pair_filter):
                         pair_base = f'{base}_{cam.label}_{d.label}_raw'
                         try:
-                            shutil.copyfile(f'{base}_{cam.label}_raw.mp4', f'{pair_base}.mp4')
+                            _link_or_copy(f'{base}_{cam.label}_raw.mp4', f'{pair_base}.mp4')
                             write_anchored_raw_csv(
                                 f'{base}_{d.label}_raw.csv', f'{pair_base}.csv',
                                 t_start_ms=first_tick_ts_ms, t_end_ms=last_tick_ts_ms,
@@ -966,9 +1001,9 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                     for cam in want:
                         pair_base = f'{base}_{cam.label}_{d.label}_resampled{args.resample_hz:g}hz'
                         try:
-                            shutil.copyfile(f'{base}_{cam.label}_raw.mp4', f'{pair_base}.mp4')
+                            _link_or_copy(f'{base}_{cam.label}_raw.mp4', f'{pair_base}.mp4')
                             if cam is not want[0]:
-                                shutil.copyfile(f'{first_pair_base}.csv', f'{pair_base}.csv')
+                                _link_or_copy(f'{first_pair_base}.csv', f'{pair_base}.csv')
                             print(f'  {pair_base}.mp4 / .csv（{cam.label} 视频 + {d.label} 降采样数据，'
                                   f'文件名一致可直接拖拽配对）')
                             resampled_pairs.append((cam.label, d.label, pair_base))
@@ -1134,6 +1169,12 @@ def main():
                          '2026_9_9 里混着两个场地的东西，想确认某个场地今天录全了没有只能自己'
                          '按 imu 号挑。本地目录带上后缀之后，NAS 那边直接照搬同名目录，'
                          '少一处拼接就少一处能拼错的地方。只认 A-Z a-z 0-9 _ -。')
+    ap.add_argument('--rotate', action='append', default=[], metavar='camN:角度',
+                    help='把某一路画面转过来，比如 --rotate cam7:180。角度只认 0/90/180/270。\n'
+                         '天花板上倒装的摄像头需要这个：不转的话画面是反的，标注时判断方向'
+                         '（狗往哪边走、爪子往哪儿挠）更容易出错。\n'
+                         '转在采集这一步，录进视频的就是转好的——后面标注、AI 推理、导出'
+                         '看到的都一致，不用各自记得再转一次。')
     ap.add_argument('--probe', action='store_true',
                     help='只探测硬件能力（每路摄像头 + 各IMU设备当前实际输出频率），不录制，探测完直接退出')
     args = ap.parse_args()
@@ -1206,6 +1247,24 @@ def main():
 
     autofocus = {'on': True, 'off': False}.get(args.autofocus)
     auto_wb = {'on': True, 'off': False}.get(args.auto_wb)
+
+    # --rotate cam7:180 → {'cam7': 180}
+    rotate_of: dict[str, int] = {}
+    for spec in args.rotate:
+        label, _, ang = spec.partition(':')
+        label = label.strip()
+        if not re.fullmatch(r'cam\d+', label) or ang.strip() not in ('0', '90', '180', '270'):
+            print(f'--rotate 应该长这样：cam7:180（角度只认 0/90/180/270），收到: {spec!r}')
+            sys.exit(1)
+        rotate_of[label] = int(ang)
+    # 写错摄像头号不能静默忽略——画面照样是反的，而人以为已经转过来了
+    cam_labels = {f'cam{i}' for i in range(1, len(args.camera) + 1)}
+    bad = sorted(set(rotate_of) - cam_labels)
+    if bad:
+        print(f'--rotate 里这些摄像头不存在: {", ".join(bad)}；这次一共 {len(args.camera)} 路'
+              f'（{", ".join(sorted(cam_labels, key=lambda x: int(x[3:])))}）')
+        sys.exit(1)
+
     cameras = []
     for i, cam_idx in enumerate(args.camera, start=1):
         try:
@@ -1213,7 +1272,8 @@ def main():
                                          backend=args.backend, fourcc=args.fourcc,
                                          autofocus=autofocus, auto_wb=auto_wb,
                                          capture_width=args.capture_width, capture_height=args.capture_height,
-                                         show_settings_dialog=args.show_settings_dialog))
+                                         show_settings_dialog=args.show_settings_dialog,
+                                         rotate=rotate_of.get(f'cam{i}', 0)))
         except RuntimeError as e:
             print(e)
             sys.exit(1)
