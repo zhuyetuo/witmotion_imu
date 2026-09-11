@@ -908,14 +908,16 @@ install_autostart.bat /uninstall    REM 撤掉
 **自动跑的时候不开预览窗口**（`PREVIEW=0`）：没人坐在那儿按 `p`，六个 720p 窗口
 白白吃掉四成帧率。要看画面就手动跑一次 `SITE=狗场 ./record_multicam.sh`。
 
-手动跑的时候用 `PREVIEW` 决定起手开不开：
+预览窗口**默认是关的**——录制的常态是无人值守跑一整晚，没人看那些窗口，而七路
+720p 的 imshow 加 waitKey 每 tick 吃掉 30 多毫秒，白掉四成帧率。
 
 ```bash
-SITE=狗场 ./record_multicam.sh             # 默认开着，方便认摄像头
-PREVIEW=0 SITE=狗场 ./record_multicam.sh   # 起手就关，帧率直接拉满
+SITE=狗场 ./record_multicam.sh             # 默认不开画面
+PREVIEW=1 SITE=狗场 ./record_multicam.sh   # 起手就开着
 ```
 
-跑起来之后不管起手是哪个状态，都能敲 `p` + 回车随时切。
+想看一眼不用重启：敲 `p` + 回车调出来，看完再敲一次关掉。
+只想认摄像头、不录数据，跑 `./debug_cameras.sh`。
 
 ## 调试模式：只看画面，什么都不存
 
