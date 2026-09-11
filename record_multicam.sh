@@ -6,7 +6,7 @@
 #   SITE=影棚 ./record_multicam.sh     ← 平时就用这个
 #   SITE=狗场 ./record_multicam.sh
 #
-#   PREVIEW=0 SITE=狗场 ./record_multicam.sh   ← 起手不开预览窗口
+#   PREVIEW=1 SITE=狗场 ./record_multicam.sh   ← 起手就开预览窗口（默认不开）
 #   DEBUG=1   SITE=狗场 ./record_multicam.sh   ← 只看画面，什么都不存
 #
 # 命令行上多写的参数会原样传给 imu_camera_sync_multicam.py，接在 EXTRA_ARGS 后面
@@ -271,20 +271,19 @@ EXTRA_ARGS="${EXTRA_ARGS:-}"
 # 场地配置里加了别的开关就会被它悄悄顶掉，而且是不报错的那种。
 EXTRA_ARGS="$EXTRA_ARGS ${EXTRA_ARGS_APPEND:-}"
 
-# PREVIEW：启动时开不开预览窗口。默认开（1）。
-#   PREVIEW=0 SITE=狗场 ./record_multicam.sh
+# PREVIEW：启动时开不开预览窗口。默认关（0）。
+#   PREVIEW=1 SITE=狗场 ./record_multicam.sh    ← 起手就开着
 #
-# 本来只能通过 EXTRA_ARGS=--no-preview 来关，那是个"知道底层有这个开关"才写得
-# 出来的写法。开不开画面是每次启动都要决定的事，值得有个自己的名字。
+# 为什么默认关：录制的常态是无人值守跑一整晚，没人看那些窗口，而七路 720p 的
+# imshow 加 waitKey 实测吃掉每 tick 30 多毫秒（25fps 的预算一共才 40ms），
+# 白白掉四成帧率。以前默认开是为了认摄像头，现在那件事有 ./debug_cameras.sh
+# 专门管——它不落盘、随开随关，比在正式录制里开着画面合适得多。
 #
-# 不管启动时是开是关，跑起来之后都能在终端敲 p + 回车 随时切——这个参数只决定
-# 起手是哪个状态。
-#
-# 什么时候该关：无人值守整晚录（没人看，六个 720p 窗口白吃四成帧率），以及
-# 排查蓝牙掉线时想让摄像头吞吐降下来做对照。
-case "$(echo "${PREVIEW:-1}" | tr 'A-Z' 'a-z')" in
-    0|no|off|false|n)  EXTRA_ARGS="$EXTRA_ARGS --no-preview"; _preview_say="关（PREVIEW=0）" ;;
-    1|yes|on|true|y)   _preview_say="开" ;;
+# 跑起来之后随时能在终端敲 p + 回车 把画面调出来看一眼，看完再敲一次关掉，
+# 所以"默认关"不等于"想看看不了"。
+case "$(echo "${PREVIEW:-0}" | tr 'A-Z' 'a-z')" in
+    0|no|off|false|n)  EXTRA_ARGS="$EXTRA_ARGS --no-preview"; _preview_say="关（默认；PREVIEW=1 起手就开）" ;;
+    1|yes|on|true|y)   _preview_say="开（PREVIEW=1）" ;;
     *) echo "PREVIEW 只认 0/1（或 on/off、yes/no），收到: ${PREVIEW}"; exit 1 ;;
 esac
 
@@ -381,7 +380,9 @@ if [ -f "$LOCK" ] && [ "${FORCE:-0}" != "1" ]; then
     echo "清掉上次没删干净的锁文件（PID ${old:-空} 已经不在了）"
 fi
 echo $$ > "$LOCK"
-echo "预览窗口：$_preview_say（跑起来之后敲 p + 回车 随时切；PREVIEW=0 可以起手就关）"
+echo "预览窗口：$_preview_say"
+echo "  想看画面：敲 p + 回车 调出来，看完再敲一次关掉（开着大概掉四成帧率）"
+echo "  只想认摄像头、不录数据：先退出，改跑 ./debug_cameras.sh"
 trap 'rm -f "$LOCK"' EXIT
 
 python imu_camera_sync_multicam.py \
