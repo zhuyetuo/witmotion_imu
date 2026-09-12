@@ -249,6 +249,63 @@ if [ -n "${DEVICES:-}" ]; then
     fi
 fi
 
+# 两个块合起来的「设备号 ↔ 狗名」对照。USE_STANDBY 换了组、ALL_DEVICES 两组都要，
+# 都得知道"这个号是哪只狗的、那只狗还有哪个号"。
+_dev_dog_map=""
+_collect_dev_dog() {
+    local _block="$1"
+    [ -n "$_block" ] || return 0
+    while IFS= read -r _line; do
+        _line="${_line%%#*}"
+        read -ra _f <<< "$_line"
+        [ ${#_f[@]} -eq 3 ] || continue
+        _dev_dog_map="$_dev_dog_map ${_f[0]#imu}:${_f[2]}"
+    done <<< "$_block"
+}
+_collect_dev_dog "${DEVICES:-}"
+_collect_dev_dog "${DEVICES_STANDBY:-}"
+
+# PAIRS 写在场地文件里，写的是某一组的编号（狗场写的是奇数那组）。换组录的时候
+# 这些编号一个都不存在，parse_pairs 直接报"配对不存在"退出——USE_STANDBY 第一版
+# 就是这么炸的，而且是在 Python 里炸的，shell 这边看参数完全正常。
+#
+# 所以按狗名把 PAIRS 改写到这次真正在录的那个设备上。不换组时这是恒等变换
+# （每条都已经在录），所以不用加条件，一视同仁地跑一遍更不容易漏。
+if [ -n "${PAIRS:-}" ] && [ -n "$_dev_dog_map" ]; then
+    _active=" $IMU_IDS "
+    _remapped=""; _dropped=""
+    for _pr in $PAIRS; do
+        _cam="${_pr%%:*}"
+        _n="${_pr##*:}"; _n="${_n#imu}"
+        case "$_active" in
+            *" $_n "*) _remapped="$_remapped ${_cam}:imu${_n}"; continue ;;
+        esac
+        _dog=""; _hit=""
+        for _kv in $_dev_dog_map; do
+            if [ "${_kv%%:*}" = "$_n" ]; then _dog="${_kv#*:}"; break; fi
+        done
+        if [ -n "$_dog" ]; then
+            for _kv in $_dev_dog_map; do
+                if [ "${_kv#*:}" = "$_dog" ]; then
+                    case "$_active" in *" ${_kv%%:*} "*) _hit="${_kv%%:*}"; break ;; esac
+                fi
+            done
+        fi
+        if [ -n "$_hit" ]; then
+            _remapped="$_remapped ${_cam}:imu${_hit}"
+        else
+            _dropped="$_dropped ${_cam}:imu${_n}"
+        fi
+    done
+    if [ "$(echo $PAIRS)" != "$(echo $_remapped)" ]; then
+        echo "  PAIRS 按狗名改写到这次在录的设备上（$(echo $_remapped | wc -w) 条）"
+    fi
+    PAIRS="$_remapped"
+    if [ -n "$_dropped" ]; then
+        echo "  ⚠ 这几条配对的设备这次没在录，已去掉：$_dropped"
+    fi
+fi
+
 # ALL_DEVICES=1：当班 + 备用一起录（每只狗两个 IMU 同时采）。
 #
 # 解决的是这个问题：现场换了设备而配置没跟上，脚本就会去连躺在充电座上的
