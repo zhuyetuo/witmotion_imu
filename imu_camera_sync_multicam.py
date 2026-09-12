@@ -737,6 +737,22 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
         prof['_n'] = 0
         prof['_last'] = time.perf_counter()
 
+    # --status-sec：每隔一段时间打一行"现在什么情况"。
+    #
+    # 跟 --profile 的分工：profile 是出问题时拿来定位瓶颈的（每 5 秒、六个耗时
+    # 数字，刷屏），这个是无人值守跑一整夜时留在日志里的——第二天回看日志就知道
+    # 哪个时段掉帧、哪个 IMU 断过，不用去翻视频画面。默认开着。
+    #
+    # 摄像头那一栏报的是"占位帧比例"而不是 fps：七路共用同一个 tick 循环，
+    # fps 必然一模一样（就是 tick 率），逐路列七个相同的数字没有信息量。
+    # 真正逐路不同的是"这一 tick 它有没有交出真实帧"。
+    status_sec = getattr(args, 'status_sec', 60.0)
+    st = None
+    if status_sec > 0:
+        st = {'last': time.perf_counter(), 'ticks': 0,
+              'cam_miss': [0] * len(cameras),
+              'imu_miss': {d.label: 0 for d in devices}}
+
     try:
         while not stop_event.is_set():
             if imu_sync:
@@ -888,6 +904,37 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                     key = cv2.waitKey(1) & 0xFF
                 except cv2.error:
                     key = 0xFF
+            if st is not None:
+                st['ticks'] += 1
+                for _i, _m in enumerate(cam_missing):
+                    if _m:
+                        st['cam_miss'][_i] += 1
+                for _d, _hz, _lag, _ms, _row in imu_info:
+                    if _ms or _row is None:
+                        st['imu_miss'][_d.label] += 1
+                _now = time.perf_counter()
+                if _now - st['last'] >= status_sec:
+                    _span = _now - st['last']
+                    _n = max(st['ticks'], 1)
+                    _cam_bad = [f'{c.label} 占位{st["cam_miss"][_i] * 100.0 / _n:.0f}%'
+                                for _i, c in enumerate(cameras) if st['cam_miss'][_i]]
+                    _cam_txt = '  '.join(_cam_bad) if _cam_bad else '全部正常'
+                    # Hz 取当下瞬时值（各设备自己的一秒滑窗），断过的额外标出来：
+                    # 只看瞬时 Hz 的话，中间断了 30 秒又连回来是看不出来的
+                    _imu_parts = []
+                    for _d in devices:
+                        _m = st['imu_miss'][_d.label]
+                        _tag = f'{_d.label} {_d.current_hz():.0f}'
+                        if _m:
+                            _tag += f'(缺{_m * 100.0 / _n:.0f}%)'
+                        _imu_parts.append(_tag)
+                    print(f'[状态] 已录 {elapsed:.0f}s  tick {st["ticks"] / _span:.1f}/{target_fps}fps\n'
+                          f'       摄像头 {_cam_txt}\n'
+                          f'       IMU    {"  ".join(_imu_parts)}  Hz', flush=True)
+                    st['last'] = _now
+                    st['ticks'] = 0
+                    st['cam_miss'] = [0] * len(cameras)
+                    st['imu_miss'] = {d.label: 0 for d in devices}
             if prof:
                 prof['waitKey'] += time.perf_counter() - _t
                 prof['_n'] += 1
@@ -1180,6 +1227,9 @@ def main():
                          '（25fps 的预算一共才 40ms），认完之后就该关掉。'
                          '不管带不带这个参数，录制中都可以在终端敲 p + 回车 随时开关预览、'
                          'q + 回车 停止录制')
+    ap.add_argument('--status-sec', type=float, default=60.0,
+                    help='每隔多少秒打一行状态（tick 率 / 各摄像头占位帧比例 / 各 IMU 采样率）。'
+                         '默认 60，设 0 关掉。无人值守跑一整夜时靠它回看日志，不用翻视频画面')
     ap.add_argument('--profile', action='store_true',
                     help='每 5 秒打印一次每个 tick 各环节的平均耗时（读摄像头/画叠加/写给ffmpeg/'
                          '显示窗口/waitKey）。帧率上不去时用它定位瓶颈，别靠猜')
