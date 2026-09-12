@@ -254,17 +254,68 @@ if [ "${ALL_DEVICES:-0}" = "1" ]; then
     _parse_devices_block "$DEVICES_STANDBY" "DEVICES_STANDBY"
     _n_all=$(echo $IMU_IDS | wc -w)
     echo "ALL_DEVICES=1：当班 + 备用一起录，共 $_n_all 个设备（imu$(echo $IMU_IDS | tr ' ' ',')）"
-    # PAIRS/KEEP_PAIRS 是按 imu 号挑的，备用编号没列进去的话，那几个设备只会
-    # 留下 {base}_imuN_raw.csv，不会配对成样本、也不会传 NAS。测容量够用，
-    # 真要长期这么录就得把编号补上——所以喊一声，别让人以为已经在用了。
+
+    read -ra _ids <<< "$IMU_IDS"
+    read -ra _dogs <<< "$DOG_NAMES"
+
+    # 每只狗必须正好两个设备（当班一个、备用一个）。少一个或多一个都说明两个块
+    # 没对齐，而这种错不会自己冒出来——只会把 A 狗的备用设备配到 B 狗的摄像头上，
+    # 录出来的文件名看着完全正常。
+    for _d in $(printf '%s\n' "${_dogs[@]}" | sort -u); do
+        _cnt=$(printf '%s\n' "${_dogs[@]}" | grep -cx -- "$_d" || true)
+        if [ "$_cnt" -ne 2 ]; then
+            echo "  ✗ 狗名 \"$_d\" 在 DEVICES + DEVICES_STANDBY 里出现了 $_cnt 次，应该正好 2 次"
+            echo "    （当班一个、备用一个）。两个块的狗名要能一一配上，否则配对会串。"
+            exit 1
+        fi
+    done
+
+    # 同一只狗的另一个设备号
+    _alt_imu_of() {
+        local want="$1" i dog=''
+        for i in "${!_ids[@]}"; do
+            if [ "${_ids[$i]}" = "$want" ]; then dog="${_dogs[$i]}"; break; fi
+        done
+        [ -n "$dog" ] || return 1
+        for i in "${!_ids[@]}"; do
+            if [ "${_dogs[$i]}" = "$dog" ] && [ "${_ids[$i]}" != "$want" ]; then
+                echo "${_ids[$i]}"; return 0
+            fi
+        done
+        return 1
+    }
+
+    # PAIRS 自动扩到备用设备：每条 camX:imuN 再配一条 camX:imuM（M = 同一只狗的
+    # 另一个设备）。不这么做的话备用那几个只会留下 {base}_imuM_raw.csv，不配对、
+    # 不成样本、不归档——全采了个寂寞。
+    #
+    # 按**狗名**找对应，不按行号：行号对齐错一格不会报错，只会把 A 狗的备用
+    # 配到 B 狗的摄像头上。狗名对不上就在上面那个检查里已经退出了。
+    #
+    # 也不写死在场地文件里：parse_pairs 对不存在的设备是直接报错退出的，
+    # 把 24 条配对常驻在 PAIRS 里，不带 ALL_DEVICES 跑就一条都跑不起来。
     if [ -n "${PAIRS:-}" ]; then
+        _add=""
+        for _pr in $PAIRS; do
+            _cam="${_pr%%:*}"
+            _n="${_pr##*:}"; _n="${_n#imu}"
+            _alt="$(_alt_imu_of "$_n")" || continue
+            _add="$_add ${_cam}:imu${_alt}"
+        done
+        PAIRS="$PAIRS$_add"
+        echo "  PAIRS 自动扩到 $(echo $PAIRS | wc -w) 条（备用设备各自跟着当班那条走）"
+        # 扩完还漏的话，说明 PAIRS 本来就没覆盖全部当班设备。喊一声，
+        # 别让人以为"全采"了而其实有设备只落了个原始 CSV。
         for _id in $IMU_IDS; do
             case " $PAIRS " in
                 *":imu${_id} "*|*":imu${_id}") ;;
-                *) echo "  ⚠ PAIRS 里没有 imu${_id}，它只会留下原始 CSV，不配对、不归档" ;;
+                *) echo "  ⚠ PAIRS 里仍然没有 imu${_id}，它只会留下原始 CSV，不配对、不归档" ;;
             esac
         done
     fi
+
+    echo "  ⚠ 平台那边会多出一倍样本：躺在充电座上的那几个也会被配对成样本，"
+    echo "    数据是纯静止的。哪个是真的看数据一眼能分出来，但别忘了清掉。"
 fi
 
 
