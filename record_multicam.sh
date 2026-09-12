@@ -218,9 +218,35 @@ _parse_devices_block() {
     done <<< "$_block"
 }
 
+# USE_STANDBY=1：这次用备用那组（DEVICES_STANDBY），不用改文件。
+#
+# 为什么要有：狗场是每天轮换充电，今天戴偶数、明天戴奇数。以前换班要把场地
+# 文件里两个块的内容对调——十二行剪切粘贴，在狗场现场半夜干这个，早晚会漏，
+# 而漏了的后果是脚本去连躺在充电座上的那一个，录一整夜静止数据，看起来还完全
+# 正常（有数据、50Hz、时长对）。这个问题已经发生过一次了。
+#
+# 改成开关之后，场地文件从此不用因为换班而改动：
+#     SITE=狗场 ./record_multicam.sh                # DEVICES 那组（奇数）
+#     USE_STANDBY=1 SITE=狗场 ./record_multicam.sh  # DEVICES_STANDBY 那组（偶数）
+#
+# 跟 ALL_DEVICES=1 同时开没有意义——那个两组都录，本来就不用选。
+if [ "${USE_STANDBY:-0}" = "1" ]; then
+    if [ -z "${DEVICES_STANDBY:-}" ]; then
+        echo "USE_STANDBY=1 但场地配置里没有 DEVICES_STANDBY，没有备用设备可用。"
+        exit 1
+    fi
+    _swap="$DEVICES"; DEVICES="$DEVICES_STANDBY"; DEVICES_STANDBY="$_swap"
+    if [ "${ALL_DEVICES:-0}" = "1" ]; then
+        echo "USE_STANDBY=1 跟 ALL_DEVICES=1 一起用没有意义（两组都会录），忽略前者的影响"
+    fi
+fi
+
 if [ -n "${DEVICES:-}" ]; then
     IMUS=""; IMU_IDS=""; DOG_NAMES=""
     _parse_devices_block "$DEVICES" "DEVICES"
+    if [ "${USE_STANDBY:-0}" = "1" ] && [ "${ALL_DEVICES:-0}" != "1" ]; then
+        echo "USE_STANDBY=1：这次录备用那组，imu$(echo $IMU_IDS | tr ' ' ',')"
+    fi
 fi
 
 # ALL_DEVICES=1：当班 + 备用一起录（每只狗两个 IMU 同时采）。
