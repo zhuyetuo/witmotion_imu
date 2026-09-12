@@ -365,17 +365,7 @@ def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame
     """
     font, scale, thick = cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1
 
-    def pos(row):
-        return (12, 28 + row * 26)
-
-    def _put(canvas, text, row, color):
-        p = pos(row)
-        # 先画黑色粗一点当描边，再画正常颜色：不加描边的话，字压到浅色背景
-        # （白墙、地板反光）上就完全看不见了，何况还要再淡一层
-        cv2.putText(canvas, text, p, font, scale, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(canvas, text, p, font, scale, color, thick, cv2.LINE_AA)
-
-    marks = []   # 常态：(文字, 行号, 颜色)，混合后变淡
+    marks = []   # 常态：(文字, 行号, 列号, 颜色)，混合后变淡
     alarms = []  # 异常：同上，但不打折
 
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:23]
@@ -386,50 +376,83 @@ def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame
     else:
         marks.append((f'{ts}  [{cam_label}]  {cam_fps:.1f}/{target_fps}fps', 0, (255, 255, 100)))
 
+    # 一只狗一行，它的几个设备并排成列（ALL_DEVICES=1 时就是当班 + 备用两列）。
+    #
+    # 为什么不竖着排一列：全采是 8 个设备，竖排 8 行时"哪只狗的哪一个掉了"
+    # 要来回数行才看得出来——而这恰恰是全采时最常看的一件事。并排之后同一行
+    # 就是同一只狗，一眼扫过去哪行缺了一半就知道。
+    #
+    # 按 display_name（--dog-name）分组，跟开录前预检同一套分组规则。没给狗名时
+    # display_name 就等于 label，每个设备自成一组 → 只有一列 → 跟原来一模一样。
+    by_dog: dict = {}
+    for item in imu_info:
+        by_dog.setdefault(item[0].display_name, []).append(item)
+
     row = 1
-    for device, hz, lag_ms, missing, imu_row in imu_info:
-        # 名字后面跟上 imu 编号：文件名和 CSV 列名用的都是 imu1/imu2，画面上只有
-        # 狗名的话，回头对着录像核"这条曲线是谁"还得再去翻当时的启动参数
-        who = f'{device.display_name}/{device.label}' if device.display_name != device.label else device.label
-        if missing or imu_row is None:
-            alarms.append((f'[{who}] MISSING', row, (80, 80, 255)))
-        else:
-            # lag 的数值不再显示——它每帧都在跳，盯着也没有可操作性，真掉线了看
-            # MISSING 就够。但还是拿它决定颜色：绿=跟得上，黄=有点滞后，红=明显
-            # 滞后，扫一眼就知道健康不健康，不占任何字宽。
-            color = (100, 255, 100) if lag_ms < 50 else (50, 200, 255) if lag_ms < 150 else (80, 80, 255)
-            marks.append((f'[{who}] {hz:.1f}Hz', row, color))
-        row += 1
-        # 6轴实时数值：方便肉眼判断设备是不是静置在桌上没戴（加速度接近
-        # (0,0,1g)、角速度接近0）还是真的戴在狗身上有动作。默认不显示（太占画面），
-        # 需要看的时候加 --show-imu-values 打开。
-        if show_imu_values and not missing and imu_row is not None:
-            marks.append((f'  Acc  X={imu_row["acc_x"]:+.3f} Y={imu_row["acc_y"]:+.3f} '
-                          f'Z={imu_row["acc_z"]:+.3f} g', row, (200, 200, 200)))
-            row += 1
-            marks.append((f'  Gyro X={imu_row["gyro_x"]:+7.2f} Y={imu_row["gyro_y"]:+7.2f} '
-                          f'Z={imu_row["gyro_z"]:+7.2f} °/s', row, (200, 200, 200)))
-            row += 1
+    for items in by_dog.values():
+        for col, (device, hz, lag_ms, missing, imu_row) in enumerate(items):
+            # 名字后面跟上 imu 编号：文件名和 CSV 列名用的都是 imu1/imu2，画面上只有
+            # 狗名的话，回头对着录像核"这条曲线是谁"还得再去翻当时的启动参数
+            who = f'{device.display_name}/{device.label}' if device.display_name != device.label else device.label
+            if missing or imu_row is None:
+                alarms.append((f'[{who}] MISSING', row, col, (80, 80, 255)))
+            else:
+                # lag 的数值不再显示——它每帧都在跳，盯着也没有可操作性，真掉线了看
+                # MISSING 就够。但还是拿它决定颜色：绿=跟得上，黄=有点滞后，红=明显
+                # 滞后，扫一眼就知道健康不健康，不占任何字宽。
+                color = (100, 255, 100) if lag_ms < 50 else (50, 200, 255) if lag_ms < 150 else (80, 80, 255)
+                marks.append((f'[{who}] {hz:.1f}Hz', row, col, color))
+            # 6轴实时数值：方便肉眼判断设备是不是静置在桌上没戴（加速度接近
+            # (0,0,1g)、角速度接近0）还是真的戴在狗身上有动作。默认不显示（太占画面），
+            # 需要看的时候加 --show-imu-values 打开。
+            if show_imu_values and not missing and imu_row is not None:
+                marks.append((f'  Acc  X={imu_row["acc_x"]:+.3f} Y={imu_row["acc_y"]:+.3f} '
+                              f'Z={imu_row["acc_z"]:+.3f} g', row + 1, col, (200, 200, 200)))
+                marks.append((f'  Gyro X={imu_row["gyro_x"]:+7.2f} Y={imu_row["gyro_y"]:+7.2f} '
+                              f'Z={imu_row["gyro_z"]:+7.2f} °/s', row + 2, col, (200, 200, 200)))
+        row += 3 if show_imu_values else 1
+
+    def _w(text):
+        return cv2.getTextSize(text, font, scale, 3)[0][0]
+
+    # 列宽按设备那几行里最宽的一条算。两头都要排除：
+    # 第一行的时间戳比设备行长得多，拿它当列距会把第二列推到画面外；
+    # 摄像头掉线那条告警（下面才 append）同理，而且它是横跨整行的，不属于任何一列。
+    # 所以这段必须卡在设备行画完、告警 append 之前。+24 是两列之间的间隙。
+    _dev_texts = [t for t, r, _, _ in marks + alarms if r >= 1]
+    col_stride = (max(_w(t) for t in _dev_texts) + 24) if _dev_texts else 0
+
+    def pos(row, col=0):
+        return (12 + col * col_stride, 28 + row * 26)
+
+    def _put(canvas, text, row, col, color):
+        p = pos(row, col)
+        # 先画黑色粗一点当描边，再画正常颜色：不加描边的话，字压到浅色背景
+        # （白墙、地板反光）上就完全看不见了，何况还要再淡一层
+        cv2.putText(canvas, text, p, font, scale, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(canvas, text, p, font, scale, color, thick, cv2.LINE_AA)
 
     # 别的摄像头断了，在每一路画面上都挂一条红字——断掉那路的窗口是黑的没人看，
     # 得让盯着任何一个窗口的人都能看见"有一路掉了，去插线"
     if down_cams:
-        alarms.append(('!! ' + '  '.join(down_cams) + '  <- check cable', row, (60, 60, 255)))
+        alarms.append(('!! ' + '  '.join(down_cams) + '  <- check cable', row, 0, (60, 60, 255)))
 
     if marks:
         h, w = frame.shape[:2]
         # 量出常态文字真正占多大，只在这块上混合。+16 给描边和抗锯齿留边，
-        # 少了会把最右边一列像素切掉，看着像字被啃了一口
-        x1 = min(w, max(cv2.getTextSize(t, font, scale, 3)[0][0] for t, _, _ in marks) + 12 + 16)
-        y1 = min(h, pos(max(r for _, r, _ in marks))[1] + 12)
+        # 少了会把最右边一列像素切掉，看着像字被啃了一口。
+        # 告警是不打折画在原帧上的，但它也占位置——第二列如果全是 MISSING，
+        # marks 里就没有那么宽的东西，ROI 会短一截，混合区跟实际字宽对不上。
+        x1 = min(w, max(pos(0, c)[0] + _w(t) for t, _, c, _ in marks + alarms) + 16)
+        y1 = min(h, pos(max(r for _, r, _, _ in marks + alarms))[1] + 12)
         roi = frame[0:y1, 0:x1]
         wm = roi.copy()
-        for text, r, color in marks:
-            _put(wm, text, r, color)
+        for text, r, c, color in marks:
+            _put(wm, text, r, c, color)
         cv2.addWeighted(wm, alpha, roi, 1.0 - alpha, 0, roi)
 
-    for text, r, color in alarms:
-        _put(frame, text, r, color)
+    for text, r, c, color in alarms:
+        _put(frame, text, r, c, color)
     return frame
 
 
