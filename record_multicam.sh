@@ -273,10 +273,20 @@ _collect_dev_dog "${DEVICES_STANDBY:-}"
 # （每条都已经在录），所以不用加条件，一视同仁地跑一遍更不容易漏。
 if [ -n "${PAIRS:-}" ] && [ -n "$_dev_dog_map" ]; then
     _active=" $IMU_IDS "
-    _remapped=""; _dropped=""
+    # 这次开了几路摄像头。临时少开一路做实验（CAMS="4 0 3 5 2 1" 摘掉天花板那路）
+    # 时，PAIRS 里 cam7 的那几条就指向不存在的摄像头，parse_pairs 同样会退出。
+    # 跟设备那边一个道理：不该为了做个对比实验去手改场地文件。
+    _n_cams=$(echo ${CAMS:-} | wc -w)
+    _remapped=""; _dropped=""; _dropped_cam=""
     for _pr in $PAIRS; do
         _cam="${_pr%%:*}"
         _n="${_pr##*:}"; _n="${_n#imu}"
+        # 摄像头不在这次的 CAMS 里 → 整条去掉。不静默：写错摄像头号（比如 cam9）
+        # 也长这样，得让人在日志里看得见
+        if [ -n "${CAMS:-}" ] && [ "${_cam#cam}" -gt "$_n_cams" ] 2>/dev/null; then
+            _dropped_cam="$_dropped_cam $_pr"
+            continue
+        fi
         case "$_active" in
             *" $_n "*) _remapped="$_remapped ${_cam}:imu${_n}"; continue ;;
         esac
@@ -303,6 +313,9 @@ if [ -n "${PAIRS:-}" ] && [ -n "$_dev_dog_map" ]; then
     PAIRS="$_remapped"
     if [ -n "$_dropped" ]; then
         echo "  ⚠ 这几条配对的设备这次没在录，已去掉：$_dropped"
+    fi
+    if [ -n "$_dropped_cam" ]; then
+        echo "  ⚠ 这几条配对的摄像头这次没开（CAMS 只有 $_n_cams 路），已去掉：$_dropped_cam"
     fi
 fi
 
