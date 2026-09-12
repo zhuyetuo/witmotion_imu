@@ -198,8 +198,9 @@ RECONNECT_MAX_BACKOFF="${RECONNECT_MAX_BACKOFF:-300}"
 # 为什么换成一张表：那三个是平行数组，要靠人手工对齐——错位一格不会报错，
 # 只是从此以后 A 狗的数据记在 B 狗名下。而"真实编号"这件事本来就该跟 MAC
 # 写在同一行，分成三处填就是在制造错位的机会。
-if [ -n "${DEVICES:-}" ]; then
-    IMUS=""; IMU_IDS=""; DOG_NAMES=""
+_parse_devices_block() {
+    local _block="$1" _tag="$2"
+    [ -n "$_block" ] || return 0
     while IFS= read -r _line; do
         # 先砍掉行尾注释，再切三列。不砍的话 read 会把 # 后面整段都塞进狗名，
         # 而狗名是要画到画面上的，出来就是一长串乱码
@@ -208,13 +209,62 @@ if [ -n "${DEVICES:-}" ]; then
         read -ra _f <<< "$_line"
         [ ${#_f[@]} -eq 0 ] && continue
         if [ ${#_f[@]} -ne 3 ]; then
-            echo "DEVICES 这一行应该是「编号 MAC 狗名」三列，收到 ${#_f[@]} 列: $_line"
+            echo "${_tag} 这一行应该是「编号 MAC 狗名」三列，收到 ${#_f[@]} 列: $_line"
             exit 1
         fi
         IMU_IDS="$IMU_IDS ${_f[0]#imu}"
         IMUS="$IMUS wit=${_f[1]}"
         DOG_NAMES="$DOG_NAMES ${_f[2]}"
-    done <<< "$DEVICES"
+    done <<< "$_block"
+}
+
+if [ -n "${DEVICES:-}" ]; then
+    IMUS=""; IMU_IDS=""; DOG_NAMES=""
+    _parse_devices_block "$DEVICES" "DEVICES"
+fi
+
+# ALL_DEVICES=1：当班 + 备用一起录（每只狗两个 IMU 同时采）。
+#
+# 解决的是这个问题：现场换了设备而配置没跟上，脚本就会去连躺在充电座上的
+# 那一个，录一整夜静止数据——而且看起来完全正常（有数据、50Hz、时长对），
+# 事后在平台上也看不出来。两个都录就没有"选错"这回事了，哪个是真的事后
+# 看数据一眼就分得出来（充电座那份是纯静止），换班也不用再改配置。
+#
+# ⚠ 先测蓝牙：SITE=狗场 ./check_ble_capacity.sh
+#   12 条 BLE 链路抢同一个射频的连接间隔，很可能撑不住，或者撑住了但每台的
+#   采样率都掉下来——那是拿真正在乎的 6 台数据去换一个配置错误的保险，不划算。
+if [ "${ALL_DEVICES:-0}" = "1" ]; then
+    if [ -z "${DEVICES:-}" ]; then
+        # 没有 DEVICES 表就意味着没有真实编号，文件名里的 imu 号是按 IMUS 的
+        # 位置排的。把备用那组接在后面，它们会变成 imu5、imu6…——而平台狗档案
+        # 里那些号登记的是别的狗，等于把 A 狗备用设备的数据记到 B 狗名下。
+        # 这种错不报警、不可见，只能在这儿拦住。
+        echo "ALL_DEVICES=1 需要场地配置里有 DEVICES 表（「真实编号 MAC 狗名」）。"
+        echo "这个场地用的是 IMUS，文件名里的 imu 号是按位置排的；把备用设备接在"
+        echo "后面会让它们拿到别的狗的编号，而且完全看不出来。"
+        echo
+        echo "要测蓝牙容量用 check_ble_capacity.sh —— 它不写文件，没有这个问题："
+        echo "  SITE=${SITE:-<场地>} ./check_ble_capacity.sh"
+        exit 1
+    fi
+    if [ -z "${DEVICES_STANDBY:-}" ]; then
+        echo "ALL_DEVICES=1 但场地配置里没有 DEVICES_STANDBY，没有备用设备可加。"
+        exit 1
+    fi
+    _parse_devices_block "$DEVICES_STANDBY" "DEVICES_STANDBY"
+    _n_all=$(echo $IMU_IDS | wc -w)
+    echo "ALL_DEVICES=1：当班 + 备用一起录，共 $_n_all 个设备（imu$(echo $IMU_IDS | tr ' ' ',')）"
+    # PAIRS/KEEP_PAIRS 是按 imu 号挑的，备用编号没列进去的话，那几个设备只会
+    # 留下 {base}_imuN_raw.csv，不会配对成样本、也不会传 NAS。测容量够用，
+    # 真要长期这么录就得把编号补上——所以喊一声，别让人以为已经在用了。
+    if [ -n "${PAIRS:-}" ]; then
+        for _id in $IMU_IDS; do
+            case " $PAIRS " in
+                *":imu${_id} "*|*":imu${_id}") ;;
+                *) echo "  ⚠ PAIRS 里没有 imu${_id}，它只会留下原始 CSV，不配对、不归档" ;;
+            esac
+        done
+    fi
 fi
 
 
