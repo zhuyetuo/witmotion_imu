@@ -743,9 +743,12 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
     # 数字，刷屏），这个是无人值守跑一整夜时留在日志里的——第二天回看日志就知道
     # 哪个时段掉帧、哪个 IMU 断过，不用去翻视频画面。默认开着。
     #
-    # 摄像头那一栏报的是"占位帧比例"而不是 fps：七路共用同一个 tick 循环，
-    # fps 必然一模一样（就是 tick 率），逐路列七个相同的数字没有信息量。
-    # 真正逐路不同的是"这一 tick 它有没有交出真实帧"。
+    # 摄像头那一栏逐路报 fps。
+    #
+    # 第一版这里只报"占位帧比例"，理由写的是"七路共用同一个 tick，fps 必然一样"
+    # ——那是错的：fps_tick 只在这一路交出真实帧时才计数（见 cam_fps_list 那行），
+    # 所以某一路掉帧时它的 fps 就是比别人低，这正是最该一眼看到的东西。
+    # 占位比例留着当注脚：光看 fps 分不出"整体 tick 慢"还是"就这一路在掉"。
     status_sec = getattr(args, 'status_sec', 60.0)
     st = None
     if status_sec > 0:
@@ -916,9 +919,14 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 if _now - st['last'] >= status_sec:
                     _span = _now - st['last']
                     _n = max(st['ticks'], 1)
-                    _cam_bad = [f'{c.label} 占位{st["cam_miss"][_i] * 100.0 / _n:.0f}%'
-                                for _i, c in enumerate(cameras) if st['cam_miss'][_i]]
-                    _cam_txt = '  '.join(_cam_bad) if _cam_bad else '全部正常'
+                    _cam_parts = []
+                    for _i, _c in enumerate(cameras):
+                        _miss = st['cam_miss'][_i]
+                        _txt = f'{_c.label} {(_n - _miss) / _span:.1f}'
+                        if _miss:
+                            _txt += f'(占位{_miss * 100.0 / _n:.0f}%)'
+                        _cam_parts.append(_txt)
+                    _cam_txt = '  '.join(_cam_parts)
                     # Hz 取当下瞬时值（各设备自己的一秒滑窗），断过的额外标出来：
                     # 只看瞬时 Hz 的话，中间断了 30 秒又连回来是看不出来的
                     _imu_parts = []
@@ -929,7 +937,7 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                             _tag += f'(缺{_m * 100.0 / _n:.0f}%)'
                         _imu_parts.append(_tag)
                     print(f'[状态] 已录 {elapsed:.0f}s  tick {st["ticks"] / _span:.1f}/{target_fps}fps\n'
-                          f'       摄像头 {_cam_txt}\n'
+                          f'       摄像头 {_cam_txt}  fps\n'
                           f'       IMU    {"  ".join(_imu_parts)}  Hz', flush=True)
                     st['last'] = _now
                     st['ticks'] = 0
