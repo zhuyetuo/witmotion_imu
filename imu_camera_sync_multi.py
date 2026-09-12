@@ -587,7 +587,7 @@ async def run_hicc_device(device: ImuDevice, scan_timeout: float, reconnect_max_
 
 def precheck_devices(devices: list[ImuDevice], scan_timeout: float = 12.0) -> list[str]:
     """
-    开录前先确认每个 wit 设备真的在。返回问题清单，空列表 = 都没问题。
+    开录前扫一次，确认设备真的在。返回**该拦下录制**的问题清单，空列表 = 可以开录。
 
     为什么值得单独扫一次：设备连不上时，重连循环会一直退避重试（这是对的，
     狗跑远了/项圈没电了要能自己恢复），但如果是**参数写错了**——名字打错、
@@ -595,7 +595,14 @@ def precheck_devices(devices: list[ImuDevice], scan_timeout: float = 12.0) -> li
     视频齐全而 IMU 的 CSV 一行数据都没有。这种样本导进平台就是"无 CSV 数据"，
     只能删掉重来，而那一天已经过去了。
 
-    hicc 设备按 MAC 直连、不走扫描，这里不管。
+    判据是**每只狗至少有一个设备在**，不是"每个设备都在"：
+      - 一只狗少了一个（多半是备用那个在充电座上没电/丢了）→ 只警告，照常开录
+      - 一只狗一个都不在 → 拦下来，它今晚会一行数据都没有
+    按 display_name（--dog-name）分组；没给狗名时 display_name 就是 label，
+    每个设备自成一组，规则自动退化成原来的"每个设备都要在"。
+
+    hicc 设备按 MAC 直连、不走扫描，查不了，一律当"在"——查不了就不该拿它
+    当缺席的证据去拦人。
     """
     wit = [d for d in devices if d.dev_type == 'wit']
     if not wit:
@@ -661,13 +668,13 @@ def precheck_devices(devices: list[ImuDevice], scan_timeout: float = 12.0) -> li
         return []
     candidates = box.get('candidates', [])
 
-    problems = []
+    missing: dict[str, str] = {}    # label -> 原因
     for d in wit:
         dev, err = _resolve(d, candidates)
         if err:
-            problems.append(f'{d.label} ({d.ident}): {err}')
+            missing[d.label] = err
         elif dev is None:
-            problems.append(f'{d.label} ({d.ident}): 没扫到')
+            missing[d.label] = '没扫到'
         else:
             # 只有按名字指定时才提醒"名字对不严实"。按 MAC 指定时 ident 是
             # MAC、dev.name 是设备名，永远不相等，拿来比就是每台设备都误报一句
@@ -675,14 +682,52 @@ def precheck_devices(devices: list[ImuDevice], scan_timeout: float = 12.0) -> li
             if not _MAC_RE.match(d.ident) and (dev.name or '').lower() != d.ident.lower():
                 note = '  ← 名字不完全一致，确认是不是这个'
             print(f'  {d.label} = {dev.name}({dev.address}){note}')
-    if problems:
-        print('\n预检没过：')
-        for p in problems:
+
+    if not missing:
+        return []
+
+    # 按狗分组判断，不是逐个设备判断。
+    #
+    # ALL_DEVICES=1 会把当班和备用一起连，而备用那个正躺在充电座上——可能没电、
+    # 可能干脆丢了（影棚的 WT7 历次扫描都没见过）。为这个拦住整晚录制是错的：
+    # 那只狗身上的设备明明在，数据本来能录到。
+    # 反过来，一只狗的设备一个都不在，它今晚就是一行数据都没有，这才该拦。
+    #
+    # 分组键是 display_name（--dog-name）。没给狗名时 display_name 就等于 label，
+    # 每个设备自成一组，规则自动退化成"每个设备都要在"——跟原来的行为一致。
+    #
+    # hicc 设备不走扫描（按 MAC 直连），这里查不了，一律当"在"：查不了就不该
+    # 拿它当缺席的证据去拦人。
+    by_dog: dict[str, list] = {}
+    for d in devices:
+        by_dog.setdefault(d.display_name, []).append(d)
+
+    blocking, warnings = [], []
+    for dog, group in by_dog.items():
+        gone = [d for d in group if d.label in missing]
+        if not gone:
+            continue
+        detail = '、'.join(f'{d.label}({d.ident}) {missing[d.label]}' for d in gone)
+        if len(gone) == len(group):
+            blocking.append(f'{dog}：{detail}')
+        else:
+            alive = '、'.join(d.label for d in group if d.label not in missing)
+            warnings.append(f'{detail} —— {dog} 还有 {alive} 在，继续录')
+
+    if warnings:
+        print('\n⚠ 这几个没扫到，但它们那只狗还有别的设备在，不拦：')
+        for w in warnings:
+            print(f'  {w}')
+        print('  （备用设备在充电座上没电、或者已经丢了，都会是这个样子——值得抽空查一下）')
+
+    if blocking:
+        print('\n预检没过，这几只狗一个设备都没扫到，今晚会一行 IMU 数据都没有：')
+        for p in blocking:
             print(f'  ✘ {p}')
         print('\n现场扫到的设备：')
         for dev, _ in sorted(candidates, key=lambda x: (x[0].name or '~')):
             print(f'  {(dev.name or "(无名称)"):<30s} {dev.address}')
-    return problems
+    return blocking
 
 
 def ble_thread_main(devices: list[ImuDevice], scan_timeout: float, reconnect_max_backoff: float = 300.0):
