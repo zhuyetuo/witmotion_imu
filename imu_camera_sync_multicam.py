@@ -372,9 +372,9 @@ def draw_overlay(frame, cam_label, cam_fps, target_fps, imu_info, elapsed, frame
     # #frame_idx（同步tick序号，核对丢帧用）/ t=elapsed（这一段已经录了多久）
     # 平时看画面用不上，默认不显示，排查对齐/丢帧问题时加 --show-frame-info 打开。
     if show_frame_info:
-        marks.append((f'{ts}  [{cam_label}]  #{frame_idx}  t={elapsed:.1f}s  {cam_fps:.1f}/{target_fps}fps', 0, (255, 255, 100)))
+        marks.append((f'{ts}  [{cam_label}]  #{frame_idx}  t={elapsed:.1f}s  {cam_fps:.1f}/{target_fps}fps', 0, 0, (255, 255, 100)))
     else:
-        marks.append((f'{ts}  [{cam_label}]  {cam_fps:.1f}/{target_fps}fps', 0, (255, 255, 100)))
+        marks.append((f'{ts}  [{cam_label}]  {cam_fps:.1f}/{target_fps}fps', 0, 0, (255, 255, 100)))
 
     # 一只狗一行，它的几个设备并排成列（ALL_DEVICES=1 时就是当班 + 备用两列）。
     #
