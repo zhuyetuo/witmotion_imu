@@ -319,6 +319,29 @@ if [ -n "${PAIRS:-}" ] && [ -n "$_dev_dog_map" ]; then
     fi
 fi
 
+# ROTATE 跟 PAIRS 一样是按摄像头号索引的（狗场是 ROTATE="cam7:180"），临时少开
+# 一路时同样会指向不存在的摄像头，python 那边一样直接退出。
+#
+# 场地文件里按 camN 索引的一共就三样：PAIRS、ROTATE（录制时，会因为摄像头不存在
+# 而退出）、KEEP_PAIRS（归档时按关键字子串挑文件，挑不到静默跳过，不受影响）。
+# 前两样都要过这一关。
+if [ -n "${ROTATE:-}" ] && [ -n "${CAMS:-}" ]; then
+    _n_cams=$(echo ${CAMS} | wc -w)
+    _rot_kept=""; _rot_dropped=""
+    for _r in $ROTATE; do
+        _rc="${_r%%:*}"
+        if [ "${_rc#cam}" -gt "$_n_cams" ] 2>/dev/null; then
+            _rot_dropped="$_rot_dropped $_r"
+        else
+            _rot_kept="$_rot_kept $_r"
+        fi
+    done
+    ROTATE="$_rot_kept"
+    if [ -n "$_rot_dropped" ]; then
+        echo "  ⚠ 这几项旋转的摄像头这次没开（CAMS 只有 $_n_cams 路），已去掉：$_rot_dropped"
+    fi
+fi
+
 # ALL_DEVICES=1：当班 + 备用一起录（每只狗两个 IMU 同时采）。
 #
 # 解决的是这个问题：现场换了设备而配置没跟上，脚本就会去连躺在充电座上的
