@@ -377,6 +377,18 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
     WAIT_ADVERT_RESCAN_S = 120.0
     # 重建之后如果还是收不到，就别一直重建（每次重建都要动蓝牙栈），拉长到这个间隔
     WAIT_ADVERT_RESCAN_MAX_S = 600.0
+    # 为这个设备重建扫描器最多试几次。
+    #
+    # 上面那条重建是为了治「设备在广播，但本机蓝牙栈留着陈旧的连接/配对记录，
+    # 于是根本不上报它的广播」——重建一两次就该好。要是重建了这么多次还是
+    # 收不到，那基本可以断定是设备自己不在（没电、关机、丢了），再重建多少次
+    # 也变不出广播来，只是在白白折腾蓝牙栈。
+    #
+    # 为什么这条重要：ALL_DEVICES=1 把当班和备用两组都挂上去，充电座上那几个
+    # 本来就不广播。八个设备缺五个、每个各自每 10 分钟要求重建一次，就是通宵
+    # 每两分钟动一次蓝牙栈——正好是 SharedScanner 当初要消灭的那种折腾，
+    # 积累一夜足够把 WinRT 的蓝牙服务拖到假死，只能重启电脑。
+    MAX_RESCANS_FOR_ABSENT = 3
 
     async def _wait_and_backoff():
         nonlocal backoff
@@ -389,6 +401,8 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
     waiting_since = time.monotonic()  # 从什么时候开始等这个设备的广播
     rescan_after = WAIT_ADVERT_RESCAN_S
     last_report = 0.0
+    rescans_done = 0                # 为等这个设备的广播，已经要求重建过几次扫描器
+    gave_up_rescan = False          # 已经认定它不在，不再为它重建
     while not stop_event.is_set():
         # 纯内存查表，不发起任何蓝牙操作，找不到就等1秒再查，可以一直这样
         # 查下去，不管设备缺席多久都不会给蓝牙栈增加负担。
@@ -405,18 +419,32 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
             if waited - last_report >= 300:
                 last_report = waited
                 print(f'[{device.label}] 仍未收到广播，已等待 {waited / 60:.0f} 分钟')
-            if waited >= rescan_after:
-                # 广播收不到不一定是设备的问题，也可能是本机适配器留着陈旧状态
-                await scanner.restart(f'{device.label} 已 {waited / 60:.0f} 分钟收不到广播')
+            if waited >= rescan_after and not gave_up_rescan:
+                # 广播收不到不一定是设备的问题，也可能是本机适配器留着陈旧状态。
+                # 但重建了几次还是收不到，就别再折腾蓝牙栈了（见
+                # MAX_RESCANS_FOR_ABSENT）——尤其扫描器明明还在收别的广播、
+                # 证明它活着的时候，重建对这个设备不可能有任何帮助。
+                scanner_alive = (time.monotonic() - scanner.last_detect) < scanner.STALL_RESTART_S
+                if rescans_done >= MAX_RESCANS_FOR_ABSENT and scanner_alive:
+                    gave_up_rescan = True
+                    print(f'[{device.label}] 重建扫描器 {rescans_done} 次仍收不到广播，'
+                          f'而扫描器在正常收别的广播——认定这个设备不在（没电/关机/不在场）。'
+                          f'不再为它重建扫描器；它一旦恢复广播还是会立刻连上。')
+                else:
+                    await scanner.restart(f'{device.label} 已 {waited / 60:.0f} 分钟收不到广播')
+                    rescans_done += 1
                 waiting_since = time.monotonic()
                 last_report = 0.0
                 rescan_after = min(rescan_after * 2, WAIT_ADVERT_RESCAN_MAX_S)
             await asyncio.sleep(1.0)
             continue
 
-        # 找到广播了，等待计时重新开始
+        # 找到广播了，等待计时重新开始（"认定它不在"的判断也一并撤销：设备
+        # 回来了就该重新享受完整的重连逻辑，比如半夜有人把它从充电座上拿下来）
         waiting_since = time.monotonic()
         rescan_after = WAIT_ADVERT_RESCAN_S
+        rescans_done = 0
+        gave_up_rescan = False
         last_report = 0.0
 
         disconnected = asyncio.Event()
