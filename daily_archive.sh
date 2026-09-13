@@ -237,6 +237,37 @@ build_stage() {
         fi
     done
 
+    # ── 兜底：每路摄像头至少传一对 ───────────────────────────────────
+    #
+    # 跟 cleanup_resampled_pairs.sh 同一个道理：KEEP_PAIRS 写死了设备号，
+    # 假设那几个一定连得上。影棚全采 8 个设备时，一晚上有几个连不上是常态——
+    # 那几路摄像头的画面就既不传 NAS、本地又被清理删掉，两头都漏，还不报警。
+    #
+    # 所以某路摄像头一份 mp4 都没进暂存时，从它现有的配对里补一对进去。
+    # 必须是完整的一对（mp4 + 同名 csv）：平台按 camN_imuM 成对建样本，
+    # 只传视频的话那边看到的是一个没有 CSV 的视频。
+    local cam camf csvf rescued_any=0
+    for cam in $(printf '%s\n' "$src"/*.mp4 2>/dev/null \
+                 | sed -n 's/.*_\(cam[0-9]\+\)\(_imu[0-9]\+\)\?_raw\.mp4$/\1/p' | sort -u); do
+        ls "$stage"/*_"$cam"_*.mp4 >/dev/null 2>&1 && continue
+        for camf in $(printf '%s\n' "$src"/*_"$cam"_imu*_raw.mp4 2>/dev/null | sort); do
+            [ -f "$camf" ] || continue
+            csvf="${camf%.mp4}.csv"
+            [ -f "$csvf" ] || continue
+            for f in "$camf" "$csvf"; do
+                base="$(basename "$f")"
+                [ -e "$stage/$base" ] && continue
+                ln "$f" "$stage/$base" 2>/dev/null || cp "$f" "$stage/$base" || continue
+                n=$((n + 1))
+            done
+            say "  ⚠ $cam 按 KEEP_PAIRS 一份视频都没得传（那个设备当晚多半没连上），"
+            say "    补传 $(basename "${camf%.mp4}") 这一对，免得整路画面不进 NAS"
+            rescued_any=1
+            break
+        done
+    done
+    [ "$rescued_any" = "1" ] && say "  （补传的配对在平台上会多出样本，是有意的——总比整路画面没了强）"
+
     if [ "$n" -eq 0 ]; then
         say "  ✗ 没有匹配 KEEP_PAIRS 的文件，检查配对关键字是否写对"
         rm -rf "$stage"
