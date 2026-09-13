@@ -84,13 +84,40 @@ mapfile -t to_delete < <(find "$DIR" -maxdepth 1 -type f \( -name '*.mp4' -o -na
 # 所以这里补一道：某路摄像头一份 mp4 都没保住时，从它现有的配对里挑一对
 # （mp4 + 同名 csv）留下来。**必须是完整的一对**——平台是按 camN_imuM 成对
 # 建样本的，只留视频的话平台看到的是一个没有 CSV 的视频。
+#
+# ⚠ 兜底必须**按场次**做，不能按整个目录做。
+#
+# 一个日期目录里是一整天的场次（multicam_20260913_041001587、_042212996、…），
+# 每个场次各有自己的 camN 视频和 imuM 数据。早先这里是拿整个目录的文件名
+# sed 出 cam1/cam2/cam3 再去重，于是"这一路还活着吗"问的是**全目录**：
+# 只要 04:10 那场保住了 cam1，05:00 那场的 cam1 就被算成活的，兜底不触发。
+#
+# 实测（两场次，A 场 imu1/2/3/5/6 连上、B 场只有 imu5）：B 场三路视频全删光，
+# 只剩一个 csv。而兜底本该给它留一对 cam1_imu5。一天七八场，这个洞每天都在。
+#
+# 所以下面先把文件名切成场次前缀，再对每个场次单独跑两道兜底。
+bases=$(printf '%s\n' "$DIR"/*.mp4 "$DIR"/*.csv 2>/dev/null \
+    | sed -e 's#.*/##' \
+          -e 's/_cam[0-9]\+_imu[0-9]\+_resampled[0-9.]\+hz\.\(mp4\|csv\)$//' \
+          -e 's/_imu[0-9]\+_resampled[0-9.]\+hz\.\(mp4\|csv\)$//' \
+          -e 's/_cam[0-9]\+_imu[0-9]\+_raw\.\(mp4\|csv\)$//' \
+          -e 's/_cam[0-9]\+_raw\.mp4$//' \
+          -e 's/_imu[0-9]\+_raw\.csv$//' \
+          -e 's/_meta\.csv$//' \
+          -e 's/\.\(mp4\|csv\)$//' \
+    | sort -u)
+
 rescued=()
 rescued_csv=()
 if [ "$RESCUE" = "1" ]; then
-for cam in $(printf '%s\n' "$DIR"/*.mp4 2>/dev/null | sed -n 's/.*_\(cam[0-9]\+\)\(_imu[0-9]\+\)\?_raw\.mp4$/\1/p' | sort -u); do
-    # 这一路还有 mp4 活着吗
+for b in $bases; do
+for cam in $(printf '%s\n' "$DIR/$b"_*.mp4 2>/dev/null | sed -n 's/.*_\(cam[0-9]\+\)\(_imu[0-9]\+\)\?_raw\.mp4$/\1/p' | sort -u); do
+    # 这个场次的这一路还有 mp4 活着吗
     alive=0
-    for f in "$DIR"/*_"$cam"_*.mp4 "$DIR"/*_"$cam"_raw.mp4; do
+    # $b 是完整的场次前缀，camN 紧跟在它后面，所以这里**不能**写成
+    # "$b"_*_"$cam"_* ——中间那个 _* 要求至少多一段，反而漏掉
+    # {base}_cam2_imu2_raw.mp4 这种正常配对，把已经保住的一路误判成没保住。
+    for f in "$DIR/$b"_"$cam"_*.mp4; do
         [ -f "$f" ] || continue
         keep_it=1
         for d in "${to_delete[@]}"; do [ "$d" = "$f" ] && keep_it=0 && break; done
@@ -99,7 +126,7 @@ for cam in $(printf '%s\n' "$DIR"/*.mp4 2>/dev/null | sed -n 's/.*_\(cam[0-9]\+\
     [ "$alive" = "1" ] && continue
 
     # 挑一对完整的救回来（按文件名排序，同一天多次跑结果一致）
-    for f in $(printf '%s\n' "$DIR"/*_"$cam"_imu*_raw.mp4 2>/dev/null | sort); do
+    for f in $(printf '%s\n' "$DIR/$b"_"$cam"_imu*_raw.mp4 2>/dev/null | sort); do
         [ -f "$f" ] || continue
         csv="${f%.mp4}.csv"
         [ -f "$csv" ] || continue
@@ -113,6 +140,7 @@ for cam in $(printf '%s\n' "$DIR"/*.mp4 2>/dev/null | sed -n 's/.*_\(cam[0-9]\+\
         rescued+=("$(basename "${f%.mp4}")")
         break
     done
+done
 done
 fi
 # ── 兜底之二：每个连上的设备至少保住一份 CSV ────────────────────────
@@ -130,10 +158,16 @@ fi
 #
 # 同一个设备配到不同摄像头的 CSV 内容**完全一样**（采集端就是先裁一份、其余
 # 硬链接过去的），所以留哪一份都行，留一份就够。
-[ "$RESCUE" = "1" ] || rescued_csv=()
-for imu in $([ "$RESCUE" = "1" ] && printf '%s\n' "$DIR"/*.csv 2>/dev/null | sed -n 's/.*_cam[0-9]\+_\(imu[0-9]\+\)_raw\.csv$/\1/p' | sort -u); do
+#
+# 跟上面一样按场次来：设备在 04:10 那场连上了、05:00 那场没连上是常事，
+# 按整个目录判会让后面那场的数据被整个删掉。
+if [ "$RESCUE" = "1" ]; then
+for b in $bases; do
+for imu in $(printf '%s\n' "$DIR/$b"_*.csv 2>/dev/null | sed -n 's/.*_cam[0-9]\+_\(imu[0-9]\+\)_raw\.csv$/\1/p' | sort -u); do
     alive=0
-    for f in "$DIR"/*_"$imu"_raw.csv; do
+    # 同上：*"$imu" 而不是 _*_"$imu"，这样既能匹配配对的
+    # {base}_cam1_imu4_raw.csv，也能匹配独立的 {base}_imu4_raw.csv
+    for f in "$DIR/$b"_*"$imu"_raw.csv; do
         [ -f "$f" ] || continue
         keep_it=1
         for d in "${to_delete[@]}"; do [ "$d" = "$f" ] && keep_it=0 && break; done
@@ -141,7 +175,7 @@ for imu in $([ "$RESCUE" = "1" ] && printf '%s\n' "$DIR"/*.csv 2>/dev/null | sed
     done
     [ "$alive" = "1" ] && continue
 
-    for f in $(printf '%s\n' "$DIR"/*_cam[0-9]*_"$imu"_raw.csv 2>/dev/null | sort); do
+    for f in $(printf '%s\n' "$DIR/$b"_cam[0-9]*_"$imu"_raw.csv 2>/dev/null | sort); do
         [ -f "$f" ] || continue
         keep=()
         for d in "${to_delete[@]}"; do [ "$d" = "$f" ] || keep+=("$d"); done
@@ -150,6 +184,8 @@ for imu in $([ "$RESCUE" = "1" ] && printf '%s\n' "$DIR"/*.csv 2>/dev/null | sed
         break
     done
 done
+done
+fi
 if [ "${#rescued_csv[@]}" -gt 0 ]; then
     echo "⚠ 这几个设备按 KEEP_PAIRS 一份 CSV 都保不住（它配的那路摄像头当晚没开，"
     echo "  或者设备编号跟 KEEP_PAIRS 写的对不上），各留了一份，免得整个设备的数据没了："
