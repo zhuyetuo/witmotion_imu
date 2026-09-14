@@ -228,6 +228,30 @@ run_conda_installer() {  # run_conda_installer <exe> <prefix>
 
 py_ver() { "$1" -c "import sys;print('%d.%d'%sys.version_info[:2])" 2>/dev/null; }
 
+# 接受 conda 默认频道的服务条款。
+#
+# 新版 conda 用默认频道之前必须先接受，否则任何 conda install 都直接报
+#   CondaToSNonInteractiveError: Terms of Service have not been accepted
+# 而且是非交互模式下报的，看不出要人做什么。
+#
+# 无条件跑，不是只在"要换 Python 版本"时跑：原来那样的话，钉死的安装包
+# 装成功（Python 版本本来就对）的机器根本不会执行到，于是装完一切正常、
+# 人第一次手敲 conda install 才撞上，还联想不到装机脚本。装机就该把机器
+# 交到能直接用的状态。
+#
+# 打印出来再执行，不藏着：这是接受 Anaconda 的频道服务条款，注意默认频道
+# 对一定规模以上的公司另有商业授权要求。不想接受也不影响采集——pip 走的是
+# 清华镜像，跟 conda 频道无关，跳过这步照样能跑。
+accept_conda_tos() {  # accept_conda_tos <conda.exe>
+    local bin="$1" ch
+    [ -x "$bin" ] || return 0
+    echo "      接受 conda 默认频道的服务条款（Anaconda ToS）..."
+    for ch in main r msys2; do
+        "$bin" tos accept --override-channels \
+            --channel "https://repo.anaconda.com/pkgs/$ch" >/dev/null 2>&1 || true
+    done
+}
+
 echo "[1/4] Miniconda"
 if [ -x "$CONDA_ROOT/python.exe" ]; then
     echo "      已安装: $CONDA_ROOT"
@@ -254,6 +278,7 @@ if [ -x "$CONDA_ROOT/python.exe" ]; then
     PY="$CONDA_ROOT/python.exe"
     export PATH="$CONDA_ROOT:$CONDA_ROOT/Scripts:$PATH"
     GOT_PY="$(py_ver "$PY")"
+    accept_conda_tos "$CONDA_ROOT/Scripts/conda.exe"
 
     if [ "$GOT_PY" != "$CONDA_PY" ]; then
         # 版本不对。先试就地换（只下 python 包本身，比重下 90MB 的安装包省），
@@ -262,16 +287,7 @@ if [ -x "$CONDA_ROOT/python.exe" ]; then
         echo "      当前是 Python $GOT_PY，要的是 $CONDA_PY，先试就地改..."
         CONDA_BIN="$CONDA_ROOT/Scripts/conda.exe"
         if [ -x "$CONDA_BIN" ]; then
-            # 新版 conda 用默认频道前要先接受服务条款，不接受就直接报
-            #   CondaToSNonInteractiveError: Terms of Service have not been accepted
-            # 打印出来再执行，不藏着：这是接受 Anaconda 的频道服务条款，
-            # 注意默认频道对一定规模以上的公司另有商业授权要求。
-            # （不想接受也能装：下面那条"用钉死的安装包重装"根本不碰 conda 频道。）
-            echo "      接受 conda 默认频道的服务条款（Anaconda ToS）..."
-            for ch in main r msys2; do
-                "$CONDA_BIN" tos accept --override-channels \
-                    --channel "https://repo.anaconda.com/pkgs/$ch" >/dev/null 2>&1 || true
-            done
+            # ToS 上面已经无条件接受过了，这里直接装
             "$CONDA_BIN" install -y "python=$CONDA_PY" || true
             GOT_PY="$(py_ver "$PY")"
         fi
