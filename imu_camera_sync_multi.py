@@ -959,8 +959,31 @@ def _run_one_segment(args, devices: list[ImuDevice], cap, actual_w, actual_h, ta
                 remaining = next_tick - time.time()
                 if remaining > 0:
                     _new_sample_event.wait(timeout=remaining)
+                    # 被新样本提前叫醒之后，还是要等到预定 tick 才抓帧。
+                    #
+                    # 少了这一句，tick 就由 IMU 的到包速率驱动：8 个设备 50Hz 就是
+                    # 每秒 400 个事件，wait() 每次立刻返回，实际帧率变成"循环体
+                    # 能跑多快"，跟 --cam-fps 再没关系。2026-09-11 影棚实测 52fps，
+                    # 目标是 25——视频大一倍，而且多烧的那份编码 CPU 正好是在跟
+                    # BLE 回调线程抢（#202 在狗场量过：CPU 让出来，IMU 缺帧从
+                    # 17% 掉到 0~2%）。
+                    #
+                    # 8cc9b51 修"IMU 一直不送样本时 fps 被拖到远低于目标"的时候
+                    # 把这一句删掉了。那个场景由上面的 timeout=remaining 保住
+                    # （没有事件就正好超时在 next_tick 上），跟这一句不冲突：
+                    # 没样本 → 超时唤醒，已经到点，这里不睡；有样本 → 提前唤醒，
+                    # 这里补到点。两种都是目标帧率。
+                    now = time.time()
+                    if now < next_tick:
+                        time.sleep(next_tick - now)
                 _new_sample_event.clear()
                 next_tick += frame_interval
+                # 循环体比 frame_interval 还慢时（狗场七路 720p 就是这样，一个
+                # tick 45ms），next_tick 会一直落在过去、而且越积越多。等负载降
+                # 下来会连着猛抓一串帧追进度，追的这些帧时间戳挤在一起、对标注
+                # 没用。落后就重新对齐，欠下的不补。
+                if next_tick < time.time():
+                    next_tick = time.time() + frame_interval
             else:
                 now = time.time()
                 sleep_s = next_tick - now
