@@ -63,6 +63,8 @@ CONDA_ROOT="$TOOLS/miniconda3"
 CONDA_PY="3.13"
 CONDA_INSTALLER="Miniconda3-py313_26.7.1-1-Windows-x86_64.exe"
 CONDA_URL="https://repo.anaconda.com/miniconda/$CONDA_INSTALLER"
+# 静默安装最多等多久。装到机械盘或者杀软在扫的时候会明显变慢；等不到就是真失败了
+CONDA_INSTALL_WAIT_S=300
 # pip 必须走镜像：直连 PyPI 装 opencv/numpy/scipy 这几个大包经常超时，
 # 而且以后每次装包都要走，不是一次性的。
 PIP_MIRROR="https://pypi.tuna.tsinghua.edu.cn/simple"
@@ -149,12 +151,14 @@ fi
 # 找安装包：先找钉死的那一版，没有就下，下不动再退而用本地任意一个
 # （那种情况带的 Python 版本未知，要说清楚）
 get_conda_installer() {
+    CONDA_DOWNLOADED=0
     CONDA_EXE="$(find_local "$TOOLS/$CONDA_INSTALLER" "$CACHE/$CONDA_INSTALLER")" && return 0
     local other
     other="$(find_local "$TOOLS/Miniconda3-*.exe" "$CACHE/Miniconda3-*.exe" "$CACHE/miniconda.exe")" || other=""
     echo "      本地没有 $CONDA_INSTALLER，从官方源下载..."
     if curl -fL --retry 3 -C - -o "$CACHE/$CONDA_INSTALLER" "$CONDA_URL"; then
         CONDA_EXE="$CACHE/$CONDA_INSTALLER"
+        CONDA_DOWNLOADED=1      # 这一份是本次下的，坏了可以删；手动放的不能删
         return 0
     fi
     if [ -n "$other" ]; then
@@ -198,6 +202,28 @@ run_conda_installer() {  # run_conda_installer <exe> <prefix>
     MSYS_NO_PATHCONV=1 "$exe" \
         /InstallationType=JustMe /AddToPath=0 /RegisterPython=0 /S \
         /D=$prefix_win
+    rc=$?
+    # NSIS 的安装器把自己解压到临时目录再起一个子进程，父进程立刻就退了——
+    # 上面这条返回时安装其实还在跑，紧接着去看 python.exe 必然还没有，于是
+    # 报「装完找不到 python.exe」，然后把安装包当成坏包删掉。2026-09-14 在
+    # 狗场第二台机器上就是这么失败的：装其实是成功的，只是没等它。
+    #
+    # 官方文档那条命令是 `start /wait "" 安装器 ...`，就是为了等那个子进程。
+    # 这里不去拼 cmd //c start //wait：/D= 不能加引号，而 MSYS 又会给带空格
+    # 的参数自动补引号，两边规则打架，写对了也难验证。改成直接等结果出现，
+    # 更直白，而且顺带覆盖了「装得慢」这种情况。
+    local waited=0
+    while [ ! -x "$prefix/python.exe" ] && [ "$waited" -lt "$CONDA_INSTALL_WAIT_S" ]; do
+        sleep 3
+        waited=$((waited + 3))
+        [ $((waited % 30)) -eq 0 ] && echo "      还在装（已等 ${waited}s）..."
+    done
+    if [ -x "$prefix/python.exe" ]; then
+        [ "$waited" -gt 0 ] && echo "      装好了（等了 ${waited}s）"
+        return 0
+    fi
+    echo "      安装器退出码 $rc，等满 ${waited}s 仍没有 python.exe"
+    return 1
 }
 
 py_ver() { "$1" -c "import sys;print('%d.%d'%sys.version_info[:2])" 2>/dev/null; }
@@ -286,15 +312,20 @@ fi
 # 判断条件挂在"装没装出来"上，不是挂在上面那个 fail 上：机器里本来就有
 # python 时会走 [退让] 分支、不算失败，但那个坏包照样是坏的，也该清掉。
 if [ -n "${tried_conda_install:-}" ] && [ ! -x "$CONDA_ROOT/python.exe" ]; then
-    # 只删自己下的那份。手动拷进来的不动——那是人特意放的，删了等于把人家
-    # 刚拷进来的东西吞掉，而且下次重跑又要重下一遍
-    case "$CONDA_EXE" in
-        "$CACHE"/*)
-            rm -f "$CONDA_EXE"
-            echo "      已清掉下载的安装包，下次重跑会重新下载" ;;
-        *)
-            [ -n "$CONDA_EXE" ] && echo "      装不出来，但 $CONDA_EXE 是手动放的，没动它" ;;
-    esac
+    # 只删自己下的那份。手动拷进来的不动——那是人特意放的（网慢时可能是拷了
+    # 十几分钟才弄过来的），删了等于把人家刚放进来的东西吞掉，下次重跑还要再来
+    # 一遍。
+    #
+    # 原来是按路径判断（在 $CACHE 下就当成自己下的），这是错的：文档就是让人
+    # 把离线包放进 .tools/cache/，于是手动放的和下载的在同一个目录里，分不开。
+    # 2026-09-14 狗场第二台机器上就这么把人手动拷进去的安装包删了。
+    # 改成记一个标志，只有本次真的 curl 下来过才删。
+    if [ "${CONDA_DOWNLOADED:-0}" = "1" ]; then
+        rm -f "$CONDA_EXE"
+        echo "      已清掉下载的安装包，下次重跑会重新下载"
+    elif [ -n "$CONDA_EXE" ]; then
+        echo "      装不出来，但 $CONDA_EXE 是手动放的，没动它"
+    fi
 fi
 
 # ── 2. ffmpeg ────────────────────────────────────────────────────────────
