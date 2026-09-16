@@ -316,6 +316,66 @@ class ImuDevice:
 
 # ── BLE 连接（每个设备一个协程，同一个事件循环里并发跑） ────────────────────
 
+# 认定"这个设备不在"之后，重建扫描器的间隔下限。**不是停止重建**——
+#
+# 这条是修一个真实故障：影棚 ALL_DEVICES=1 通宵录，某个设备信号断了之后
+# 一整天再也连不上，只有杀掉命令重新跑才能连上。
+#
+# 原来的写法是「为这个设备重建扫描器满 3 次还收不到广播，就永久不再为它重建」
+# （MAX_RESCANS_FOR_ABSENT）。那条的出发点没错：充电座上那几个设备本来就不
+# 广播，每个各自每 10 分钟要求重建一次，通宵下来就是每两分钟动一次蓝牙栈。
+#
+# 但"永久"是错的，而且正好卡死在它要治的那个病上：**广播收不到的原因之一
+# 就是本机蓝牙栈留着陈旧的连接/配对记录**，而能解开它的动作恰恰是重建。
+# 于是——收不到广播 → 放弃重建 → 更收不到广播，一天都出不来。那个放弃标志
+# 只在"收到广播"时才撤销，而广播永远不会来。
+#
+# 正确的做法是**拉长，不放弃**：半小时一次，八个设备全缺席也才每 3.75 分钟
+# 动一次蓝牙栈（而且 SharedScanner 的 30 秒冷却会把同时来敲门的合并成一次），
+# 比原来每两分钟一次轻得多，又保留了恢复的可能。
+ABSENT_RESCAN_MIN_INTERVAL_S = 1800.0
+
+# 长时间收不到广播时，隔多久盲连一次（直接按 MAC 连，不等广播）。
+#
+# 为什么需要它：重启命令之所以每次都能救回来，一半是因为扫描器重建了，另一半
+# 是因为**重新发起了一次连接**——BlueZ/WinRT 里那条陈旧的连接记录，是被新的
+# connect 请求清掉的，不是被扫描清掉的。光重建扫描器治不了这一种。
+#
+# 间隔跟重建扫描器取一样的半小时。算一笔账：影棚 ALL_DEVICES=1 八个设备，
+# 充电座上通常缺五个，每个每半小时一次重建 + 一次盲连，全天合起来大约每 3
+# 分钟一次蓝牙操作，其中一半是比重建轻得多的 connect 尝试——比原来那种
+# 「每两分钟一次重建」轻，而且换回了"设备能自己回来"这件事。
+#
+# 代价是恢复最慢要等半小时。跟原来的"要等到人去重启命令"（现场是一整天）
+# 比，这个代价可以接受。
+BLIND_CONNECT_INTERVAL_S = 1800.0
+
+
+def next_rescan_after(current_s: float, rescans_done: int, scanner_alive: bool,
+                      max_rescans: int, cap_s: float,
+                      floor_s: float = ABSENT_RESCAN_MIN_INTERVAL_S) -> float:
+    """这次重建之后，下一次隔多久再重建。
+
+    没到次数上限时照旧翻倍（2 分钟 → 4 → 8 … 封顶 cap_s）；判定"设备多半真不在"
+    之后跳到 floor_s 这个长间隔——**但绝不返回无穷大**，永久放弃正是那个
+    "一天都连不上"的成因。
+    """
+    doubled = min(current_s * 2, cap_s)
+    if rescans_done >= max_rescans and scanner_alive:
+        return max(doubled, floor_s)
+    return doubled
+
+
+def should_blind_connect(since_blind_s: float, have_mac: bool,
+                         interval_s: float = BLIND_CONNECT_INTERVAL_S) -> bool:
+    """收不到广播的时候，该不该直接按 MAC 盲连一次。
+
+    没有 MAC 就没法盲连（只知道名字的设备，名字是从广播里读的）。这是场地
+    配置里"MAC 补齐只是为了设备改名还能认出来"之外的第二个理由。
+    """
+    return have_mac and since_blind_s >= interval_s
+
+
 async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_max_backoff: float = 300.0):
     """
     自动重连：BLE 信号太差（比如项圈被狗压在身下）会导致连接被判定为真正
@@ -377,12 +437,17 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
     WAIT_ADVERT_RESCAN_S = 120.0
     # 重建之后如果还是收不到，就别一直重建（每次重建都要动蓝牙栈），拉长到这个间隔
     WAIT_ADVERT_RESCAN_MAX_S = 600.0
-    # 为这个设备重建扫描器最多试几次。
+    # 重建几次之后就把间隔拉长到半小时（ABSENT_RESCAN_MIN_INTERVAL_S）。
+    #
+    # ⚠ 这里**不是**"重建这么多次就再也不重建了"。原来是那样写的，而那正是
+    #   "设备缺席一天再也连不上、只能重启命令"的成因：广播上不来的原因之一
+    #   就是本机蓝牙栈的陈旧状态，而解开它的动作恰恰是重建。放弃之后
+    #   「收不到广播」和「不再重建」互为因果，循环没有出口。
     #
     # 上面那条重建是为了治「设备在广播，但本机蓝牙栈留着陈旧的连接/配对记录，
-    # 于是根本不上报它的广播」——重建一两次就该好。要是重建了这么多次还是
-    # 收不到，那基本可以断定是设备自己不在（没电、关机、丢了），再重建多少次
-    # 也变不出广播来，只是在白白折腾蓝牙栈。
+    # 于是根本不上报它的广播」——重建一两次就该好。超过这么多次还收不到，
+    # 多半是设备自己不在（没电、关机、丢了），那就降到半小时一次，别白白
+    # 折腾蓝牙栈；但永远保留它自己回来的可能。
     #
     # 为什么这条重要：ALL_DEVICES=1 把当班和备用两组都挂上去，充电座上那几个
     # 本来就不广播。八个设备缺五个、每个各自每 10 分钟要求重建一次，就是通宵
@@ -402,7 +467,7 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
     rescan_after = WAIT_ADVERT_RESCAN_S
     last_report = 0.0
     rescans_done = 0                # 为等这个设备的广播，已经要求重建过几次扫描器
-    gave_up_rescan = False          # 已经认定它不在，不再为它重建
+    last_blind = time.monotonic()   # 上次盲连是什么时候（一开始不用马上盲连）
     while not stop_event.is_set():
         # 纯内存查表，不发起任何蓝牙操作，找不到就等1秒再查，可以一直这样
         # 查下去，不管设备缺席多久都不会给蓝牙栈增加负担。
@@ -410,6 +475,7 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
             name_filter=None if is_mac else device.ident,
             address=device.ident if is_mac else None,
         )
+        blind = False
         if ble_device is None:
             if first_attempt:
                 print(f'[{device.label}] 等待 WitMotion 设备广播: {device.ident}...')
@@ -419,33 +485,51 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
             if waited - last_report >= 300:
                 last_report = waited
                 print(f'[{device.label}] 仍未收到广播，已等待 {waited / 60:.0f} 分钟')
-            if waited >= rescan_after and not gave_up_rescan:
+            if waited >= rescan_after:
                 # 广播收不到不一定是设备的问题，也可能是本机适配器留着陈旧状态。
-                # 但重建了几次还是收不到，就别再折腾蓝牙栈了（见
-                # MAX_RESCANS_FOR_ABSENT）——尤其扫描器明明还在收别的广播、
-                # 证明它活着的时候，重建对这个设备不可能有任何帮助。
+                # 重建几次还收不到就把间隔拉长（见 ABSENT_RESCAN_MIN_INTERVAL_S），
+                # **但不停下来**——停下来就再也出不去了。
                 scanner_alive = (time.monotonic() - scanner.last_detect) < scanner.STALL_RESTART_S
-                if rescans_done >= MAX_RESCANS_FOR_ABSENT and scanner_alive:
-                    gave_up_rescan = True
-                    print(f'[{device.label}] 重建扫描器 {rescans_done} 次仍收不到广播，'
-                          f'而扫描器在正常收别的广播——认定这个设备不在（没电/关机/不在场）。'
-                          f'不再为它重建扫描器；它一旦恢复广播还是会立刻连上。')
-                else:
-                    await scanner.restart(f'{device.label} 已 {waited / 60:.0f} 分钟收不到广播')
-                    rescans_done += 1
+                await scanner.restart(f'{device.label} 已 {waited / 60:.0f} 分钟收不到广播')
+                rescans_done += 1
+                rescan_after = next_rescan_after(
+                    rescan_after, rescans_done, scanner_alive,
+                    MAX_RESCANS_FOR_ABSENT, WAIT_ADVERT_RESCAN_MAX_S)
                 waiting_since = time.monotonic()
                 last_report = 0.0
-                rescan_after = min(rescan_after * 2, WAIT_ADVERT_RESCAN_MAX_S)
-            await asyncio.sleep(1.0)
-            continue
 
-        # 找到广播了，等待计时重新开始（"认定它不在"的判断也一并撤销：设备
-        # 回来了就该重新享受完整的重连逻辑，比如半夜有人把它从充电座上拿下来）
-        waiting_since = time.monotonic()
-        rescan_after = WAIT_ADVERT_RESCAN_S
-        rescans_done = 0
-        gave_up_rescan = False
-        last_report = 0.0
+            # 隔一阵子直接按 MAC 盲连一次，不等广播。这是"重启命令就好了"里
+            # 光靠重建扫描器复现不出来的那一半：陈旧的连接记录要靠新的 connect
+            # 请求才会被清掉。设备真不在的话它会失败，等下一轮。
+            mac = device.mac or (device.ident if is_mac else None)
+            if should_blind_connect(time.monotonic() - last_blind, bool(mac)):
+                last_blind = time.monotonic()
+                print(f'[{device.label}] 收不到广播已久，直接按 MAC 盲连一次: {mac}')
+                ble_device = None
+                blind = True
+            else:
+                await asyncio.sleep(1.0)
+                continue
+
+        # 找到广播了，等待计时重新开始（盲连那一路不重置：它并没有证明设备
+        # 回来了，重置的话下一轮又要从 2 分钟慢慢退避上来）
+        if not blind:
+            # 缺席很久之后第一次重新收到广播：把失败计数也清零。
+            #
+            # 不清的话，缺席期间盲连攒下的几十次失败会让下面直接走"按 MAC 连"
+            # 那条路（FAILS_BEFORE_ADDRESS_MODE=6），于是**跳过**用广播对象连、
+            # 也跳过连上之后的名字核对（_warn_label_mismatch）——而刚收到的
+            # 广播恰恰是最新鲜的句柄，正该用它。
+            #
+            # 只在"确实离开过一段时间"时清，不是每轮都清：广播一直收得到、
+            # 只是连不上的那种情况必须让 fails 攒上去，否则永远到不了
+            # FAILS_BEFORE_RESCAN / 按地址连这两级补救。
+            if time.monotonic() - waiting_since > 60.0:
+                fails = 0
+            waiting_since = time.monotonic()
+            rescan_after = WAIT_ADVERT_RESCAN_S
+            rescans_done = 0
+            last_report = 0.0
 
         disconnected = asyncio.Event()
 
@@ -455,14 +539,28 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
         buf = StreamingByteBuffer()
         # 连续失败多次之后改用"按地址连"：缓存的 BLEDevice 里带着底层句柄，设备
         # 离线很久再回来时那个句柄经常已经失效；传地址让 bleak 自己重新解析。
-        target = (device.mac or ble_device.address) if fails >= FAILS_BEFORE_ADDRESS_MODE else ble_device
+        # 盲连没有 BLEDevice 对象，只能按地址连
+        if ble_device is None:
+            target = device.mac or device.ident
+        else:
+            target = (device.mac or ble_device.address) if fails >= FAILS_BEFORE_ADDRESS_MODE else ble_device
         client = BleakClient(target, disconnected_callback=on_disconnect)
         try:
             # 整个握手过程都套超时，绝不允许无限期卡住（见 CONNECT_TIMEOUT_S）
             await asyncio.wait_for(client.connect(), timeout=CONNECT_TIMEOUT_S)
-            print(f'[{device.label}] WitMotion 已连接: {ble_device.name}  {ble_device.address}')
-            _warn_label_mismatch(device, ble_device)
-            device.mac = ble_device.address
+            if ble_device is None:
+                print(f'[{device.label}] 盲连成功: {target}（这台设备其实在，'
+                      f'只是广播没上报到本机——陈旧的蓝牙栈状态）')
+            else:
+                print(f'[{device.label}] WitMotion 已连接: {ble_device.name}  {ble_device.address}')
+                _warn_label_mismatch(device, ble_device)
+                device.mac = ble_device.address
+            # 盲连成功也算它回来了：重连的各种计时全部归零，否则下一次断开
+            # 还按"缺席很久"的长间隔来，白等半小时
+            waiting_since = time.monotonic()
+            rescan_after = WAIT_ADVERT_RESCAN_S
+            rescans_done = 0
+            last_report = 0.0
             subscribed = None
             for uuid in DEFAULT_NOTIFY_CANDIDATES:
                 try:
@@ -491,7 +589,8 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
             device.connected = False
             if stale:
                 print(f'[{device.label}] 连接未断但 {NO_DATA_TIMEOUT_S:.0f}s 没收到数据（假死），主动断开重连...')
-                scanner.evict(ble_device.address)
+                if ble_device is not None:
+                    scanner.evict(ble_device.address)
                 continue
             if disconnected.is_set():
                 print(f'[{device.label}] 连接断开（信号问题），尝试自动重连...')
@@ -501,7 +600,8 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
                 break
             device.connected = False
             fails += 1
-            scanner.evict(ble_device.address)
+            if ble_device is not None:
+                scanner.evict(ble_device.address)
             print(f'[{device.label}] 连接/订阅超时（第 {fails} 次），{backoff:.0f}秒后重试...')
             if fails == FAILS_BEFORE_RESCAN:
                 await scanner.restart(f'{device.label} 广播收得到但连不上')
@@ -514,7 +614,8 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
             fails += 1
             # 用缓存的设备对象连不上，把它从扫描器缓存里踢掉，等一条新广播拿新对象
             # 再试——离线很久又回来的设备，旧对象里的句柄经常已经失效
-            scanner.evict(ble_device.address)
+            if ble_device is not None:
+                scanner.evict(ble_device.address)
             print(f'[{device.label}] 连接异常: {e}（第 {fails} 次），{backoff:.0f}秒后重试...')
             if fails == FAILS_BEFORE_RESCAN:
                 await scanner.restart(f'{device.label} 广播收得到但连不上')
