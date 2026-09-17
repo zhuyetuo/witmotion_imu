@@ -26,6 +26,12 @@
 
 set -euo pipefail
 
+# 仓库自带的 python 挂到 PATH 上（miniconda 是 /AddToPath=0 装的，新开的
+# 终端里 python 是 command not found）。见 activate_env.sh。
+# 这个脚本不 cd 到仓库目录，所以按脚本自己的位置找。
+# shellcheck disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/activate_env.sh"
+
 CSV_DIR="${CSV_DIR:-data/multicam_multiimu3}"
 PATTERN="${PATTERN:-*_resampled16hz.csv}"
 MODEL="${MODEL:-ml_rf.pkl}"

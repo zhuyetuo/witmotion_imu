@@ -21,6 +21,12 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# 仓库自带的 python 挂到 PATH 上：miniconda 是 /AddToPath=0 装的，新开的
+# 终端里 python 不在 PATH 上，下面直接 exec python 会 command not found
+# —— 看起来像环境没装好，其实装好了。见 activate_env.sh。
+# shellcheck disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/activate_env.sh"
+
 SITE="${SITE:-}"
 ONLY_ON_DUTY="${ONLY_ON_DUTY:-0}"
 
