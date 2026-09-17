@@ -421,3 +421,12 @@ def test_recorder_shows_a_rolling_miss_rate_not_just_the_instant():
     code = _recorder_src()
     assert "wall_miss = {d.label: _deque(maxlen=int(target_fps * 10))" in code
     assert "wall_miss[d.label].append(1 if (missing or imu_row is None) else 0)" in code
+
+
+def test_the_wall_window_opens_at_canvas_size_not_as_a_matchbox():
+    """现场截图：窗口开出来是左上角一个火柴盒。WINDOW_NORMAL 在 Windows 上的
+    初始尺寸跟图片没关系。画布已经按屏幕算好了，用 AUTOSIZE 让窗口跟着画布走。"""
+    code = _recorder_src()
+    block = code.split("if wall_state[0] is None:", 1)[1].split("cv2.setMouseCallback", 1)[0]
+    assert "cv2.WINDOW_AUTOSIZE" in block
+    assert "cv2.WINDOW_NORMAL" not in block

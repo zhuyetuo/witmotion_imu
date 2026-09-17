@@ -977,7 +977,11 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                         frames, labels, tile_w=args.wall_width or None,
                         down=[c.down for c in cameras], zoom=wall_zoom[0])
                     if wall_state[0] is None:
-                        cv2.namedWindow(WALL_WIN, cv2.WINDOW_NORMAL)
+                        # AUTOSIZE：窗口跟画布一样大。第一版用 WINDOW_NORMAL，Windows 上
+                        # 它的初始尺寸跟图片没关系，开出来是左上角一个火柴盒，
+                        # 要人自己拖大。画布本来就按屏幕算好了，不需要可缩放
+                        cv2.namedWindow(WALL_WIN, cv2.WINDOW_AUTOSIZE)
+                        cv2.moveWindow(WALL_WIN, 0, 0)
                         cv2.setMouseCallback(WALL_WIN, _on_wall_click)
                     wall_state[0] = canvas.shape
                     cv2.imshow(WALL_WIN, canvas)
