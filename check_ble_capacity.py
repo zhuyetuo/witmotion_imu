@@ -61,6 +61,10 @@ _MAC_RE = re.compile(r'^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$')
 # 抖动到 100~200ms 都算正常，1 秒是明显不对劲了。
 GAP_THRESHOLD_S = 1.0
 
+# 录制里一个 tick 找 IMU 样本的容忍窗口（imu_camera_sync_multicam：max_lag_ms = 3/fps，
+# 25fps 就是 120ms）。相邻 notify 间隔超过它，那一帧在监控墙上就闪 MISSING
+LAG_LIMIT_S = 0.12
+
 
 class DevStat:
     """一个设备整场测试的原始记录。所有统计都是事后从 stamps 算出来的。"""
@@ -107,6 +111,36 @@ class DevStat:
     def gaps(self) -> list[float]:
         """所有超过阈值的空档。同一次 notify 里的多个包时刻相同，diff=0，不影响。"""
         return [b - a for a, b in zip(self.stamps, self.stamps[1:]) if b - a > GAP_THRESHOLD_S]
+
+    def gap_stats(self) -> dict:
+        """到包节奏：区分「真丢包」和「数据没丢、只是一批一批到」。
+
+        现场的困惑正是这个：监控墙上项圈来回闪 MISSING，但终端里每分钟一行的
+        「缺x%」并不高。墙上一个 tick 的"缺"是那一帧前后 120ms 内没等到样本——
+        有的蓝牙适配器/驱动把几百毫秒的包攒成一批往上送，数据一条不少，可夹在
+        两批之间的帧就会闪。所以这里看三个数：
+
+          median_gap  相邻两次 notify 的间隔中位数。50Hz 一包一包送是 20ms；
+                      攒批送会是几百毫秒
+          frac_over   间隔超过 LAG_LIMIT_S（录制里的 max_lag，120ms）的比例——
+                      这就是墙上会闪 MISSING 的比例
+          batch       平均每次 notify 带几个样本。1~2 = 逐包送，10+ = 攒批
+
+        Hz 正常 + frac_over 高 = 攒批（数据没丢）；Hz 低 = 真丢。
+        """
+        if len(self.stamps) < 2:
+            return {"median_gap": 0.0, "p95_gap": 0.0, "frac_over": 0.0, "batch": 0.0}
+        # 同一次 notify 里的包时刻相同，先去重成"每次 notify 的时刻"
+        arrivals = sorted(set(self.stamps))
+        deltas = [b - a for a, b in zip(arrivals, arrivals[1:])]
+        if not deltas:
+            return {"median_gap": 0.0, "p95_gap": 0.0, "frac_over": 0.0, "batch": float(len(self.stamps))}
+        d = sorted(deltas)
+        median = d[len(d) // 2]
+        p95 = d[min(len(d) - 1, int(len(d) * 0.95))]
+        over = sum(1 for x in deltas if x > LAG_LIMIT_S) / len(deltas)
+        batch = len(self.stamps) / len(arrivals)
+        return {"median_gap": median, "p95_gap": p95, "frac_over": over, "batch": batch}
 
 
 def parse_imu_spec(spec: str) -> str:
@@ -243,10 +277,12 @@ def report(stats: list[DevStat], t_end: float, target_hz: float) -> int:
     line = '═' * (lw + 52)
     print()
     print(line)
-    print(_pad('设备', lw) + f'{"连上用时":>10}{"实测Hz":>9}{"最低分钟":>10}{"最长空档":>10}{"掉线":>6}  判定')
-    print('─' * (lw + 52))
+    print(_pad('设备', lw) + f'{"连上用时":>10}{"实测Hz":>9}{"最低分钟":>10}{"最长空档":>10}{"掉线":>6}'
+                             f'{"包间隔":>9}{">120ms":>8}{"每包":>6}  判定')
+    print('─' * (lw + 76))
 
     problems = []
+    batching = []       # 攒批送包的：不算问题，但要单独说
     for st in stats:
         if st.error is not None:
             print(_pad(st.label, lw) + f'{"—":>8}{"—":>9}{"—":>10}{"—":>10}{"—":>6}  ✗ {st.error}')
@@ -273,18 +309,38 @@ def report(stats: list[DevStat], t_end: float, target_hz: float) -> int:
         if max_gap > 5.0:
             verdicts.append(f'空档 {max_gap:.0f}s')
 
+        gs = st.gap_stats()
         mark = 'OK' if not verdicts else '!! ' + '、'.join(verdicts)
         if verdicts:
             # 摘要里写真正的毛病，不要一律显示 Hz——掉线的那台 Hz 可能是好的
             problems.append(f'{st.label}（{"、".join(verdicts)}）')
+        # 攒批送包：Hz 正常、但相邻 notify 间隔经常超过录制的容忍窗口。数据没丢，
+        # 只是到得不匀——墙上会闪 MISSING，落盘的缺失却接近 0。**不算"顶不住"**
+        # （数据是全的），但必须让人知道闪的原因是它，所以单独记一笔
+        if hz >= target_hz * 0.9 and gs["frac_over"] >= 0.2:
+            mark += f'  ~ 攒批送包（{gs["frac_over"]:.0%} 的间隔>120ms，每包 {gs["batch"]:.0f} 个样本）'
+            batching.append(st.label)
         print(_pad(st.label, lw) + f'{st.connected_at or 0:>7.1f}s{hz:>9.1f}{lo:>10.1f}'
-                                   f'{max_gap:>9.2f}s{st.disconnects:>6}  {mark}')
+                                   f'{max_gap:>9.2f}s{st.disconnects:>6}'
+                                   f'{gs["median_gap"] * 1000:>7.0f}ms{gs["frac_over"]:>8.0%}{gs["batch"]:>6.1f}  {mark}')
 
     print(line)
     connected = sum(1 for st in stats if st.ok)
     print(f'连上 {connected}/{len(stats)}，目标 {target_hz:.0f}Hz（判定门槛：全程 ≥{target_hz * 0.9:.0f}Hz、不掉线）')
     print()
+    print('怎么读后三列（这三列专门回答"监控墙上为什么来回闪 MISSING"）：')
+    print('  包间隔  相邻两次蓝牙推送的间隔中位数。50Hz 逐包送是 20ms；几百 ms 就是适配器在攒批')
+    print('  >120ms  间隔超过录制容忍窗口的比例——就是墙上会闪 MISSING 的比例')
+    print('  每包    平均一次推送带几个样本。1~2 逐包送；10+ 攒批送')
+    print('  实测Hz 正常 + >120ms 高 = 攒批送包，数据没丢、只是到得不匀（换适配器/换 USB 口能治）')
+    print('  实测Hz 明显低于 50     = 真丢包，跟到得匀不匀无关')
+    print()
 
+    if batching:
+        print(f'注意：{"、".join(batching)} 是攒批送包——数据没丢（Hz 正常），只是几百毫秒一批地到。')
+        print('      录制的监控墙上这几个会来回闪 MISSING，但终端每分钟一行的「缺x%」会接近 0，')
+        print('      落盘的数据是全的。要治的话是换蓝牙适配器 / 换个不跟摄像头挤的 USB 口，不是调软件。')
+        print()
     if connected == len(stats) and not problems:
         print(f'判定：顶得住。{len(stats)} 个设备全部连上并稳定在 {target_hz:.0f}Hz 附近。')
         print('      → 可以考虑「每只狗两个 IMU 一起采」，换班就不用再改配置了。')
