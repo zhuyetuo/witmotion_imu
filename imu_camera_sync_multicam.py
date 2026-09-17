@@ -663,7 +663,9 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
     # 几路画面拼一张大图、一个窗口，点一下放大再点还原（见 preview_wall.py）。
     # 这些状态用单元素列表装着，是为了让鼠标回调能改到它们——回调是 cv2 在
     # 另一个上下文里调的，赋值给普通局部变量改不到外面。
-    WALL_WIN = '监控墙 IMU(multicam)'
+    # 窗口标题只能是 ASCII：OpenCV 在 Windows 上按本地编码建窗口，中文标题
+    # 出来是乱码（现场截图里就是 '鍵聂帘澶?IMU(multicam)'）
+    WALL_WIN = 'IMU wall (multicam)'
     wall_on = bool(getattr(args, 'wall', False))
     wall_period = 1.0 / max(float(getattr(args, 'wall_fps', 8.0) or 8.0), 0.5)
     wall_last = [0.0]
@@ -940,6 +942,11 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 wall_last[0] = tick_mono
                 labels = []
                 for cam, cam_fps in zip(cameras, cam_fps_list):
+                    if save_overlay:
+                        # 这一路的画面里已经画着时间/机位/帧率/Hz 了（那份是要写进
+                        # 视频的），墙再写一遍就是同样的数字并排出现两次
+                        labels.append('')
+                        continue
                     bits = [cam.label, f'{cam_fps:.0f}fps' if not cam.down else 'DOWN']
                     for d, hz, _lag, missing, _row in (
                             [x for x in imu_info if (cam.label, x[0].label) in pair_filter]
@@ -949,7 +956,7 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                     labels.append('  '.join(bits))
                 try:
                     canvas = preview_wall.compose(
-                        frames, labels, tile_w=args.wall_width,
+                        frames, labels, tile_w=args.wall_width or None,
                         down=[c.down for c in cameras], zoom=wall_zoom[0])
                     if wall_state[0] is None:
                         cv2.namedWindow(WALL_WIN, cv2.WINDOW_NORMAL)
@@ -1332,9 +1339,11 @@ def main():
                          '比一路一个窗口便宜得多：一次 imshow（而不是 N 次）、先缩小再拼、'
                          '按自己的节奏刷（见 --wall-fps）。**不影响录像**——录下来的分辨率、'
                          '帧率、内容跟墙开不开没关系，墙只是另外看一眼。')
-    ap.add_argument('--wall-width', type=int, default=480, metavar='PX',
-                    help='监控墙每一格多宽，默认 480（高度按原比例算，不拉伸）。'
-                         '屏幕大就调大，帧率紧张就调小——像素搬运量按面积算。')
+    ap.add_argument('--wall-width', type=int, default=0, metavar='PX',
+                    help='监控墙每一格多宽。默认 0 = 按屏幕大小自动铺满'
+                         '（1080p 的 2x2 每格约 844 宽）。高度永远按原比例算，不拉伸。\n'
+                         '帧率紧张就写死一个小值，比如 --wall-width 480；'
+                         '像素搬运量按面积算，480 只有自动那档的三分之一。')
     ap.add_argument('--wall-fps', type=float, default=8.0, metavar='N',
                     help='监控墙每秒刷几次，默认 8。录制照旧 25fps，墙刷慢点人眼够用，'
                          '省下来的都是录制的余量。')
