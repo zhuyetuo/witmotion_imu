@@ -427,3 +427,18 @@ def test_install_autostart_takes_an_optional_archive_time():
     assert 'if "%ARCHIVE_AT%"=="" set "ARCHIVE_AT=00:05"' in bat, "不传要有默认值"
     # 提权重启时第二个参数不能丢，否则 UAC 之后又回到默认时间
     assert "'%SITE_ARG%','%ARCHIVE_AT%'" in bat, "提权转发时漏了归档时间参数"
+
+
+def test_yingpeng_records_all_eight_devices_by_default(fake_python):
+    """影棚每只狗两个项圈同时戴（2026-09-17 起固定全采 8 个），KEEP_PAIRS 也按 8 个写的。
+
+    忘了敲 ALL_DEVICES=1 的后果是只录当班那 4 个，另外 4 个戴着白戴一晚——而且
+    不报错。所以场地文件里默认开，不靠人记。
+    """
+    labels = opt(cmdline("影棚", fake_python), "--imu-label")
+    assert sorted(labels) == [f"imu{i}" for i in range(1, 9)], labels
+
+
+def test_yingpeng_can_still_record_only_the_on_duty_group(fake_python):
+    labels = opt(cmdline("影棚", fake_python, ALL_DEVICES="0"), "--imu-label")
+    assert len(labels) == 4
