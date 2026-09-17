@@ -19,7 +19,7 @@ REM
 REM  What gets registered:
 REM
 REM    "IMU record"  -> record_autostart.bat, at logon
-REM    "IMU archive" -> daily_archive.bat,    daily at 00:05
+REM    "IMU archive" -> daily_archive.bat,    daily at 00:05 (2nd arg overrides)
 REM
 REM  Why AT LOGON and not AT STARTUP: USB cameras and the Bluetooth stack are
 REM  reached through the interactive desktop session. A task running before
@@ -38,11 +38,16 @@ REM  before touching anything, and it never deletes original data.
 REM ============================================================================
 
 set "SITE_ARG=%~1"
+REM Optional 2nd arg: when the daily archive runs (HH:MM), default 00:05.
+REM Two machines archiving to the same NAS folder at the same minute just
+REM split the bandwidth for no reason - give the second one a later slot.
+set "ARCHIVE_AT=%~2"
+if "%ARCHIVE_AT%"=="" set "ARCHIVE_AT=00:05"
 
 net session >nul 2>&1
 if errorlevel 1 (
     echo Administrator rights are required. Relaunching...
-    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '%SITE_ARG%' -Verb RunAs"
+    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -ArgumentList '%SITE_ARG%','%ARCHIVE_AT%' -Verb RunAs"
     exit /b 0
 )
 
@@ -59,7 +64,7 @@ if not exist "%BASH%" (
 )
 
 if "%SITE_ARG%"=="" (
-    echo Usage: install_autostart.bat ^<site-alias^>
+    echo Usage: install_autostart.bat ^<site-alias^> [archive-time HH:MM]
     echo        install_autostart.bat /uninstall
     echo.
     REM List the aliases that actually exist, do not hardcode them here:
@@ -109,9 +114,9 @@ powershell -NoProfile -Command ^
   "Set-ScheduledTask -TaskName 'IMU record' -Settings $s | Out-Null" 2>nul
 if errorlevel 1 echo       [note] could not relax the task limits; check "72 hour" limit by hand in Task Scheduler
 
-REM -- 3. Archive, daily at 00:05 -------------------------------------------
-echo [3/3] task "IMU archive" (daily 00:05)
-schtasks /Create /TN "IMU archive" /TR "\"%~dp0daily_archive.bat\"" /SC DAILY /ST 00:05 /RL HIGHEST /F >nul
+REM -- 3. Archive, daily ----------------------------------------------------
+echo [3/3] task "IMU archive" (daily %ARCHIVE_AT%)
+schtasks /Create /TN "IMU archive" /TR "\"%~dp0daily_archive.bat\"" /SC DAILY /ST %ARCHIVE_AT% /RL HIGHEST /F >nul
 if errorlevel 1 (
     echo       [FAILED] could not register the archive task
     pause

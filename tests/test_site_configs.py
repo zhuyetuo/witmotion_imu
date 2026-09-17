@@ -399,5 +399,31 @@ def test_the_memo_passes_the_site_alias_to_install_autostart():
         md = open(os.path.join(REPO, "docs", f"{doc}.md"), encoding="utf-8").read()
         for line in md.splitlines():
             if "install_autostart.bat" in line and line.strip().startswith("cmd "):
-                assert line.strip().endswith(alias), \
+                # 别名后面还可以跟归档时间（电脑2 错开到 00:20），所以按词判断
+                assert alias in line.split(), \
                     f"{doc}.md 的 install_autostart.bat 没带场地别名: {line}"
+
+
+def test_the_two_pcs_do_not_archive_at_the_same_minute():
+    """两台默认都是 00:05，同一分钟往同一个 NAS 目录传只是白白平分带宽。
+
+    备忘里给电脑2 排了个靠后的时间；哪天有人把它改回默认，这条会红。
+    """
+    times = {}
+    for doc in ("狗场电脑1", "狗场电脑2"):
+        md = open(os.path.join(REPO, "docs", f"{doc}.md"), encoding="utf-8").read()
+        line = next(l for l in md.splitlines()
+                    if l.strip().startswith("cmd ") and "install_autostart.bat" in l)
+        parts = line.split()
+        # 第三个词是别名，第四个（如果有）是归档时间；没写就是脚本默认的 00:05
+        times[doc] = parts[4] if len(parts) > 4 else "00:05"
+    assert len(set(times.values())) == 2, f"两台的归档时间撞了: {times}"
+
+
+def test_install_autostart_takes_an_optional_archive_time():
+    bat = open(os.path.join(REPO, "install_autostart.bat"), encoding="utf-8").read()
+    assert "ARCHIVE_AT" in bat
+    assert "/ST %ARCHIVE_AT%" in bat, "注册计划任务时要用传进来的时间，不能还写死 00:05"
+    assert 'if "%ARCHIVE_AT%"=="" set "ARCHIVE_AT=00:05"' in bat, "不传要有默认值"
+    # 提权重启时第二个参数不能丢，否则 UAC 之后又回到默认时间
+    assert "'%SITE_ARG%','%ARCHIVE_AT%'" in bat, "提权转发时漏了归档时间参数"
