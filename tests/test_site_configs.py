@@ -375,3 +375,29 @@ def test_the_memo_does_not_hardcode_a_repo_location():
                     continue      # 「仓库在哪」那一节本来就要写具体路径
                 assert "~/witmotion_imu" not in line, \
                     f"{doc}.md 写死了仓库路径: {line}"
+
+
+def test_install_autostart_lists_the_real_aliases():
+    """install_autostart.bat 的用法提示不能写死场地清单。
+
+    狗场拆成两台之后，别名多了 gouchang1 / gouchang2，而用法提示还写着
+    `gouchang | yingpeng`——现场敲不带参数的命令，看到的是一份不包含这两台的
+    清单，看起来就像"新场地不支持"。而它下面的校验其实是扫文件的，认得。
+    """
+    bat = open(os.path.join(REPO, "install_autostart.bat"), encoding="utf-8").read()
+    assert "gouchang ^| yingpeng" not in bat, "用法提示又写死了场地清单"
+    assert "SITE_ALIAS=" in bat, "用法提示要从场地文件里现扫别名"
+
+
+def test_the_memo_passes_the_site_alias_to_install_autostart():
+    """`install_autostart.bat` 不带参数只会打用法然后退出，什么都没装。
+
+    备忘里漏了这个参数的话，人会以为计划任务注册好了——而实际上没有，
+    要等到第二天没传 NAS 才发现。
+    """
+    for doc, alias in (("狗场电脑1", "gouchang1"), ("狗场电脑2", "gouchang2")):
+        md = open(os.path.join(REPO, "docs", f"{doc}.md"), encoding="utf-8").read()
+        for line in md.splitlines():
+            if "install_autostart.bat" in line and line.strip().startswith("cmd "):
+                assert line.strip().endswith(alias), \
+                    f"{doc}.md 的 install_autostart.bat 没带场地别名: {line}"
