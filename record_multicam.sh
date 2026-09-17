@@ -154,7 +154,34 @@ IMUS="${IMUS:-}"
 DOG_NAMES="${DOG_NAMES:-}"
 # 手动跑（命令行给了 IMUS、没给 SITE）时 CAMS 退回老默认值 "0 1"。
 # 场地模式下仍然不给默认值——那边填错是安静录一整天废数据，宁可不启动。
-if [ "$_MANUAL_RUN" = "1" ] && [ -z "${CAMS:-}" ]; then
+# CAMERAS：一行一路，「真实机位号 这台机器上的设备索引」。优先于 CAMS。
+#
+# 为什么要有这张表：一个场地拆到多台电脑上录的时候，第二台只开 4 路，但那 4 路
+# 是 4/5/6 号单间和 7 号公共区。光有 CAMS 的话文件名里只能按位置排 cam1..cam4，
+# 跟第一台的 cam1 撞车——两台传到同一个 NAS 目录，谁也分不出哪个 cam1 是哪个
+# 房间。**这跟设备编号按位置排那个坑是同一个**，那次是 imu2 里装着 5 号设备的
+# 数据，平台按号查狗就查错。
+#
+# 写成一张表而不是 CAMS + CAM_IDS 两个平行数组，理由跟 DEVICES 一样：平行数组
+# 错位一格不报错，只是从此以后 4 号房间的画面存成了 5 号。
+CAM_IDS=""
+if [ -n "${CAMERAS:-}" ]; then
+    CAMS=""
+    while IFS= read -r _line; do
+        _line="${_line%%#*}"
+        read -ra _f <<< "$_line"
+        [ ${#_f[@]} -eq 0 ] && continue
+        if [ ${#_f[@]} -ne 2 ]; then
+            echo "CAMERAS 这一行应该是「机位号 设备索引」两列，收到 ${#_f[@]} 列: $_line"
+            exit 1
+        fi
+        CAM_IDS="$CAM_IDS ${_f[0]#cam}"
+        CAMS="$CAMS ${_f[1]}"
+    done <<< "$CAMERAS"
+fi
+
+
+if [ "$_MANUAL_RUN" = "1" ] && [ -z "${CAMS:-}" ] && [ -z "${CAMERAS:-}" ]; then
     CAMS="0 1"
     echo "手动模式（没传 SITE）：摄像头用默认的 CAMS=\"$CAMS\"，要几路自己传 CAMS=\"0 1 2\""
 fi
@@ -271,19 +298,27 @@ _collect_dev_dog "${DEVICES_STANDBY:-}"
 #
 # 所以按狗名把 PAIRS 改写到这次真正在录的那个设备上。不换组时这是恒等变换
 # （每条都已经在录），所以不用加条件，一视同仁地跑一遍更不容易漏。
+# 这次到底开了哪几个机位号。**不能只数路数**：有了 CAMERAS 之后，机位号跟
+# "第几路"不再是一回事（狗场电脑2 开 4 路，号是 4/5/6/7），按路数判断会把
+# cam4..cam7 全当成"没开"给丢掉，于是配对一条不剩、录出来全是废文件。
+_active_cams=" $(echo ${CAM_IDS:-$(seq 1 $(echo ${CAMS:-} | wc -w) 2>/dev/null)}) "
+_cam_on() {
+    case "$_active_cams" in *" ${1#cam} "*) return 0 ;; esac
+    return 1
+}
+
 if [ -n "${PAIRS:-}" ] && [ -n "$_dev_dog_map" ]; then
     _active=" $IMU_IDS "
     # 这次开了几路摄像头。临时少开一路做实验（CAMS="4 0 3 5 2 1" 摘掉天花板那路）
     # 时，PAIRS 里 cam7 的那几条就指向不存在的摄像头，parse_pairs 同样会退出。
     # 跟设备那边一个道理：不该为了做个对比实验去手改场地文件。
-    _n_cams=$(echo ${CAMS:-} | wc -w)
     _remapped=""; _dropped=""; _dropped_cam=""
     for _pr in $PAIRS; do
         _cam="${_pr%%:*}"
         _n="${_pr##*:}"; _n="${_n#imu}"
         # 摄像头不在这次的 CAMS 里 → 整条去掉。不静默：写错摄像头号（比如 cam9）
         # 也长这样，得让人在日志里看得见
-        if [ -n "${CAMS:-}" ] && [ "${_cam#cam}" -gt "$_n_cams" ] 2>/dev/null; then
+        if [ -n "${CAMS:-}" ] && ! _cam_on "$_cam"; then
             _dropped_cam="$_dropped_cam $_pr"
             continue
         fi
@@ -315,7 +350,7 @@ if [ -n "${PAIRS:-}" ] && [ -n "$_dev_dog_map" ]; then
         echo "  ⚠ 这几条配对的设备这次没在录，已去掉：$_dropped"
     fi
     if [ -n "$_dropped_cam" ]; then
-        echo "  ⚠ 这几条配对的摄像头这次没开（CAMS 只有 $_n_cams 路），已去掉：$_dropped_cam"
+        echo "  ⚠ 这几条配对的摄像头这次没开（这次开的是 cam$(echo $_active_cams | tr ' ' ',')），已去掉：$_dropped_cam"
     fi
 fi
 
@@ -326,11 +361,10 @@ fi
 # 而退出）、KEEP_PAIRS（归档时按关键字子串挑文件，挑不到静默跳过，不受影响）。
 # 前两样都要过这一关。
 if [ -n "${ROTATE:-}" ] && [ -n "${CAMS:-}" ]; then
-    _n_cams=$(echo ${CAMS} | wc -w)
     _rot_kept=""; _rot_dropped=""
     for _r in $ROTATE; do
         _rc="${_r%%:*}"
-        if [ "${_rc#cam}" -gt "$_n_cams" ] 2>/dev/null; then
+        if ! _cam_on "$_rc"; then
             _rot_dropped="$_rot_dropped $_r"
         else
             _rot_kept="$_rot_kept $_r"
@@ -338,7 +372,7 @@ if [ -n "${ROTATE:-}" ] && [ -n "${CAMS:-}" ]; then
     done
     ROTATE="$_rot_kept"
     if [ -n "$_rot_dropped" ]; then
-        echo "  ⚠ 这几项旋转的摄像头这次没开（CAMS 只有 $_n_cams 路），已去掉：$_rot_dropped"
+        echo "  ⚠ 这几项旋转的摄像头这次没开（这次开的是 cam$(echo $_active_cams | tr ' ' ',')），已去掉：$_rot_dropped"
     fi
 fi
 
@@ -474,6 +508,10 @@ cam_args=()
 for idx in $CAMS; do
     cam_args+=(--camera "$idx")
 done
+cam_id_args=()
+for n in $CAM_IDS; do
+    cam_id_args+=(--camera-id "$n")
+done
 
 # PAIRS：只生成这些 cam x imu 配对。留空就是全排列（老行为）。
 # 一间一狗一摄像头的场地（狗场）必须设：cam_i 和 imu_i 严格一一对应，全排列
@@ -608,7 +646,8 @@ trap 'rm -f "$LOCK"' EXIT
 python imu_camera_sync_multicam.py \
     "${imu_args[@]}" "${imu_label_args[@]+"${imu_label_args[@]}"}" "${dog_name_args[@]}" \
     "${segment_args[@]}" --resample-hz "$RESAMPLE_HZ" \
-    "${cam_args[@]}" "${pair_args[@]+"${pair_args[@]}"}" \
+    "${cam_args[@]}" "${cam_id_args[@]+"${cam_id_args[@]}"}" \
+    "${pair_args[@]+"${pair_args[@]}"}" \
     "${rotate_args[@]+"${rotate_args[@]}"}" \
     --width "$WIDTH" --height "$HEIGHT" \
     --capture-width "$CAPTURE_WIDTH" --capture-height "$CAPTURE_HEIGHT" \

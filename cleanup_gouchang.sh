@@ -40,6 +40,7 @@ DRY_RUN=0
 KEEP_IMU_RAW=0
 # 公用摄像头编号。狗场是 cam7（天花板那路，6 只狗共用）。传 none 关掉这条规则。
 SHARED_CAM=7
+_SHARED_CAM_EXPLICIT=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -48,6 +49,7 @@ while [ "$#" -gt 0 ]; do
         --keep-imu-raw) KEEP_IMU_RAW=1; shift ;;
         --shared-cam)
             if [ "${2:-}" = "none" ]; then SHARED_CAM=""; else SHARED_CAM="${2:?--shared-cam 要跟编号}"; fi
+            _SHARED_CAM_EXPLICIT=1
             shift 2 ;;
         -h|--help)
             sed -n '2,34p' "$0"
@@ -61,6 +63,36 @@ done
 if [ "$#" -lt 1 ]; then
     echo "用法: $0 [-n] [-y] [--keep-imu-raw] [--shared-cam N|none] <目录> [<目录> ...]"
     exit 1
+fi
+
+# 公用机位号从场地配置里读（SITE=... 或 sites/.current），命令行给了就听命令行的。
+#
+# 为什么要这条：狗场拆成两台电脑之后，天花板那路只在电脑2 上——电脑1 得传
+# `--shared-cam none`，而这件事没人记得住。忘了传的话默认值 7 会去找一批
+# 根本不存在的 cam7 文件，那一段静默跳过（不会删错东西），但"清理脚本跑过了"
+# 这个印象是错的，人不会再去看。让场地文件自己说更靠谱。
+if [ "$_SHARED_CAM_EXPLICIT" = "0" ]; then
+    _site="${SITE:-}"
+    [ -z "$_site" ] && [ -f "sites/.current" ] && _site="$(tr -d '\r\n ' < sites/.current)"
+    if [ -n "$_site" ] && [ ! -f "sites/${_site}.env" ]; then
+        for _f in sites/*.env; do
+            [ -f "$_f" ] || continue
+            if grep -q "^[[:space:]]*SITE_ALIAS=[\"']\?${_site}[\"']\?[[:space:]]*\$" "$_f"; then
+                _site="$(basename "$_f" .env)"; break
+            fi
+        done
+    fi
+    if [ -n "$_site" ] && [ -f "sites/${_site}.env" ]; then
+        # `|| true`：老的 sites/狗场.env 里没有 SHARED_CAM，grep 找不到会返回 1，
+        # 而这个脚本开着 set -e——不兜住的话整个清理**一声不吭地退出**，
+        # rc=1、零输出，看起来就像"没东西可删"
+        _v="$(grep -oE '^[[:space:]]*SHARED_CAM=.*' "sites/${_site}.env" 2>/dev/null | head -1 \
+              | sed 's/^[[:space:]]*SHARED_CAM=//; s/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//' || true)"
+        if [ -n "$_v" ]; then
+            [ "$_v" = "none" ] && SHARED_CAM="" || SHARED_CAM="$_v"
+            echo "场地 $_site：公用机位 = ${SHARED_CAM:-（没有）}"
+        fi
+    fi
 fi
 
 # 同一份数据？优先比 inode（硬链接），退回比字节数（当时 os.link 失败走了 copy）
