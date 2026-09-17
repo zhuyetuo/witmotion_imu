@@ -270,3 +270,46 @@ def test_a_room_camera_is_uploaded_only_once():
             m.group(1) for m in re.finditer(r"cam(\d+)_imu\d+(?!:)(?=\s|$)", keep))
         dup = {c: n for c, n in vids.items() if n > 1 and c != "7"}
         assert not dup, f"{site} 这几路房间画面会重复传 NAS: {dup}"
+
+
+# ── 备忘文档别跟配置走岔 ──────────────────────────────────────────────────
+
+
+def test_the_per_pc_memo_matches_the_site_config():
+    """docs/狗场电脑N.md 是现场照着敲命令的那份，跟场地文件对不上就是在误导人。
+
+    对照表里的机位号、项圈号、MAC 都要在场地文件里真的存在。
+    """
+    import re
+
+    for site, doc in (("狗场1", "狗场电脑1"), ("狗场2", "狗场电脑2")):
+        env = open(os.path.join(REPO, "sites", f"{site}.env"), encoding="utf-8").read()
+        md = open(os.path.join(REPO, "docs", f"{doc}.md"), encoding="utf-8").read()
+
+        # 文档里提到的 imuN，场地文件的 DEVICES 里都得有
+        dev_block = re.search(r'DEVICES="\n(.*?)"', env, re.S).group(1)
+        real_ids = {m.group(1) for m in re.finditer(r"^(\d+)\s", dev_block, re.M)}
+        doc_ids = {m.group(1) for m in re.finditer(r"imu(\d+)", md)}
+        assert real_ids <= doc_ids, f"{doc}.md 漏了这几个项圈: {real_ids - doc_ids}"
+        # 多出来的只能是另一台的（文档里会提一句"那几只在电脑N 上"），不能是
+        # 整个狗场都没有的号
+        assert doc_ids <= {str(n) for n in range(9, 21)}, \
+            f"{doc}.md 提到了狗场没有的项圈: {doc_ids - {str(n) for n in range(9, 21)}}"
+
+        # 文档里贴的 MAC 也得是真的（check_device_worn 那条命令要能直接复制运行）
+        for mac in re.findall(r"wit=([0-9A-F]{2}(?::[0-9A-F]{2}){5})", md):
+            assert mac in env, f"{doc}.md 里的 {mac} 在 {site}.env 里不存在"
+
+        # 文档里的机位号跟 CAMERAS 表一致
+        cam_block = re.search(r'CAMERAS="\n(.*?)"', env, re.S).group(1)
+        real_cams = {m.group(1) for m in re.finditer(r"^(\d+)\s", cam_block, re.M)}
+        doc_cams = {m.group(1) for m in re.finditer(r"\bcam(\d+)\b", md)}
+        assert real_cams <= doc_cams, f"{doc}.md 漏了这几路机位: {real_cams - doc_cams}"
+        assert doc_cams <= {"1", "2", "3", "4", "5", "6", "7"}, \
+            f"{doc}.md 提到了狗场没有的机位: {doc_cams - {'1','2','3','4','5','6','7'}}"
+
+        # 命令里的 SITE= 不能写成另一台的（复制粘贴最容易错的地方）
+        other = "狗场2" if site == "狗场1" else "狗场1"
+        for line in md.splitlines():
+            if line.strip().startswith(("SITE=", "PREVIEW=", "DRY_RUN=", "CAMS=")):
+                assert f"SITE={other}" not in line, f"{doc}.md 里有一条命令写着 {other}: {line}"
