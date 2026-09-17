@@ -210,3 +210,149 @@ def test_wall_env_turns_preview_on_by_itself():
     code = "\n".join(l for l in sh.splitlines() if not l.lstrip().startswith("#"))
     assert '_wall_on' in code
     assert 'if [ "$_wall_on" = "1" ]; then' in code, "WALL=1 没有顺带打开预览"
+
+
+# ── 默认要铺满屏幕 ────────────────────────────────────────────────────────
+
+
+def test_the_wall_fills_the_screen_by_default():
+    """**第一版默认每格 480，2x2 才 960x540 —— 在 1080p 上只占四分之一，
+    小到看不清狗在干嘛。** 默认应该按屏幕算。"""
+    frames = [frame(i) for i in (10, 20, 30, 40)]
+    canvas = w.compose(frames, ["a", "b", "c", "d"], screen=(1920, 1080))
+    h, wd = canvas.shape[:2]
+    assert wd > 1920 * 0.8, f"只用了屏幕宽度的 {wd / 1920:.0%}"
+    assert h > 1080 * 0.8, f"只用了屏幕高度的 {h / 1080:.0%}"
+
+
+def test_it_never_overflows_the_screen():
+    """超出屏幕的话窗口会被系统缩到一半，反而更小。留了标题栏/任务栏的余量。"""
+    for n in range(1, 8):
+        canvas = w.compose([frame(10)] * n, [f"c{i}" for i in range(n)],
+                           screen=(1920, 1080))
+        h, wd = canvas.shape[:2]
+        assert wd <= 1920 and h <= 1080, (n, wd, h)
+
+
+def test_a_bigger_screen_gets_bigger_tiles():
+    small = w.compose([frame(10)] * 4, list("abcd"), screen=(1280, 720))
+    big = w.compose([frame(10)] * 4, list("abcd"), screen=(2560, 1440))
+    assert big.shape[1] > small.shape[1] * 1.5
+
+
+def test_fit_uses_whichever_side_runs_out_first():
+    """只按宽度算的话，2x2 在 1920x1080 会算出整块 1920x1080，加上标题栏
+    就超出屏幕了。高度这一侧才是先到头的那个。"""
+    by_both = w.fit_tile_width(1280, 720, 4, 1920, 950)
+    assert by_both < 1920 / 2, "只按宽度算了"
+
+
+def test_explicit_width_still_wins():
+    """`--wall-width 480` 是帧率紧张时的手动挡，不能被自动铺满顶掉。"""
+    canvas = w.compose([frame(10)] * 4, list("abcd"), tile_w=480, screen=(2560, 1440))
+    assert canvas.shape[1] == 960
+
+
+@pytest.mark.parametrize("n", [1, 2, 3, 4, 6, 7])
+def test_zoom_keeps_the_window_the_same_size(n):
+    """点一下窗口就变大、再点又变小的话，看着像在跳。
+
+    **每种路数都要试。** 2x2 的时候「格子宽的两倍」正好等于整块宽度，
+    只测 4 路的话这个巧合会让错的实现也通过；2 路（2x1）和 7 路（3x3）
+    才露馅。
+    """
+    frames = [frame(10 + i * 10) for i in range(n)]
+    labels = [f"c{i}" for i in range(n)]
+    grid = w.compose(frames, labels, screen=(1920, 1080))
+    for i in range(n):
+        z = w.compose(frames, labels, zoom=i, screen=(1920, 1080))
+        assert abs(z.shape[0] - grid.shape[0]) <= 2, (n, i, z.shape, grid.shape)
+        assert abs(z.shape[1] - grid.shape[1]) <= 2, (n, i, z.shape, grid.shape)
+
+
+def test_screen_size_falls_back_to_1080p():
+    """拿不到屏幕尺寸（非 Windows、或者调用失败）时不能退回一个小值。"""
+    assert w.screen_size()[0] >= 1280
+    assert w.DEFAULT_SCREEN == (1920, 1080)
+
+
+def test_wall_width_zero_means_auto():
+    """录制脚本用 0 表示"自动"，传给 compose 前要变成 None。"""
+    code = _recorder_src()
+    assert "tile_w=args.wall_width or None" in code
+
+
+# ── 标签要小、要是 ASCII ──────────────────────────────────────────────────
+
+
+def test_the_label_is_a_small_corner_chip_not_a_full_width_band():
+    """**第一版的标签条按格子高度的九分之一算，自动铺满之后就是一条巨大的
+    黑带，把画面上面一截整个吃掉，字还写不下被切断。**
+
+    标签是"扫一眼确认这路还活着"，不是主角。
+    """
+    tile = np.full((475, 844, 3), 120, dtype=np.uint8)
+    w.label_tile(tile, "cam1  26fps  xiaobai 46Hz")
+    ys, xs = np.where((tile != 120).any(axis=2))
+    assert ys.max() < 475 * 0.10, f"标签占了画面高度的 {ys.max() / 475:.0%}"
+    assert xs.max() < 844 * 0.5, f"标签横贯了画面宽度的 {xs.max() / 844:.0%}"
+
+
+def test_the_label_does_not_grow_with_the_tile():
+    """字号跟着格子放大的话，1080p 铺满之后就是三倍大的巨字。"""
+    small = np.full((270, 480, 3), 120, dtype=np.uint8)
+    big = np.full((950, 1688, 3), 120, dtype=np.uint8)
+    w.label_tile(small, "cam1 26fps")
+    w.label_tile(big, "cam1 26fps")
+    h_small = np.where((small != 120).any(axis=2))[0].max()
+    h_big = np.where((big != 120).any(axis=2))[0].max()
+    assert abs(h_small - h_big) <= 2, f"小格 {h_small}px、大格 {h_big}px，字号跟着涨了"
+
+
+def test_the_label_stays_inside_a_narrow_tile():
+    """字超出格子会被切断——现场截图里 cam1 那行就被 cam2 的格子切掉半截。"""
+    tile = np.full((90, 160, 3), 120, dtype=np.uint8)
+    w.label_tile(tile, "cam1  26fps  xiaobai 46Hz  xiaobai2 50Hz")
+    assert tile.shape == (90, 160, 3)
+
+
+def test_non_ascii_never_reaches_putText():
+    """OpenCV 的 Hershey 字体没有中文，画出来是一串方框/问号。"""
+    assert w._ascii("监控墙") == "???"
+    assert w._ascii("cam1 26fps") == "cam1 26fps"
+    # 画中文 和 画同样长度的 '?' 必须一模一样——不一样就说明中文真的送进
+    # putText 了（它不会报错，只是画出一串看不懂的东西）
+    a = np.zeros((200, 400, 3), dtype=np.uint8)
+    b = np.zeros((200, 400, 3), dtype=np.uint8)
+    w.label_tile(a, "cam1 小白")
+    w.label_tile(b, "cam1 ??")
+    assert np.array_equal(a, b), "中文没有先转成 ASCII 就画上去了"
+
+
+def test_the_window_title_is_ascii():
+    """Windows 上 OpenCV 按本地编码建窗口，中文标题出来是乱码
+    （现场截图：'鍵聂帘澶?IMU(multicam)'）。"""
+    code = _recorder_src()
+    line = next(l for l in code.splitlines() if "WALL_WIN = " in l)
+    line.encode("ascii")            # 有中文就在这儿抛
+
+
+def test_the_zoom_hint_is_ascii():
+    src = open(os.path.join(REPO, "preview_wall.py"), encoding="utf-8").read()
+    hint = src.split("labels[zoom]}", 1)[1].split("'", 1)[0]
+    hint.encode("ascii")
+
+
+def test_an_empty_label_draws_nothing():
+    """画面里本来就带叠加信息的场地（save_overlay 开着的），墙再写一遍
+    就是同样的数字并排出现两次。"""
+    tile = np.full((200, 400, 3), 77, dtype=np.uint8)
+    w.label_tile(tile, "")
+    w.label_tile(tile, "   ")
+    assert (tile == 77).all(), "空标签还是画了东西"
+
+
+def test_the_wall_skips_labels_when_the_frame_already_has_the_overlay():
+    code = _recorder_src()
+    assert "if save_overlay:" in code.split("labels = []", 1)[1][:400], \
+        "画面里已经有叠加信息时，墙还是又写了一遍"
