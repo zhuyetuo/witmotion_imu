@@ -354,3 +354,24 @@ def test_the_memo_activates_before_running_python_by_hand():
             if has_python:
                 assert "activate_env.sh" in body, \
                     f"{doc}.md 里有一段手敲 python 的命令没先 source activate_env.sh:\n{body}"
+
+
+def test_the_memo_does_not_hardcode_a_repo_location():
+    """备忘里不能写死 `~/witmotion_imu`。
+
+    真实情况：狗场电脑2 上仓库在 ~/Downloads/witmotion_imu，照着备忘敲
+    `ls ~/witmotion_imu/.tools/...` 得到 No such file —— 看起来像环境没装好，
+    其实只是路径不一样。命令一律相对仓库目录写，开头交代一次 cd 过去。
+    """
+    import re
+
+    for doc in ("狗场电脑1", "狗场电脑2"):
+        md = open(os.path.join(REPO, "docs", f"{doc}.md"), encoding="utf-8").read()
+        for block in md.split("```bash")[1:]:
+            body = block.split("```")[0]
+            for line in body.splitlines():
+                line = line.strip()
+                if line.startswith(("REPO=", "ls -d ", "mv ", "cd ~", ">")):
+                    continue      # 「仓库在哪」那一节本来就要写具体路径
+                assert "~/witmotion_imu" not in line, \
+                    f"{doc}.md 写死了仓库路径: {line}"
