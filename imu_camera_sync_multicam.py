@@ -64,6 +64,7 @@ from imu_camera_sync import (
 from imu_camera_sync_multi import (
     ImuDevice, ble_thread_main, parse_imu_spec, precheck_devices, stop_event, _new_sample_event, RAW_CSV_HEADER,
 )
+import preview_wall
 
 
 def _fmt_duration(secs: float) -> str:
@@ -657,6 +658,36 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
     # 窗口是 imshow 顺手建的，关预览时得自己拆掉——否则六个窗口会僵在那儿，
     # 画面停在关掉的那一瞬间，看着像卡死了。只在"开→关"的那一 tick 拆一次。
     windows_up = preview.on
+
+    # ── 监控墙 ──────────────────────────────────────────────────────────
+    # 几路画面拼一张大图、一个窗口，点一下放大再点还原（见 preview_wall.py）。
+    # 这些状态用单元素列表装着，是为了让鼠标回调能改到它们——回调是 cv2 在
+    # 另一个上下文里调的，赋值给普通局部变量改不到外面。
+    WALL_WIN = '监控墙 IMU(multicam)'
+    wall_on = bool(getattr(args, 'wall', False))
+    wall_period = 1.0 / max(float(getattr(args, 'wall_fps', 8.0) or 8.0), 0.5)
+    wall_last = [0.0]
+    wall_zoom = [None]      # 放大的是第几路；None = 网格
+    wall_state = [None]     # 当前画布的 shape；None = 窗口还没建
+
+    def _on_wall_click(event, x, y, _flags, _param):
+        # **回调里绝不能做重活也绝不能抛异常**：它跑在 cv2 的事件循环里，
+        # 卡住或者抛出去都会连累录制那一 tick。这里只改一个整数。
+        if event != cv2.EVENT_LBUTTONDOWN:
+            return
+        if wall_zoom[0] is not None:
+            wall_zoom[0] = None          # 已经放大了 → 点哪儿都还原
+            return
+        shape = wall_state[0]
+        if not shape:
+            return
+        n_live = len(cameras)
+        cols, rows = preview_wall.grid_shape(n_live)
+        if cols <= 0 or rows <= 0:
+            return
+        wall_zoom[0] = preview_wall.hit_test(x, y, n_live,
+                                             shape[1] // cols, shape[0] // rows)
+
     frame_interval = 1.0 / target_fps
     save_overlay = not args.no_save_overlay
     # 事件驱动同步依赖IMU来新样本时唤醒 _new_sample_event；没有任何IMU设备时
@@ -805,6 +836,7 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 next_tick += frame_interval
 
             tick_ts = time.time()
+            tick_mono = time.perf_counter()   # 墙的刷新节奏用单调钟，不受系统改时间影响
             tick_ts_ms = tick_ts * 1000.0
             frame_idx += 1
             elapsed = tick_ts - start_time
@@ -870,7 +902,7 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 cam_imu_info = ([x for x in imu_info if (cam.label, x[0].label) in pair_filter]
                                 if pair_filter else imu_info)
                 if prof: _t = time.perf_counter()
-                if not save_overlay and not preview.on:
+                if not save_overlay and (not preview.on or wall_on):
                     # 既不写进视频、也没有窗口看——画了直接扔。
                     # 实测 draw_overlay 只有 0.31ms/路（六路 1.9ms），省不了多少，
                     # 但纯浪费的活没有留着的理由。
@@ -893,7 +925,7 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 if prof:
                     prof['写给ffmpeg'] += time.perf_counter() - _t
                     _t = time.perf_counter()
-                if preview.on:
+                if preview.on and not wall_on:
                     try:
                         cv2.imshow(f'IMU(multicam) {cam.label}', display)
                     except cv2.error:
@@ -903,6 +935,32 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                             should_stop[0] = True
                 if prof:
                     prof['显示窗口'] += time.perf_counter() - _t
+
+            if wall_on and preview.on and (tick_mono - wall_last[0]) >= wall_period:
+                wall_last[0] = tick_mono
+                labels = []
+                for cam, cam_fps in zip(cameras, cam_fps_list):
+                    bits = [cam.label, f'{cam_fps:.0f}fps' if not cam.down else 'DOWN']
+                    for d, hz, _lag, missing, _row in (
+                            [x for x in imu_info if (cam.label, x[0].label) in pair_filter]
+                            if pair_filter else imu_info):
+                        name = d.display_name or d.label
+                        bits.append(f'{name} {"--" if missing else f"{hz:.0f}Hz"}')
+                    labels.append('  '.join(bits))
+                try:
+                    canvas = preview_wall.compose(
+                        frames, labels, tile_w=args.wall_width,
+                        down=[c.down for c in cameras], zoom=wall_zoom[0])
+                    if wall_state[0] is None:
+                        cv2.namedWindow(WALL_WIN, cv2.WINDOW_NORMAL)
+                        cv2.setMouseCallback(WALL_WIN, _on_wall_click)
+                    wall_state[0] = canvas.shape
+                    cv2.imshow(WALL_WIN, canvas)
+                except cv2.error:
+                    if not record_mode:
+                        print('cv2.imshow 不支持（可能是 headless 版本）。')
+                        read_failed = True
+                        should_stop[0] = True
 
             if read_failed:
                 break
@@ -917,6 +975,8 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                 break
 
             if windows_up and not preview.on:
+                wall_state[0] = None
+                wall_zoom[0] = None
                 try:
                     cv2.destroyAllWindows()
                     cv2.waitKey(1)  # 不再泵一次事件循环，窗口只是"被要求关闭"，不会真消失
@@ -1267,6 +1327,17 @@ def main():
                          '（12:00→13:00→14:00...），配合 --loop 就能一直按小时切文件。跟 --duration 是'
                          '二选一：加了这个参数 --duration 会被忽略；不加这个参数，--duration 的固定秒数'
                          '用法完全不受影响。')
+    ap.add_argument('--wall', action='store_true',
+                    help='监控墙：几路画面拼成一张大图、一个窗口看齐，点一下某一格放大、再点还原。\n'
+                         '比一路一个窗口便宜得多：一次 imshow（而不是 N 次）、先缩小再拼、'
+                         '按自己的节奏刷（见 --wall-fps）。**不影响录像**——录下来的分辨率、'
+                         '帧率、内容跟墙开不开没关系，墙只是另外看一眼。')
+    ap.add_argument('--wall-width', type=int, default=480, metavar='PX',
+                    help='监控墙每一格多宽，默认 480（高度按原比例算，不拉伸）。'
+                         '屏幕大就调大，帧率紧张就调小——像素搬运量按面积算。')
+    ap.add_argument('--wall-fps', type=float, default=8.0, metavar='N',
+                    help='监控墙每秒刷几次，默认 8。录制照旧 25fps，墙刷慢点人眼够用，'
+                         '省下来的都是录制的余量。')
     ap.add_argument('--no-preview', action='store_true',
                     help='启动时不开预览窗口（默认是开着的，方便先认一遍哪路摄像头对着哪个单间）。'
                          '6 路 720p 的 imshow 加 waitKey 现场实测吃掉每 tick 30 多毫秒'

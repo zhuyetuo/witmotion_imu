@@ -531,11 +531,35 @@ EXTRA_ARGS="$EXTRA_ARGS ${EXTRA_ARGS_APPEND:-}"
 #
 # 跑起来之后随时能在终端敲 p + 回车 把画面调出来看一眼，看完再敲一次关掉，
 # 所以"默认关"不等于"想看看不了"。
+# WALL：监控墙。几路画面拼成一张大图、一个窗口看齐，点一下某一格放大、再点还原。
+#   WALL=1 SITE=狗场2 ./record_multicam.sh
+#
+# 开了墙就等于要看画面，所以它自动把预览打开（不用再写 PREVIEW=1）；PREVIEW=1
+# 单独用还是老的「一路一个窗口」。
+#
+# 墙比一路一个窗口便宜得多：一次 imshow 而不是 N 次、先缩小到每格 480 宽再拼、
+# 默认只按 8fps 刷。但**它终究是在录制这条线程上画的**，要确认没有拖慢录制，
+# 加 --profile 看「显示窗口」那一项：
+#   WALL=1 SITE=狗场2 ./record_multicam.sh --profile
+case "$(echo "${WALL:-0}" | tr 'A-Z' 'a-z')" in
+    0|no|off|false|n)  _wall_on=0 ;;
+    1|yes|on|true|y)   _wall_on=1; EXTRA_ARGS="$EXTRA_ARGS --wall" ;;
+    *) echo "WALL 只认 0/1（或 on/off、yes/no），收到: ${WALL}"; exit 1 ;;
+esac
+
 case "$(echo "${PREVIEW:-0}" | tr 'A-Z' 'a-z')" in
-    0|no|off|false|n)  EXTRA_ARGS="$EXTRA_ARGS --no-preview"; _preview_say="关（默认；PREVIEW=1 起手就开）" ;;
+    0|no|off|false|n)
+        if [ "$_wall_on" = "1" ]; then
+            _preview_say="开（WALL=1 自动打开）"
+        else
+            EXTRA_ARGS="$EXTRA_ARGS --no-preview"; _preview_say="关（默认；PREVIEW=1 起手就开）"
+        fi ;;
     1|yes|on|true|y)   _preview_say="开（PREVIEW=1）" ;;
     *) echo "PREVIEW 只认 0/1（或 on/off、yes/no），收到: ${PREVIEW}"; exit 1 ;;
 esac
+if [ "$_wall_on" = "1" ]; then
+    echo "监控墙：开（一个窗口看齐所有画面，点一格放大、再点还原；WALL=0 关掉）"
+fi
 
 # ROTATE：把某几路画面转过来，空格分隔，比如 ROTATE="cam7:180"。
 # 天花板上倒装的那路要用——不转的话画面是反的，标注时判断方向更容易出错。
@@ -631,7 +655,13 @@ if [ -f "$LOCK" ] && [ "${FORCE:-0}" != "1" ]; then
 fi
 echo $$ > "$LOCK"
 echo "预览窗口：$_preview_say"
-echo "  想看画面：敲 p + 回车 调出来，看完再敲一次关掉（开着大概掉四成帧率）"
+# 「掉四成帧率」说的是一路一个窗口那套。监控墙便宜得多，这句话套上去会
+# 吓得人不敢开——照实说。
+if [ "$_wall_on" = "1" ]; then
+    echo "  想看画面：敲 p + 回车 调出来，看完再敲一次关掉（墙比一路一窗口轻得多，--profile 可以量）"
+else
+    echo "  想看画面：敲 p + 回车 调出来，看完再敲一次关掉（开着大概掉四成帧率；WALL=1 换成监控墙更省）"
+fi
 echo "  只想认摄像头、不录数据：先退出，改跑 ./debug_cameras.sh"
 trap 'rm -f "$LOCK"' EXIT
 
