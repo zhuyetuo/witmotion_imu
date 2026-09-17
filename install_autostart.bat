@@ -59,8 +59,16 @@ if not exist "%BASH%" (
 )
 
 if "%SITE_ARG%"=="" (
-    echo Usage: install_autostart.bat gouchang ^| yingpeng
+    echo Usage: install_autostart.bat ^<site-alias^>
     echo        install_autostart.bat /uninstall
+    echo.
+    REM List the aliases that actually exist, do not hardcode them here:
+    REM gouchang was split into gouchang1 / gouchang2 and this usage text
+    REM still said "gouchang | yingpeng", so the two new machines looked
+    REM unsupported. The alias check further down already scans the files;
+    REM the usage text should read from the same place.
+    echo Known site aliases:
+    "%BASH%" -lc "grep -h '^SITE_ALIAS=' sites/*.env | sed 's/SITE_ALIAS=/  /;s/\"//g'"
     pause
     exit /b 1
 )
