@@ -474,7 +474,7 @@ def _seconds_to_next_hour(now: datetime) -> float:
     return (next_hour - now).total_seconds()
 
 
-def parse_pairs(specs, n_cams, device_labels):
+def parse_pairs(specs, cam_labels, device_labels):
     """
     把 --pair camN:imuM 解析成 {(cam标签, imu标签)} 的集合。
     返回 (集合, 错误信息列表)；集合为空 = 不限制、全排列。
@@ -493,7 +493,12 @@ def parse_pairs(specs, n_cams, device_labels):
         pair_filter.add((c.strip().lower(), i.strip().lower()))
     if pair_filter and not errs:
         # 写错了要立刻报，别等录完一小时才发现一个配对文件都没生成
-        cams = {f'cam{n}' for n in range(1, n_cams + 1)}
+        # 用摄像头实际的 label，不是位置序号——加了 --camera-id 之后，
+        # 一台机器只开 4 路也可以叫 cam4..cam7（狗场拆成两台电脑之后就是这样）。
+        # 这里要是还按位置数，那 4 路会被当成 cam1..cam4，完全正确的
+        # --pair cam4:imu10 会被判成"配对不存在"，直接退出、根本录不了——
+        # 跟设备编号改成真号那次一模一样的错。
+        cams = set(cam_labels)
         # 用设备实际的 label，不是位置序号——加了 --imu-label 之后设备就叫 imu9 了
         imus = set(device_labels)
         bad = [f'{c}:{i}' for c, i in sorted(pair_filter) if c not in cams or i not in imus]
@@ -1156,10 +1161,14 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
     return should_stop[0]
 
 
-def run_probe(args, cam_indices: list[int], devices: list[ImuDevice], probe_seconds: float = 5.0):
+def run_probe(args, cam_indices: list[int], devices: list[ImuDevice], probe_seconds: float = 5.0,
+              cam_labels: list[str] | None = None):
     """探测每路摄像头能力 + 短暂连接所有 IMU 设备测量各自实际输出频率，不录制。"""
-    for i, cam_idx in enumerate(cam_indices, start=1):
-        print(f'── cam{i} (摄像头 {cam_idx}) ──')
+    # 探测打印的机位号要跟真正录的时候一致，否则拿 --probe 去核对"哪一路是哪个
+    # 房间"会得到一份跟实际录出来对不上的对照表
+    labels = cam_labels or [f'cam{i}' for i in range(1, len(cam_indices) + 1)]
+    for cam_label, cam_idx in zip(labels, cam_indices):
+        print(f'── {cam_label} (摄像头 {cam_idx}) ──')
         probe_camera(cam_idx, backend=args.backend, fourcc=args.fourcc)
 
     print(f'── IMU 设备能力探测（连接 {probe_seconds:.0f} 秒测量各设备实际频率）──')
@@ -1179,6 +1188,12 @@ def main():
     ap = argparse.ArgumentParser(description='多个摄像头 + 多个 IMU 设备同步采集')
     ap.add_argument('--camera', action='append', type=int, required=True,
                     help='摄像头编号，可重复传多个，例如 --camera 0 --camera 1')
+    ap.add_argument('--camera-id', action='append', type=int, default=[], metavar='N',
+                    help='这一路的真实机位号（文件名里的 camN）。顺序跟 --camera 对齐，'
+                         '要么全给要么都不给；不给就按位置排 cam1..camN（老行为）。\n'
+                         '一个场地拆到多台电脑上录的时候必须用它：第二台只开 4 路，'
+                         '但那 4 路是 4/5/6 号单间和 7 号公共区，按位置排会叫 cam1..cam4，'
+                         '跟第一台的 cam1 撞车——文件传到同一个 NAS 目录就再也分不出来了。')
     ap.add_argument('--imu', action='append', default=[],
                     help='IMU 设备，格式 类型=标识，可重复传多个。见 imu_camera_sync_multi.py 说明。'
                          '不传就是纯摄像头预览模式，不连IMU（组合CSV里就不会有对应的acc/gyro列）。')
@@ -1342,11 +1357,31 @@ def main():
         print(f'设备编号重复: {", ".join(sorted(dup))}')
         sys.exit(1)
 
+    # 摄像头的 label：默认还是按位置排 cam1..camN（老用法一个字不用改），
+    # 给了 --camera-id 就用真实机位号。
+    #
+    # 为什么要有这个：狗场从一台电脑拆成两台之后，第二台只开 4 路，但那 4 路是
+    # 4/5/6 号单间和 7 号公共区。按位置排的话它们会叫 cam1..cam4——而另一台
+    # 电脑的 cam1 是 1 号单间。同一个 camN 在两台机器上指不同的房间，文件传到
+    # NAS 上混在一起，谁也分不出来。**这跟设备编号按位置排那个坑是同一个**，
+    # 那个已经栽过一次了（imu2 里装的是 5 号设备的数据）。
+    if args.camera_id and len(args.camera_id) != len(args.camera):
+        # 只给一半更危险：没给的退回位置序号，一份录制里混着两套编号
+        print(f'--camera-id 给了 {len(args.camera_id)} 个，但有 {len(args.camera)} 路摄像头——'
+              f'要么全给，要么一个都不给')
+        sys.exit(1)
+    cam_ids = args.camera_id or list(range(1, len(args.camera) + 1))
+    if len(set(cam_ids)) != len(cam_ids):
+        print(f'--camera-id 有重复: {cam_ids}')
+        sys.exit(1)
+    cam_label_list = [f'cam{n}' for n in cam_ids]
+    cam_labels = set(cam_label_list)
+
     if args.probe:
-        run_probe(args, args.camera, devices)
+        run_probe(args, args.camera, devices, cam_labels=cam_label_list)
         return
 
-    pair_filter, errs = parse_pairs(args.pair, len(args.camera), [d.label for d in devices])
+    pair_filter, errs = parse_pairs(args.pair, cam_labels, [d.label for d in devices])
     if errs:
         for e in errs:
             print(e)
@@ -1379,7 +1414,6 @@ def main():
             sys.exit(1)
         rotate_of[label] = int(ang)
     # 写错摄像头号不能静默忽略——画面照样是反的，而人以为已经转过来了
-    cam_labels = {f'cam{i}' for i in range(1, len(args.camera) + 1)}
     bad = sorted(set(rotate_of) - cam_labels)
     if bad:
         print(f'--rotate 里这些摄像头不存在: {", ".join(bad)}；这次一共 {len(args.camera)} 路'
@@ -1387,14 +1421,14 @@ def main():
         sys.exit(1)
 
     cameras = []
-    for i, cam_idx in enumerate(args.camera, start=1):
+    for cam_idx, cam_label in zip(args.camera, cam_label_list):
         try:
-            cameras.append(CameraStream(cam_idx, f'cam{i}', args.width, args.height, args.cam_fps,
+            cameras.append(CameraStream(cam_idx, cam_label, args.width, args.height, args.cam_fps,
                                          backend=args.backend, fourcc=args.fourcc,
                                          autofocus=autofocus, auto_wb=auto_wb,
                                          capture_width=args.capture_width, capture_height=args.capture_height,
                                          show_settings_dialog=args.show_settings_dialog,
-                                         rotate=rotate_of.get(f'cam{i}', 0)))
+                                         rotate=rotate_of.get(cam_label, 0)))
         except RuntimeError as e:
             print(e)
             sys.exit(1)
