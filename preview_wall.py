@@ -108,21 +108,40 @@ LABEL_SCALE = 0.45
 LABEL_PAD = 4
 
 
-def label_tile(tile: np.ndarray, text: str, down: bool = False) -> np.ndarray:
+#: 标签每一段的颜色（BGR）：正常绿、有问题黄、当下就是断的红。
+#: 红的必须一眼看到——现场盯着墙就是为了看哪个项圈掉了
+SEG_COLORS = {
+    "ok": (180, 255, 180),
+    "warn": (60, 220, 255),
+    "bad": (60, 60, 255),
+}
+
+
+def label_tile(tile: np.ndarray, text, down: bool = False) -> np.ndarray:
     """在小图左上角贴一小块字。**就地画**，因为 tile 已经是 resize 出来的新
     数组，不是写进视频的那一帧。
+
+    text 可以是一整串，也可以是 [(段, 颜色键), ...]：一个项圈掉了要**只把它那
+    一段标红**，整行一起变色的话分不出是哪个。
 
     只盖住文字那么大一块，不横贯整行——整行的黑条会把画面顶上一截整个吃掉。
 
     **一律用 ASCII。** OpenCV 的 putText 只认 ASCII，中文画出来是一串问号；
     狗名本来就是拼音（xiaobai / keji），正好不用操心。
     """
-    text = _ascii(text).strip()
-    if not text:
+    if isinstance(text, str):
+        segs = [(text, "bad" if down else "ok")]
+    else:
+        segs = [(t, k) for t, k in text]
+    segs = [(_ascii(t).strip(), k) for t, k in segs]
+    segs = [(t, k) for t, k in segs if t]
+    if not segs:
         # 空标签 = 这一路的画面里本来就带着叠加信息了，别再画一遍
         return tile
     font, thick = cv2.FONT_HERSHEY_SIMPLEX, 1
-    (tw, th), base = cv2.getTextSize(text, font, LABEL_SCALE, thick)
+    gap = "  "
+    full = gap.join(t for t, _ in segs)
+    (tw, th), base = cv2.getTextSize(full, font, LABEL_SCALE, thick)
     x0, y0 = LABEL_PAD, LABEL_PAD
     x1, y1 = x0 + tw + LABEL_PAD * 2, y0 + th + base + LABEL_PAD
     x1, y1 = min(x1, tile.shape[1]), min(y1, tile.shape[0])
@@ -130,9 +149,13 @@ def label_tile(tile: np.ndarray, text: str, down: bool = False) -> np.ndarray:
     patch = tile[y0:y1, x0:x1]
     if patch.size:
         cv2.addWeighted(patch, 0.35, np.zeros_like(patch), 0.65, 0, patch)
-    cv2.putText(tile, text, (x0 + LABEL_PAD, y1 - LABEL_PAD - base // 2),
-                font, LABEL_SCALE,
-                (80, 80, 255) if down else (180, 255, 180), thick, cv2.LINE_AA)
+    x = x0 + LABEL_PAD
+    y = y1 - LABEL_PAD - base // 2
+    gap_w = cv2.getTextSize(gap, font, LABEL_SCALE, thick)[0][0]
+    for t, kind in segs:
+        cv2.putText(tile, t, (x, y), font, LABEL_SCALE, SEG_COLORS.get(kind, SEG_COLORS["ok"]),
+                    thick, cv2.LINE_AA)
+        x += cv2.getTextSize(t, font, LABEL_SCALE, thick)[0][0] + gap_w
     return tile
 
 
@@ -179,8 +202,9 @@ def compose(frames: list, labels: list[str], tile_w: int | None = None,
         cw, ch = grid_w * cols, grid_h * rows
         big_w = fit_tile_width(w, h, 1, cw, ch)
         tw2, th2 = tile_size(w, h, big_w)
-        tile = label_tile(cv2.resize(f, (tw2, th2), interpolation=cv2.INTER_AREA),
-                          f'{labels[zoom]}  [click to zoom out]', down[zoom])
+        lab = labels[zoom]
+        lab = (lab + "  [click to zoom out]") if isinstance(lab, str) else (list(lab) + [("[click to zoom out]", "ok")])
+        tile = label_tile(cv2.resize(f, (tw2, th2), interpolation=cv2.INTER_AREA), lab, down[zoom])
         canvas = np.zeros((ch, cw, 3), dtype=np.uint8)
         y0, x0 = (ch - th2) // 2, (cw - tw2) // 2
         canvas[y0:y0 + th2, x0:x0 + tw2] = tile
