@@ -2,8 +2,12 @@
 
 狗场从一台电脑（7 路摄像头 + 6 路蓝牙）拆成两台：
 
-    电脑1  1/2/3 号单间          3 路摄像头 + 6 路蓝牙（奇数 9..19）
-    电脑2  4/5/6 号单间 + 7 号公共区  4 路摄像头 + 6 路蓝牙（偶数 10..20）
+    电脑1  1/2/3 号单间          3 路摄像头 + 6 路蓝牙（9..14）
+    电脑2  4/5/6 号单间 + 7 号公共区  4 路摄像头 + 6 路蓝牙（15..20）
+
+**按房间分，不按单双号分**：每只狗两个项圈轮换充电（9/10 都是小白的），
+两个都归管着那间房的那台机器。按单双号分的话，一只狗今天有没有视频要看
+它今天戴的是单号还是双号项圈——两种分法的蓝牙/摄像头负载完全一样。
 
 要命的是**机位号**：电脑2 只开 4 路，但那 4 路是 cam4..cam7，不是 cam1..cam4。
 按位置排的话两台的 cam1 指不同房间，文件传到同一个 NAS 目录就再也分不出来——
@@ -141,6 +145,39 @@ def test_both_pcs_write_the_same_day_directory(fake_python):
     assert a == b == ["_gouchang"]
 
 
+def test_every_device_has_its_own_room_camera_on_the_same_pc(fake_python):
+    """**按房间分的全部意义就在这一条。**
+
+    每个设备都要在本机配到一路**房间**摄像头（不算公共区那路）。按单双号分的话
+    这条不成立：电脑1 会录着 15/17/19，而那三只的房间摄像头在电脑2 上——
+    于是一只狗今天有没有视频，取决于它今天戴的是单号还是双号项圈。
+
+    公共区（cam7）不算数：它看得到所有狗，但一路大场景画面代替不了单间的近景。
+    """
+    shared = {"cam7"}
+    for site in ("狗场1", "狗场2"):
+        args = cmdline(site, fake_python)
+        paired = {pr.split(":")[1] for pr in opt(args, "--pair")
+                  if pr.split(":")[0] not in shared}
+        assert paired == set(opt(args, "--imu-label")), \
+            f"{site} 这几个设备在本机没有房间摄像头: {set(opt(args, '--imu-label')) - paired}"
+
+
+def test_both_collars_of_a_dog_live_on_the_same_pc(fake_python):
+    """一只狗的两个轮换项圈必须在同一台机器上。
+
+    分到两台的话，换班那天这只狗的数据就跑到另一台去了，而那台没有它的
+    房间摄像头——正是按单双号分的老毛病。
+    """
+    for site in ("狗场1", "狗场2"):
+        args = cmdline(site, fake_python)
+        dogs = opt(args, "--dog-name")
+        assert len(dogs) == 6 and len(set(dogs)) == 3, \
+            f"{site} 应该是 3 只狗各 2 个项圈，实际: {dogs}"
+        for d in set(dogs):
+            assert dogs.count(d) == 2, f"{site} 的 {d} 只有 {dogs.count(d)} 个项圈在本机"
+
+
 # ── 每个设备都得有人归档 ──────────────────────────────────────────────────
 
 
@@ -152,8 +189,8 @@ def test_every_device_is_named_in_keep_pairs(fake_python):
     """
     import re
 
-    for site, ids in (("狗场1", {"9", "11", "13", "15", "17", "19"}),
-                      ("狗场2", {"10", "12", "14", "16", "18", "20"})):
+    for site, ids in (("狗场1", {"9", "10", "11", "12", "13", "14"}),
+                      ("狗场2", {"15", "16", "17", "18", "19", "20"})):
         text = open(os.path.join(REPO, "sites", f"{site}.env"), encoding="utf-8").read()
         keep = re.search(r'KEEP_PAIRS="([^"]*)"', text, re.S).group(1)
         named = {m.group(1) for m in re.finditer(r"imu(\d+)", keep)}
@@ -211,3 +248,25 @@ def test_the_old_site_still_defaults_to_cam7(tmp_path):
     """老的 sites/狗场.env 里没有 SHARED_CAM，读不到就保持默认 7。"""
     out = _cleanup("狗场", str(tmp_path))
     assert "公用机位" not in out, "老场地文件没写 SHARED_CAM，不该打印这行"
+
+
+def test_a_room_camera_is_uploaded_only_once():
+    """同一路房间画面不能在 KEEP_PAIRS 里点两次。
+
+    轮换的第二个项圈配的是**同一路摄像头的同一段画面**。点成完整配对的话，
+    本地是硬链接不占地方，但 robocopy 走 SMB 每份都是实打实的拷贝——
+    一小时 720p 约 500MB，六路就是每小时白传 1.5GB。所以第二个只点 `:csv`。
+
+    公共区那路（cam7）例外：老 sites/狗场.env 就是六个配对都点，
+    这里沿用，cleanup 会把它们收成不带 imu 号的那一份。
+    """
+    import collections
+    import re
+
+    for site in ("狗场1", "狗场2"):
+        text = open(os.path.join(REPO, "sites", f"{site}.env"), encoding="utf-8").read()
+        keep = re.search(r'KEEP_PAIRS="([^"]*)"', text, re.S).group(1)
+        vids = collections.Counter(
+            m.group(1) for m in re.finditer(r"cam(\d+)_imu\d+(?!:)(?=\s|$)", keep))
+        dup = {c: n for c, n in vids.items() if n > 1 and c != "7"}
+        assert not dup, f"{site} 这几路房间画面会重复传 NAS: {dup}"
