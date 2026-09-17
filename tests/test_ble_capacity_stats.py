@@ -17,7 +17,8 @@ import os
 import sys
 import types
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
 
 _fake = types.ModuleType("bleak")
 _fake.BleakClient = _fake.BleakScanner = object
@@ -97,3 +98,48 @@ def test_real_loss_still_fails_the_verdict(capsys):
     rc = c.report([d], 10.0, 50.0)
     out = capsys.readouterr().out
     assert rc != 0 and "Hz 偏低" in out
+
+
+# ── 第一版跑出来的三个假象 ────────────────────────────────────────────────
+
+
+def test_hz_uses_the_data_span_not_the_wall_clock_end():
+    """狗场两台跑出来 Hz 按连接顺序一路递减（33→21、40→28）——是分母的事：
+    结束时刻是收尾之后才记的，数据早停了。晚连的分母里收尾占比更大。"""
+    d = _dev([1.0 + i * 0.02 for i in range(500)])      # 1.0s 起、10 秒、50Hz
+    assert abs(d.hz(17.0) - 50.0) < 0.5, "把收尾时间算进分母了"
+    assert abs(d.hz() - 50.0) < 0.5
+
+
+def test_link_rate_reads_the_connection_interval():
+    """狗场1：每 59ms 推 2 个 → 上限 34Hz；狗场2：每 30ms 推 2 个 → 66Hz。
+    这个数 10 秒就准，而且直接指向适配器。"""
+    slow = _dev([t for k in range(170) for t in (k * 0.059, k * 0.059)])
+    fast = _dev([t for k in range(330) for t in (k * 0.030, k * 0.030)])
+    assert 32 < slow.link_rate_hz() < 36
+    assert 62 < fast.link_rate_hz() < 70
+
+
+def test_closing_disconnect_is_not_counted():
+    """测完自己断开也会触发 disconnected_callback。第一版把它算成「掉线 1 次」，
+    两台机器每个设备都"掉线 1 次"，全是自己断的。"""
+    src = open(os.path.join(REPO_ROOT, "check_ble_capacity.py"), encoding="utf-8").read()
+    body = src.split("def _on_disconnect(_client):", 1)[1].split("\n\n", 1)[0]
+    assert "st.closing" in body
+    assert "st.closing = True" in src.split("await asyncio.sleep(duration)", 1)[1][:200]
+
+
+def test_each_device_gets_the_full_duration_after_it_connects():
+    """六个错开连完要十几秒，跑 10 秒的话最后一台只剩两三秒数据。
+    每台连上之后各跑满 duration。"""
+    src = open(os.path.join(REPO_ROOT, "check_ble_capacity.py"), encoding="utf-8").read()
+    assert "t_end_wall" not in src, "还在用全局收工时刻"
+    assert "await asyncio.sleep(duration)" in src
+
+
+def test_monitor_divides_by_the_actual_interval():
+    """最后一段只有十几秒也除以 60，打出来「本分钟最低 4.3Hz」，纯属吓人。"""
+    src = open(os.path.join(REPO_ROOT, "check_ble_capacity.py"), encoding="utf-8").read()
+    body = src.split("async def monitor(", 1)[1].split("\ndef ", 1)[0]
+    assert "got / 60.0" not in body
+    assert "got / span" in body
