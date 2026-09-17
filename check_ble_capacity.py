@@ -76,21 +76,42 @@ class DevStat:
         self.connected_at: float | None = None
         self.disconnects = 0
         self.error: str | None = None
+        # 测完主动断开的那一下也会触发 disconnected_callback。第一版把它算成
+        # 「掉线 1 次」，于是狗场两台每个设备都"掉线 1 次"——全是自己断的
+        self.closing = False
 
     @property
     def ok(self) -> bool:
         return self.error is None and len(self.stamps) > 0
 
-    def hz(self, t_end: float) -> float:
-        """实测采样率 = 包数 / 从第一包到结束的时长。
+    def hz(self, t_end: float | None = None) -> float:
+        """实测采样率 = 包数 / 从第一包到**最后一包**的时长。
 
-        分母用「第一包到结束」而不是整场时长：设备是错开发起连接的，
-        用整场时长算会把还没连上的那段也算进分母，晚连的设备会被冤枉。
+        分母不用「结束时刻」：结束时刻是 stop_notify + 断开 + 收尾之后才记的，
+        而数据早在 stop_notify 那一刻就停了。第一版用它当分母，晚连上的设备
+        分母里掺进去的收尾时间占比更大——于是狗场两台跑出来 Hz 都按连接顺序
+        一路递减（33→21、40→28），看着像"越晚连的越差"，其实是分母的事。
+        t_end 参数留着只为兼容老调用，不再参与计算。
         """
         if len(self.stamps) < 2:
             return 0.0
-        span = t_end - self.stamps[0]
+        span = self.stamps[-1] - self.stamps[0]
         return len(self.stamps) / span if span > 0 else 0.0
+
+    def link_rate_hz(self) -> float:
+        """这条链路**最多**能送多快 = 每次推送的样本数 / 推送的平均间隔。
+
+        这是最能说明适配器差别的一个数，而且跑 10 秒就准：设备自己是 50Hz，
+        推送的节奏由适配器跟设备协商的连接间隔决定。狗场1 每 59ms 推 2 个 = 34Hz，
+        狗场2 每 30ms 推 2 个 = 66Hz（设备只有 50，所以够用）——链路本身的上限
+        就差了一倍，这是硬件/驱动的差别，不是软件能调的。
+        """
+        arrivals = sorted(set(self.stamps))
+        if len(arrivals) < 2:
+            return 0.0
+        mean_gap = (arrivals[-1] - arrivals[0]) / (len(arrivals) - 1)
+        batch = len(self.stamps) / len(arrivals)
+        return batch / mean_gap if mean_gap > 0 else 0.0
 
     def per_minute_hz(self, t_end: float) -> list[float]:
         """每分钟的 Hz。只看平均值会漏掉「跑着跑着开始崩」，而这正是无人值守最怕的。"""
@@ -195,12 +216,18 @@ async def scan_all(idents: list[str], timeout: float) -> dict[str, object]:
     return _resolve_all()
 
 
-async def run_one(ble_device, st: DevStat, t0: float, t_end_wall: float, delay: float):
-    """连一个设备，订阅 notify，记录每个包的到达时刻，一直跑到全局收工时刻。"""
+async def run_one(ble_device, st: DevStat, t0: float, duration: float, delay: float):
+    """连一个设备，订阅 notify，记录每个包的到达时刻，**连上之后**跑满 duration 秒。
+
+    第一版是所有设备跑到同一个全局收工时刻。可连接本身一个要一两秒，六个错开
+    连完已经过去十几秒——跑 10 秒的话最后连上的那台只剩两三秒数据，
+    统计出来全是噪声。每台各跑满 duration，横向比才公平。
+    """
     await asyncio.sleep(delay)
 
     def _on_disconnect(_client):
-        st.disconnects += 1
+        if not st.closing:          # 测完自己断的那一下不算
+            st.disconnects += 1
 
     buf = StreamingByteBuffer()
 
@@ -225,10 +252,8 @@ async def run_one(ble_device, st: DevStat, t0: float, t_end_wall: float, delay: 
                 return
             st.connected_at = time.monotonic() - t0
             print(f'  {st.label:<8} 已连接  +{st.connected_at:.1f}s')
-            # 所有设备跑到同一个收工时刻，Hz 才好横向比
-            remaining = t_end_wall - time.time()
-            if remaining > 0:
-                await asyncio.sleep(remaining)
+            await asyncio.sleep(duration)
+            st.closing = True
             try:
                 await client.stop_notify(subscribed)
             except Exception:
@@ -240,12 +265,19 @@ async def run_one(ble_device, st: DevStat, t0: float, t_end_wall: float, delay: 
         print(f'  {st.label:<8} ✗ {st.error}')
 
 
-async def monitor(stats: list[DevStat], t0: float, t_end_wall: float, target_hz: float):
-    """每分钟报一次当前状态。跑一小时的话，总不能等到最后才知道第 7 分钟就崩了。"""
+async def monitor(stats: list[DevStat], t0: float, target_hz: float, period: float = 60.0):
+    """每分钟报一次当前状态。跑一小时的话，总不能等到最后才知道第 7 分钟就崩了。
+    被 cancel 就退出（所有设备跑完之后 main_async 会 cancel 它）。"""
     last_counts = {st.label: 0 for st in stats}
-    while time.time() < t_end_wall - 1:
-        await asyncio.sleep(min(60.0, max(1.0, t_end_wall - time.time())))
-        elapsed = time.monotonic() - t0
+    last_t = time.monotonic()
+    while True:
+        await asyncio.sleep(period)
+        now = time.monotonic()
+        # 按这一段**实际**过去的秒数算，不是写死除以 60：第一版最后一段只有
+        # 十几秒也除以 60，打出来"本分钟最低 4.3Hz"，纯属吓人
+        span = max(now - last_t, 1e-6)
+        last_t = now
+        elapsed = now - t0
         live, rates = 0, []
         for st in stats:
             n = len(st.stamps)
@@ -253,7 +285,7 @@ async def monitor(stats: list[DevStat], t0: float, t_end_wall: float, target_hz:
             last_counts[st.label] = n
             if got > 0:
                 live += 1
-                rates.append((got / 60.0, st.label))
+                rates.append((got / span, st.label))
         if rates:
             lo_hz, lo_label = min(rates)
             flag = '' if lo_hz >= target_hz * 0.9 else '   ← 偏低'
@@ -278,8 +310,8 @@ def report(stats: list[DevStat], t_end: float, target_hz: float) -> int:
     print()
     print(line)
     print(_pad('设备', lw) + f'{"连上用时":>10}{"实测Hz":>9}{"最低分钟":>10}{"最长空档":>10}{"掉线":>6}'
-                             f'{"包间隔":>9}{">120ms":>8}{"每包":>6}  判定')
-    print('─' * (lw + 76))
+                             f'{"包间隔":>9}{">120ms":>8}{"每包":>6}{"链路上限":>10}  判定')
+    print('─' * (lw + 86))
 
     problems = []
     batching = []       # 攒批送包的：不算问题，但要单独说
@@ -322,7 +354,8 @@ def report(stats: list[DevStat], t_end: float, target_hz: float) -> int:
             batching.append(st.label)
         print(_pad(st.label, lw) + f'{st.connected_at or 0:>7.1f}s{hz:>9.1f}{lo:>10.1f}'
                                    f'{max_gap:>9.2f}s{st.disconnects:>6}'
-                                   f'{gs["median_gap"] * 1000:>7.0f}ms{gs["frac_over"]:>8.0%}{gs["batch"]:>6.1f}  {mark}')
+                                   f'{gs["median_gap"] * 1000:>7.0f}ms{gs["frac_over"]:>8.0%}{gs["batch"]:>6.1f}'
+                                   f'{st.link_rate_hz():>8.0f}Hz  {mark}')
 
     print(line)
     connected = sum(1 for st in stats if st.ok)
@@ -332,8 +365,11 @@ def report(stats: list[DevStat], t_end: float, target_hz: float) -> int:
     print('  包间隔  相邻两次蓝牙推送的间隔中位数。50Hz 逐包送是 20ms；几百 ms 就是适配器在攒批')
     print('  >120ms  间隔超过录制容忍窗口的比例——就是墙上会闪 MISSING 的比例')
     print('  每包    平均一次推送带几个样本。1~2 逐包送；10+ 攒批送')
-    print('  实测Hz 正常 + >120ms 高 = 攒批送包，数据没丢、只是到得不匀（换适配器/换 USB 口能治）')
-    print('  实测Hz 明显低于 50     = 真丢包，跟到得匀不匀无关')
+    print('  链路上限 每包样本数 ÷ 推送平均间隔 = 这条链路最多能送多快。设备自己是 50Hz，')
+    print('          推送节奏由适配器跟设备协商的连接间隔决定。这个数低于 50 就是适配器把')
+    print('          链路压慢了（每 59ms 推 2 个 = 34Hz），换适配器/驱动才有救；跑 10 秒就准')
+    print('  实测Hz 正常 + >120ms 高 = 攒批送包，数据没丢、只是到得不匀')
+    print('  实测Hz 明显低于 50     = 真丢包；再看链路上限是不是也低——是的话就是适配器')
     print()
 
     if batching:
@@ -387,13 +423,11 @@ async def main_async(args) -> int:
 
     stats = [DevStat(ident, lab) for ident, lab in zip(idents, labels) if ident in found]
     t0 = time.monotonic()
-    # 全局收工时刻：错开发起要花 stagger×N 秒，这段时间不该从测试时长里扣
-    t_end_wall = time.time() + args.stagger * len(stats) + args.duration
 
-    print(f'依次发起连接（间隔 {args.stagger:.1f} 秒）...')
-    tasks = [asyncio.ensure_future(run_one(found[st.ident], st, t0, t_end_wall, i * args.stagger))
+    print(f'依次发起连接（间隔 {args.stagger:.1f} 秒），每台连上之后各跑 {args.duration:.0f} 秒...')
+    tasks = [asyncio.ensure_future(run_one(found[st.ident], st, t0, args.duration, i * args.stagger))
              for i, st in enumerate(stats)]
-    mon = asyncio.ensure_future(monitor(stats, t0, t_end_wall, args.target_hz))
+    mon = asyncio.ensure_future(monitor(stats, t0, args.target_hz))
     print()
     try:
         await asyncio.gather(*tasks)
@@ -415,7 +449,7 @@ def main():
     ap.add_argument('--label', action='append', default=[], metavar='名称',
                     help='报表里显示的名字，跟 --imu 一一对应（比如 imu9）。不给就显示标识本身')
     ap.add_argument('--duration', type=float, default=600.0,
-                    help='测试时长（秒），默认 600。少于 600 只能测出连不连得上，测不出稳定性')
+                    help='每台设备连上之后测多久（秒），默认 600。链路上限和到包节奏 10 秒就准；稳定性要 600')
     ap.add_argument('--stagger', type=float, default=1.0,
                     help='错开发起连接的间隔（秒），默认 1。设 0 就是全部同时连')
     ap.add_argument('--scan-timeout', type=float, default=20.0, help='扫描超时（秒），默认 20')
