@@ -46,26 +46,47 @@ def grid_shape(n: int) -> tuple[int, int]:
 #: 猜不到屏幕分辨率时按这个算。现场两台都是 1080p。
 DEFAULT_SCREEN = (1920, 1080)
 
-#: 留给标题栏、任务栏和窗口边框的余量。铺满 100% 的话窗口会被挤得要拖动，
-#: 而这个窗口是"扫一眼"用的，不该还要人去摆弄它。
-SCREEN_MARGIN_W = 0.96
-SCREEN_MARGIN_H = 0.88
+#: screen_size() 已经把任务栏、标题栏、边框都减掉了，这里只留一点点余量。
+#: 以前是 0.96/0.88 的打折——那是在猜任务栏多高，猜错了下面就被挡住一截
+SCREEN_MARGIN_W = 0.99
+SCREEN_MARGIN_H = 0.99
 
 
 def screen_size() -> tuple[int, int]:
-    """屏幕多大。取不到就按 1080p 算——**宁可猜一个常见值，也不要退回一个
-    小到没法看的固定值**（480 一格的 2x2 才 960x540，在 1080p 上只占四分之一，
-    第一版就是这么小的）。"""
+    """**窗口的画面部分**最多能有多大 = 工作区（屏幕减任务栏）再减标题栏和边框。
+
+    第一版拿整个屏幕再打个八八折。现场狗场1 那台开出来还是下面被任务栏挡住
+    一截：任务栏高度、标题栏高度、显示缩放（125%/150%）每台机器都不一样，
+    打折是在猜。这里直接问 Windows：
+
+      SPI_GETWORKAREA          任务栏以外的区域（任务栏在哪一边都算得对）
+      SM_CYCAPTION/SM_CYFRAME  标题栏和边框各占多少
+
+    取不到（非 Windows）就按 1080p 减掉常见的任务栏+标题栏算。
+    """
     try:
         import ctypes
+        from ctypes import wintypes
         user32 = ctypes.windll.user32          # 只有 Windows 有
-        user32.SetProcessDPIAware()
-        w, h = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
-        if w > 0 and h > 0:
-            return (w, h)
+        try:
+            user32.SetProcessDPIAware()       # 之后拿到的都是物理像素，跟窗口一致
+        except Exception:  # noqa: BLE001
+            pass
+        rect = wintypes.RECT()
+        SPI_GETWORKAREA = 0x0030
+        if user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+            work_w, work_h = rect.right - rect.left, rect.bottom - rect.top
+        else:
+            work_w, work_h = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1) - 48
+        SM_CYCAPTION, SM_CYFRAME, SM_CXFRAME = 4, 33, 32
+        chrome_h = user32.GetSystemMetrics(SM_CYCAPTION) + 2 * user32.GetSystemMetrics(SM_CYFRAME)
+        chrome_w = 2 * user32.GetSystemMetrics(SM_CXFRAME)
+        if work_w > 0 and work_h > 0:
+            return (max(320, work_w - chrome_w - 8), max(180, work_h - chrome_h - 8))
     except Exception:  # noqa: BLE001 非 Windows、或者拿不到，都退回默认
         pass
-    return DEFAULT_SCREEN
+    # 1080p 减任务栏（~48）减标题栏+边框（~40）
+    return (DEFAULT_SCREEN[0] - 16, DEFAULT_SCREEN[1] - 48 - 40)
 
 
 def fit_tile_width(frame_w: int, frame_h: int, n: int,

@@ -430,3 +430,25 @@ def test_the_wall_window_opens_at_canvas_size_not_as_a_matchbox():
     block = code.split("if wall_state[0] is None:", 1)[1].split("cv2.setMouseCallback", 1)[0]
     assert "cv2.WINDOW_AUTOSIZE" in block
     assert "cv2.WINDOW_NORMAL" not in block
+
+
+def test_usable_area_is_smaller_than_the_physical_screen():
+    """screen_size() 给的是**画面部分**能有多大：屏幕减任务栏、标题栏、边框。
+    现场狗场1 那台窗口下面被任务栏挡住一截，就是因为第一版拿整屏打八八折在猜。"""
+    wd, h = w.screen_size()
+    assert wd <= 1920 - 8 and h <= 1080 - 80, (wd, h)   # 非 Windows 走默认值，也得留够
+
+
+def test_canvas_never_exceeds_the_usable_area():
+    for n in range(1, 8):
+        canvas = w.compose([frame(10)] * n, [f"c{i}" for i in range(n)])
+        uw, uh = w.screen_size()
+        assert canvas.shape[1] <= uw and canvas.shape[0] <= uh, (n, canvas.shape, (uw, uh))
+
+
+def test_screen_size_asks_windows_for_the_work_area_not_the_whole_screen():
+    """任务栏多高、标题栏多高、缩放多少，每台机器都不一样——直接问系统，不猜。"""
+    src = open(os.path.join(REPO, "preview_wall.py"), encoding="utf-8").read()
+    body = src.split("def screen_size(", 1)[1].split("\ndef ", 1)[0]
+    assert "SPI_GETWORKAREA" in body and "SystemParametersInfoW" in body
+    assert "SM_CYCAPTION" in body
