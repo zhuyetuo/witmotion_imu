@@ -59,22 +59,14 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-# setup_windows.sh 把 ffmpeg 装在仓库的 .tools/ffmpeg 下。它虽然也往用户 PATH
-# 里写了一条，但那条是"新开的命令行才生效"，而且仓库一挪位置就失效。这里自己
-# 找一次，录制就不依赖 PATH 配没配对——没有 ffmpeg 是完全录不了视频的，
-# 不值得为这个再排查一轮环境变量。
-if [ -x ".tools/ffmpeg/bin/ffmpeg.exe" ] && ! command -v ffmpeg >/dev/null 2>&1; then
-    export PATH="$(pwd)/.tools/ffmpeg/bin:$PATH"
-fi
-
-# 同理找 python。setup_windows.sh 装 miniconda 时用的是 /AddToPath=0（官方默认，
-# 也是对的：那份 conda 装在仓库里、跟着仓库走，写进用户 PATH 的话仓库一挪一删
-# PATH 就指向空目录，还会悄悄接管这台机器上所有命令行的 python）。
-# 代价是新开的终端里 python 不在 PATH 上，而下面就是直接调 python 的——
-# 所以这里自己找一次。
-if [ -x ".tools/miniconda3/python.exe" ] && ! command -v python >/dev/null 2>&1; then
-    export PATH="$(pwd)/.tools/miniconda3:$(pwd)/.tools/miniconda3/Scripts:$PATH"
-fi
+# 仓库自带的 python / ffmpeg 挂到 PATH 上（miniconda 是 /AddToPath=0 装的，
+# 新开的终端里 python 不在 PATH 上——见 activate_env.sh 里的说明）。
+#
+# 抽成单独一个文件是因为 check_ble_capacity.sh 那种要手敲 python 的小工具
+# 也需要同一件事，而之前只有这里做了，于是那些工具在装机之后照样报
+# "python: command not found"，看起来像环境没装好。
+# shellcheck disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/activate_env.sh"
 
 # 先读场地配置，再让环境变量覆盖它——命令行上临时改一项不用去动文件
 # 场地名：命令行没给就读 sites/.current。

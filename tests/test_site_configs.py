@@ -313,3 +313,44 @@ def test_the_per_pc_memo_matches_the_site_config():
         for line in md.splitlines():
             if line.strip().startswith(("SITE=", "PREVIEW=", "DRY_RUN=", "CAMS=")):
                 assert f"SITE={other}" not in line, f"{doc}.md 里有一条命令写着 {other}: {line}"
+
+
+# ── 仓库自带的 python 要找得到 ────────────────────────────────────────────
+
+
+def test_scripts_that_call_python_activate_the_repo_env():
+    """直接调 python 的脚本必须先 source activate_env.sh。
+
+    miniconda 是 /AddToPath=0 装的（故意的：那份 conda 跟着仓库走），所以新开的
+    Git Bash 里 `python` 是 command not found。漏了这一行的脚本，在装好环境的
+    机器上照样报"python: command not found"——现场看起来就是"conda 没装好"，
+    于是有人会去 Anaconda Prompt 里 pip install，装进另一份 python，白装。
+    """
+    import glob
+    import re
+
+    for path in sorted(glob.glob(os.path.join(REPO, "*.sh"))):
+        name = os.path.basename(path)
+        if name in ("run.sh", "setup_windows.sh", "activate_env.sh"):
+            continue          # run.sh 是用法示例不是可执行脚本；setup 自己装 python
+        src = open(path, encoding="utf-8").read()
+        code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+        if not re.search(r"(^|[\s;|(])python\s", code, re.M):
+            continue
+        assert "activate_env.sh" in code, \
+            f"{name} 直接调 python 却没有 source activate_env.sh"
+
+
+def test_the_memo_activates_before_running_python_by_hand():
+    """备忘里让人手敲的 python 命令，前面要带上 source 那一行。
+
+    不带的话现场照着敲就是 command not found，而这正是它要帮人避开的坑。
+    """
+    for doc in ("狗场电脑1", "狗场电脑2"):
+        md = open(os.path.join(REPO, "docs", f"{doc}.md"), encoding="utf-8").read()
+        for block in md.split("```bash")[1:]:
+            body = block.split("```")[0]
+            has_python = any(l.strip().startswith("python ") for l in body.splitlines())
+            if has_python:
+                assert "activate_env.sh" in body, \
+                    f"{doc}.md 里有一段手敲 python 的命令没先 source activate_env.sh:\n{body}"
