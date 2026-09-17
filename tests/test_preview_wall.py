@@ -339,8 +339,10 @@ def test_the_window_title_is_ascii():
 
 def test_the_zoom_hint_is_ascii():
     src = open(os.path.join(REPO, "preview_wall.py"), encoding="utf-8").read()
-    hint = src.split("labels[zoom]}", 1)[1].split("'", 1)[0]
-    hint.encode("ascii")
+    hints = [l for l in src.splitlines() if "click to zoom out" in l]
+    assert hints, "放大提示不见了"
+    for l in hints:
+        l.encode("ascii")           # 有中文就在这儿抛
 
 
 def test_an_empty_label_draws_nothing():
@@ -356,3 +358,66 @@ def test_the_wall_skips_labels_when_the_frame_already_has_the_overlay():
     code = _recorder_src()
     assert "if save_overlay:" in code.split("labels = []", 1)[1][:400], \
         "画面里已经有叠加信息时，墙还是又写了一遍"
+
+
+# ── 标签分段上色：掉了的项圈红字 MISSING ──────────────────────────────────
+
+
+def _red_pixels(tile):
+    """红字像素：R 高、G/B 低（BGR 排列）。"""
+    b, g, r = tile[..., 0], tile[..., 1], tile[..., 2]
+    return int(((r > 180) & (g < 120) & (b < 120)).sum())
+
+
+def test_a_missing_imu_is_drawn_in_red():
+    """现场盯着墙就是为了看哪个项圈掉了：掉了的那一段必须是红的、写着 MISSING，
+    不是一个不起眼的 `--`。"""
+    tile = np.full((200, 600, 3), 90, dtype=np.uint8)
+    w.label_tile(tile, [("cam1", "ok"), ("25fps", "ok"), ("xiaobai MISSING 12%", "bad")])
+    assert _red_pixels(tile) > 30, "MISSING 没画成红色"
+
+
+def test_only_the_missing_segment_is_red_not_the_whole_line():
+    """两个项圈一个掉了一个没掉：整行一起变红就分不出是哪个。"""
+    tile_mixed = np.full((200, 600, 3), 90, dtype=np.uint8)
+    w.label_tile(tile_mixed, [("cam1 25fps", "ok"), ("keji 50Hz", "ok"), ("keji MISSING 3%", "bad")])
+    tile_all_bad = np.full((200, 600, 3), 90, dtype=np.uint8)
+    w.label_tile(tile_all_bad, [("cam1 25fps", "bad"), ("keji 50Hz", "bad"), ("keji MISSING 3%", "bad")])
+    assert 0 < _red_pixels(tile_mixed) < _red_pixels(tile_all_bad) * 0.7
+
+
+def test_plain_string_labels_still_work():
+    """老调用（一整串文字）不受影响。"""
+    tile = np.full((200, 400, 3), 90, dtype=np.uint8)
+    w.label_tile(tile, "cam1 25fps xiaobai 50Hz")
+    assert (tile != 90).any() and _red_pixels(tile) == 0
+
+
+def test_segments_are_ascii_too():
+    a = np.zeros((200, 600, 3), dtype=np.uint8)
+    b = np.zeros((200, 600, 3), dtype=np.uint8)
+    w.label_tile(a, [("cam1", "ok"), ("小白 MISSING", "bad")])
+    w.label_tile(b, [("cam1", "ok"), ("?? MISSING", "bad")])
+    assert np.array_equal(a, b)
+
+
+def test_zoom_keeps_segment_colors():
+    frames = [frame(10), frame(20)]
+    z = w.compose(frames, [[("cam1", "ok"), ("xiaobai MISSING 5%", "bad")], "cam2 25fps"],
+                  zoom=0, screen=(1920, 1080))
+    assert _red_pixels(z) > 30
+
+
+def test_recorder_writes_missing_not_dashes():
+    """需求原话：missing 的时候要显示红色、显示 MISSING，不是 `--`。"""
+    code = _recorder_src()
+    block = code.split("labels = []", 1)[1].split("labels.append(segs)", 1)[0]
+    assert "MISSING" in block and "'bad'" in block
+    assert '"--"' not in block and "'--'" not in block
+
+
+def test_recorder_shows_a_rolling_miss_rate_not_just_the_instant():
+    """瞬时状态会闪（蓝牙一批一批送），只看它分不出"稳不稳"；要有最近几秒的比例。"""
+    code = _recorder_src()
+    assert "wall_miss = {d.label: _deque(maxlen=int(target_fps * 10))" in code
+    assert "wall_miss[d.label].append(1 if (missing or imu_row is None) else 0)" in code

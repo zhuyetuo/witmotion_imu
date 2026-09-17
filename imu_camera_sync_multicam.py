@@ -671,6 +671,12 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
     wall_last = [0.0]
     wall_zoom = [None]      # 放大的是第几路；None = 网格
     wall_state = [None]     # 当前画布的 shape；None = 窗口还没建
+    # 各设备最近 10 秒每个 tick 缺没缺（1 = 缺），给墙上算「miss N%」。
+    # 一个 tick 的"缺"= 那一帧前后 max_lag_ms（120ms）内没有 IMU 样本：狗场1 那个
+    # 蓝牙适配器是一批一批往上送的（一次几百毫秒），数据其实一条不少，但夹在
+    # 两批之间的 tick 就会闪一下 MISSING。所以光看瞬时会闪；比例才是"稳不稳"
+    from collections import deque as _deque
+    wall_miss = {d.label: _deque(maxlen=int(target_fps * 10)) for d in devices}
 
     def _on_wall_click(event, x, y, _flags, _param):
         # **回调里绝不能做重活也绝不能抛异常**：它跑在 cv2 的事件循环里，
@@ -872,6 +878,8 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
 
             for d in devices:
                 imu_row, lag_ms, missing = d.find_nearest(tick_ts_ms, max_lag_ms)
+                if wall_on:
+                    wall_miss[d.label].append(1 if (missing or imu_row is None) else 0)
                 hz = d.current_hz()
                 if missing or imu_row is None:
                     acc = ['', '', '']
@@ -947,13 +955,23 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                         # 视频的），墙再写一遍就是同样的数字并排出现两次
                         labels.append('')
                         continue
-                    bits = [cam.label, f'{cam_fps:.0f}fps' if not cam.down else 'DOWN']
+                    segs = [(cam.label, 'bad' if cam.down else 'ok'),
+                            ('DOWN' if cam.down else f'{cam_fps:.0f}fps', 'bad' if cam.down else 'ok')]
                     for d, hz, _lag, missing, _row in (
                             [x for x in imu_info if (cam.label, x[0].label) in pair_filter]
                             if pair_filter else imu_info):
                         name = d.display_name or d.label
-                        bits.append(f'{name} {"--" if missing else f"{hz:.0f}Hz"}')
-                    labels.append('  '.join(bits))
+                        # 「当下断了」红字 MISSING，一眼看得到；最近 10 秒里断过的比例
+                        # 跟在后面——只看瞬时会闪，只看比例又看不出此刻是不是断着
+                        recent = wall_miss.get(d.label)
+                        pct = (100.0 * sum(recent) / len(recent)) if recent else 0.0
+                        if missing:
+                            segs.append((f'{name} MISSING {pct:.0f}%', 'bad'))
+                        elif pct >= 1.0:
+                            segs.append((f'{name} {hz:.0f}Hz miss{pct:.0f}%', 'warn'))
+                        else:
+                            segs.append((f'{name} {hz:.0f}Hz', 'ok'))
+                    labels.append(segs)
                 try:
                     canvas = preview_wall.compose(
                         frames, labels, tile_w=args.wall_width or None,
