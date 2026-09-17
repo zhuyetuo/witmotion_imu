@@ -121,8 +121,9 @@ else
     echo "测全部 $n 个（当班 + 备用）"
     # 备用那组没配就只测到当班，容易让人以为「12 个没问题」，其实只测了 6 个
     if [ -n "${DEVICES:-}" ] && [ -z "${DEVICES_STANDBY:-}" ]; then
-        echo "⚠ 这个场地没有配 DEVICES_STANDBY，所以只测到当班这几个。"
-        echo "  要测「一只狗两个一起采」，先把备用那组填进 sites/${SITE}.env 的 DEVICES_STANDBY。"
+        # 狗场1/狗场2 这种按房间分的场地，一只狗的两个项圈都写在 DEVICES 里，
+        # 没有"备用组"这个概念——别吓人说"只测到当班这几个"
+        echo "  （这个场地没有 DEVICES_STANDBY：所有设备都在 DEVICES 表里，测的就是全部）"
     elif [ -z "${DEVICES:-}" ] && [ -z "${IMUS_STANDBY:-}" ]; then
         echo "⚠ 这个场地没有配 IMUS_STANDBY，所以只测到当班这几个。"
         echo "  要测「一只狗两个一起采」，先把备用那组填进 sites/${SITE}.env 的 IMUS_STANDBY。"
