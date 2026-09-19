@@ -73,6 +73,7 @@ from imu_camera_sync import (
 
 # 名字匹配规则跟各种小工具共用一份（见 ble_utils.match_by_name 的说明）
 from ble_utils import match_by_name
+import bt_adapter_reset
 
 _MAC_RE = re.compile(r'^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$')
 
@@ -151,11 +152,16 @@ class SharedScanner:
         self._restart_lock = asyncio.Lock()
         self._last_restart = 0.0
         self._last_match_err = None
+        # 重建扫描器救不回来的那种（整个适配器假死，一条广播都收不到）：复位适配器。
+        # 见 bt_adapter_reset.py。这里只数"连着几次重建之间一条广播都没有"
+        self.reset_policy = bt_adapter_reset.ResetPolicy()
+        self._reset_unavailable_said = False
 
     def _on_detect(self, device, _adv_data):
         now = time.monotonic()
         self._seen[device.address.upper()] = (device, now)
         self.last_detect = now
+        self.reset_policy.on_advert()
 
     async def start(self):
         self._scanner = BleakScanner(detection_callback=self._on_detect)
@@ -181,16 +187,44 @@ class SharedScanner:
     async def _restart_locked(self, reason: str):
         self._last_restart = time.monotonic()
         self.restarts += 1
+        self.reset_policy.on_restart()
         print(f'[扫描器] {reason}，重建 BLE 扫描器（第 {self.restarts} 次）')
         await self.stop()
         # 旧扫描器缓存的 BLEDevice 对象跟着作废，等新扫描器重新收到广播再用
         self._seen.clear()
+        # 连着几次重建都一条广播没有：扫描器重建治不了，是适配器本身假死了（狗场 2 那种
+        # "扫不到任何设备、只有重启电脑才好"）。禁用再启用适配器，等于拔插一次
+        if self.reset_policy.should_reset(time.monotonic()):
+            await self._reset_adapter()
         await asyncio.sleep(1.0)
         try:
             await self.start()
         except Exception as e:
             print(f'[扫描器] 重建失败: {e}，稍后再试')
             self._scanner = None
+
+    async def _reset_adapter(self):
+        n = self.reset_policy.restarts_without_advert
+        ok, why = bt_adapter_reset.available()
+        if not ok:
+            # 做不了就只说一次，别每 90 秒刷一行
+            if not self._reset_unavailable_said:
+                self._reset_unavailable_said = True
+                print(f'[蓝牙] 连着 {n} 次重建扫描器都一条广播没收到，像是适配器假死；'
+                      f'本来该自动复位适配器，但做不了：{why}。人工处理：设备管理器里把蓝牙适配器禁用再启用，或重启电脑')
+            return
+        self.reset_policy.did_reset(time.monotonic())
+        # 复位要一分钟上下（PowerShell 起来 + 禁用 + 启用），放线程里，别把事件循环
+        # 和别的设备协程一起挂住
+        try:
+            done, msg = await asyncio.to_thread(
+                bt_adapter_reset.reset_adapter, f'连着 {n} 次重建扫描器都一条广播没收到（第 {self.reset_policy.resets} 次复位）')
+        except Exception as e:  # noqa: BLE001 复位本身出错不能把扫描器线程带死
+            done, msg = False, str(e)
+        print(f'[蓝牙] 适配器复位{"完成" if done else "失败"}：{msg}')
+        if done:
+            # 驱动重新枚举要几秒，太早 start 扫描器会报"没有适配器"
+            await asyncio.sleep(5.0)
 
     def evict(self, address: str):
         """某个缓存的 BLEDevice 连接失败后把它踢掉：这个对象可能已经是陈旧的
