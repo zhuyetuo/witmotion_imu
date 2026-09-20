@@ -470,6 +470,25 @@ def _csv_has_data_rows(path: str) -> bool:
     return False
 
 
+# 还在后台收尾的上一段（见 _run_one_segment 的 finally）。退出前要等它们写完
+_finalize_threads: list = []
+
+
+def _finalize_guarded(fn, base: str) -> None:
+    """后台收尾出错不能让整个录制退出——打出来就行，这一段的配对文件可能不全，下一段照录。"""
+    try:
+        fn()
+    except Exception as e:  # noqa: BLE001
+        print(f'!! 收尾 {os.path.basename(base)} 出错: {type(e).__name__}: {e}')
+
+
+def wait_finalizers(timeout: float | None = None) -> None:
+    """等后台收尾都做完（退出前调）。"""
+    while _finalize_threads:
+        t = _finalize_threads.pop(0)
+        t.join(timeout)
+
+
 def _seconds_to_next_hour(now: datetime) -> float:
     next_hour = (now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
     return (next_hour - now).total_seconds()
@@ -643,6 +662,9 @@ def run_cameras(args, cameras: list[CameraStream], devices: list[ImuDevice], pai
             cv2.destroyAllWindows()
         except cv2.error:
             pass
+        if _finalize_threads:
+            print('等上一段的收尾（配对文件）写完…')
+            wait_finalizers()
 
 
 def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice],
@@ -1083,169 +1105,199 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
     finally:
         if stop_event.is_set():
             should_stop[0] = True
+        # 收尾（等六七路 ffmpeg 把缓冲刷完、逐路核对帧数、生成配对 CSV 和硬链接）要十几秒。
+        # 以前是同步做完才开下一段：整点之后那十几秒没人录，一天 24 段就丢十几分钟——
+        # 平台上"录了多久"一天最多 23 小时 45 分就是这么来的。
+        # 现在把这一段用到的句柄全摘下来交给后台线程收尾，主循环立刻开下一段。
+        # 摄像头读取线程一直在跑，不受影响；IMU 的 raw_writer 先摘掉（BLE 线程还在往里写），
+        # 下一段马上会挂新的。
+        writers = [(cam.label, cam.video_writer) for cam in cameras]
         for cam in cameras:
-            cam.close_writer()
-        if csv_file:
-            csv_file.close()
-        if meta_file:
-            meta_file.close()
+            cam.video_writer = None
+        cam_report = [(cam.label, cam.dropped_ticks, cam.down) for cam in cameras]
+        for cam in cameras:
+            cam.dropped_ticks = 0
+        raw_files = []
         for d in devices:
             d.set_raw_writer(None)
             if hasattr(d, '_raw_file'):
-                d._raw_file.close()
-        print(f'\n共采集 {frame_idx} 个同步tick  {elapsed:.1f}s')
-        for cam in cameras:
-            if cam.dropped_ticks:
-                state = '仍未连上' if cam.down else '已恢复'
-                print(f'  [{cam.label}] 本段有 {cam.dropped_ticks} 个 tick 没拿到真实帧（占位帧顶替，{state}）')
-            cam.dropped_ticks = 0
-        # 设备从头到尾一条数据都没来（没连上/一开始就断了），它的 raw.csv 就只有
-        # 一行表头。这种设备下面不要再生成配对文件——配对文件是最终要传上 NAS、
-        # 进标注平台的东西，一个只有表头的 CSV 到了那边就是个打开就报错、算不出
-        # 任何指标的空样本，还得有人回过头来一个个删。宁可这一路没有文件，
-        # 也不要一个看起来正常、其实是空的文件。
-        dead_devices = set()
-        if record_mode:
-            for d in devices:
-                if not _csv_has_data_rows(f'{base}_{d.label}_raw.csv'):
-                    dead_devices.add(d.label)
-            if dead_devices:
-                print()
-                print(f'!! 警告: {"、".join(sorted(dead_devices))} 整段没有收到任何数据'
-                      f'（raw.csv 只有表头）——不会为它生成配对文件。')
-                print('!! 检查一下设备有没有连上、是不是没电了，这一段这几路的数据是丢了的。')
+                raw_files.append(d._raw_file)
+                del d._raw_file
+        _tick_n, _elapsed, _t0, _t1 = frame_idx, elapsed, first_tick_ts_ms, last_tick_ts_ms
+        _csv_file, _meta_file = csv_file, meta_file
 
-        if record_mode:
-            print(f'已保存: {base}.csv  {base}_meta.csv')
-            for cam in cameras:
-                print(f'       {base}_{cam.label}_raw.mp4')
-            for d in devices:
-                print(f'       {base}_{d.label}_raw.csv')
-            print()
-            print('── 自动对齐校验（各摄像头帧数 vs 组合CSV行数）──')
-            # 每个 tick 都同时读了所有摄像头一帧，所以每路摄像头的视频帧数理论上
-            # 应该都严格等于 frame_idx（组合 CSV 的行数）；check_alignment.py 假设
-            # 视频和 CSV 同名成对，这里视频是 {base}_{label}.mp4、CSV 是共享的
-            # {base}.csv，不满足它的命名假设，所以直接读帧数自己比对，不复用它。
-            for cam in cameras:
-                video_path = f'{base}_{cam.label}_raw.mp4'
-                cap_check = cv2.VideoCapture(video_path)
-                actual_frames = int(cap_check.get(cv2.CAP_PROP_FRAME_COUNT))
-                cap_check.release()
-                if actual_frames == frame_idx:
-                    print(f'  [{cam.label}] ✔ 帧数与组合CSV行数一致: {actual_frames}')
-                else:
-                    print(f'  [{cam.label}] ✘ 帧数不一致: 视频 {actual_frames} 帧, CSV {frame_idx} 行')
-
-            print()
-            resampled_pairs = []  # (cam_label, device_label, resampled_base)
-            if args.no_resample:
-                # 不降采样，但原始数据也按 cam x imu 两两配对复制一份（内容还是
-                # 原始频率，不经过 resample_raw_imu），方便直接拖拽上传标注；
-                # 配对之外，单独的 {base}_camN_raw.mp4/{base}_imuM_raw.csv 原始
-                # 文件也保留，两种都留，不删。
-                #
-                # CSV这一份用 write_anchored_raw_csv() 而不是直接复制：对齐到
-                # first_tick_ts_ms/last_tick_ts_ms（视频第一帧/最后一帧的真实
-                # 时间戳），不改动/不插值任何真实数值。除了开头（IMU连接延迟
-                # 导致第一条真实数据比视频晚几百毫秒到1秒）、结尾（裁掉视频
-                # 结束之后的部分）这两处边界，中间只要检测到相邻两条真实样本
-                # 间隔超过1秒（信号断联，比如设备被压住），也会在缺口两头各
-                # 插一行数据。这些"没有真实信号"的行统一用6轴全0填充（而不是
-                # 留空）：6轴同时全为0在真实IMU数据里不可能出现（重力会让加速
-                # 度至少有读数），既能让Label Studio图表上显示为一段贴着0的
-                # 平线、不会被误当成真实变化去标注，也方便下游训练代码用一条
-                # "全0→判定缺失，跳过"的简单规则识别，无需处理空值/NaN。
-                print('── --no-resample：不降采样，原始数据按 cam x imu 配对（原始文件也保留，时间轴已对齐视频起止）──')
+        def _finalize():
+            frame_idx, elapsed, first_tick_ts_ms, last_tick_ts_ms = _tick_n, _elapsed, _t0, _t1
+            for _label, w in writers:
+                if w:
+                    w.close()
+            if _csv_file:
+                _csv_file.close()
+            if _meta_file:
+                _meta_file.close()
+            for f in raw_files:
+                f.close()
+            print(f'\n共采集 {frame_idx} 个同步tick  {elapsed:.1f}s')
+            for label, dropped, is_down in cam_report:
+                if dropped:
+                    state = '仍未连上' if is_down else '已恢复'
+                    print(f'  [{label}] 本段有 {dropped} 个 tick 没拿到真实帧（占位帧顶替，{state}）')
+            # 设备从头到尾一条数据都没来（没连上/一开始就断了），它的 raw.csv 就只有
+            # 一行表头。这种设备下面不要再生成配对文件——配对文件是最终要传上 NAS、
+            # 进标注平台的东西，一个只有表头的 CSV 到了那边就是个打开就报错、算不出
+            # 任何指标的空样本，还得有人回过头来一个个删。宁可这一路没有文件，
+            # 也不要一个看起来正常、其实是空的文件。
+            dead_devices = set()
+            if record_mode:
                 for d in devices:
-                    if d.label in dead_devices:
-                        print(f'  跳过 {d.label}：整段没有数据，不生成配对文件')
-                        continue
-                    want = _pairs_for(cameras, d, pair_filter)
-                    if not want:
-                        continue
-                    # 同一个设备配几路摄像头，裁出来的 CSV 内容是**完全一样**的
-                    # （同一份原始流水、同一个裁剪窗口），只是文件名不同。
-                    # 所以只裁一次，其余硬链接过去——加了公共那路之后每个设备要配
-                    # 两路，原来是实打实写两遍：一小时 50Hz 的流水十几 MB，六只狗
-                    # 一天下来白写好几 G。
-                    # 降采样那条路本来就是这么做的（第一路算、其余复制），
-                    # 只有这条 raw 路一直没跟上。
-                    first_base = f'{base}_{want[0].label}_{d.label}_raw'
-                    try:
-                        write_anchored_raw_csv(
-                            f'{base}_{d.label}_raw.csv', f'{first_base}.csv',
+                    if not _csv_has_data_rows(f'{base}_{d.label}_raw.csv'):
+                        dead_devices.add(d.label)
+                if dead_devices:
+                    print()
+                    print(f'!! 警告: {"、".join(sorted(dead_devices))} 整段没有收到任何数据'
+                          f'（raw.csv 只有表头）——不会为它生成配对文件。')
+                    print('!! 检查一下设备有没有连上、是不是没电了，这一段这几路的数据是丢了的。')
+
+            if record_mode:
+                print(f'已保存: {base}.csv  {base}_meta.csv')
+                for cam in cameras:
+                    print(f'       {base}_{cam.label}_raw.mp4')
+                for d in devices:
+                    print(f'       {base}_{d.label}_raw.csv')
+                print()
+                print('── 自动对齐校验（各摄像头帧数 vs 组合CSV行数）──')
+                # 每个 tick 都同时读了所有摄像头一帧，所以每路摄像头的视频帧数理论上
+                # 应该都严格等于 frame_idx（组合 CSV 的行数）；check_alignment.py 假设
+                # 视频和 CSV 同名成对，这里视频是 {base}_{label}.mp4、CSV 是共享的
+                # {base}.csv，不满足它的命名假设，所以直接读帧数自己比对，不复用它。
+                for cam in cameras:
+                    video_path = f'{base}_{cam.label}_raw.mp4'
+                    cap_check = cv2.VideoCapture(video_path)
+                    actual_frames = int(cap_check.get(cv2.CAP_PROP_FRAME_COUNT))
+                    cap_check.release()
+                    if actual_frames == frame_idx:
+                        print(f'  [{cam.label}] ✔ 帧数与组合CSV行数一致: {actual_frames}')
+                    else:
+                        print(f'  [{cam.label}] ✘ 帧数不一致: 视频 {actual_frames} 帧, CSV {frame_idx} 行')
+
+                print()
+                resampled_pairs = []  # (cam_label, device_label, resampled_base)
+                if args.no_resample:
+                    # 不降采样，但原始数据也按 cam x imu 两两配对复制一份（内容还是
+                    # 原始频率，不经过 resample_raw_imu），方便直接拖拽上传标注；
+                    # 配对之外，单独的 {base}_camN_raw.mp4/{base}_imuM_raw.csv 原始
+                    # 文件也保留，两种都留，不删。
+                    #
+                    # CSV这一份用 write_anchored_raw_csv() 而不是直接复制：对齐到
+                    # first_tick_ts_ms/last_tick_ts_ms（视频第一帧/最后一帧的真实
+                    # 时间戳），不改动/不插值任何真实数值。除了开头（IMU连接延迟
+                    # 导致第一条真实数据比视频晚几百毫秒到1秒）、结尾（裁掉视频
+                    # 结束之后的部分）这两处边界，中间只要检测到相邻两条真实样本
+                    # 间隔超过1秒（信号断联，比如设备被压住），也会在缺口两头各
+                    # 插一行数据。这些"没有真实信号"的行统一用6轴全0填充（而不是
+                    # 留空）：6轴同时全为0在真实IMU数据里不可能出现（重力会让加速
+                    # 度至少有读数），既能让Label Studio图表上显示为一段贴着0的
+                    # 平线、不会被误当成真实变化去标注，也方便下游训练代码用一条
+                    # "全0→判定缺失，跳过"的简单规则识别，无需处理空值/NaN。
+                    print('── --no-resample：不降采样，原始数据按 cam x imu 配对（原始文件也保留，时间轴已对齐视频起止）──')
+                    for d in devices:
+                        if d.label in dead_devices:
+                            print(f'  跳过 {d.label}：整段没有数据，不生成配对文件')
+                            continue
+                        want = _pairs_for(cameras, d, pair_filter)
+                        if not want:
+                            continue
+                        # 同一个设备配几路摄像头，裁出来的 CSV 内容是**完全一样**的
+                        # （同一份原始流水、同一个裁剪窗口），只是文件名不同。
+                        # 所以只裁一次，其余硬链接过去——加了公共那路之后每个设备要配
+                        # 两路，原来是实打实写两遍：一小时 50Hz 的流水十几 MB，六只狗
+                        # 一天下来白写好几 G。
+                        # 降采样那条路本来就是这么做的（第一路算、其余复制），
+                        # 只有这条 raw 路一直没跟上。
+                        first_base = f'{base}_{want[0].label}_{d.label}_raw'
+                        try:
+                            write_anchored_raw_csv(
+                                f'{base}_{d.label}_raw.csv', f'{first_base}.csv',
+                                t_start_ms=first_tick_ts_ms, t_end_ms=last_tick_ts_ms,
+                            )
+                        except OSError as e:
+                            print(f'生成 {first_base}.csv 失败: {e}')
+                            continue
+                        for cam in want:
+                            pair_base = f'{base}_{cam.label}_{d.label}_raw'
+                            try:
+                                _link_or_copy(f'{base}_{cam.label}_raw.mp4', f'{pair_base}.mp4')
+                                if pair_base != first_base:
+                                    _link_or_copy(f'{first_base}.csv', f'{pair_base}.csv')
+                                print(f'  {pair_base}.mp4 / .csv（{cam.label} 原始视频 + {d.label} 原始数据，'
+                                      f'文件名一致可直接拖拽配对）')
+                            except OSError as e:
+                                print(f'生成 {pair_base} 配对文件失败: {e}')
+                else:
+                    print('── 降采样（每路摄像头 x 每个设备各生成一对同名 mp4/csv）──')
+                    for d in devices:
+                        if not cameras:
+                            continue
+                        if d.label in dead_devices:
+                            print(f'  跳过 {d.label}：整段没有数据，不生成配对文件')
+                            continue
+                        # 每个设备只需要算一次降采样，但要让每一对 mp4/csv 文件名（去掉
+                        # 扩展名）完全一致才能直接拖进 Label Studio 配对，所以第一路摄像头
+                        # 直接把降采样结果写到配对文件名下，其余摄像头再从这份结果复制过去
+                        # （内容完全相同，只是复制成不同文件名，方便按文件名对拖拽上传）。
+                        want = _pairs_for(cameras, d, pair_filter)
+                        if not want:
+                            continue
+                        first_pair_base = f'{base}_{want[0].label}_{d.label}_resampled{args.resample_hz:g}hz'
+                        resample_raw_imu(
+                            f'{base}_{d.label}_raw.csv', f'{first_pair_base}.csv', args.resample_hz,
                             t_start_ms=first_tick_ts_ms, t_end_ms=last_tick_ts_ms,
                         )
-                    except OSError as e:
-                        print(f'生成 {first_base}.csv 失败: {e}')
-                        continue
-                    for cam in want:
-                        pair_base = f'{base}_{cam.label}_{d.label}_raw'
-                        try:
-                            _link_or_copy(f'{base}_{cam.label}_raw.mp4', f'{pair_base}.mp4')
-                            if pair_base != first_base:
-                                _link_or_copy(f'{first_base}.csv', f'{pair_base}.csv')
-                            print(f'  {pair_base}.mp4 / .csv（{cam.label} 原始视频 + {d.label} 原始数据，'
-                                  f'文件名一致可直接拖拽配对）')
-                        except OSError as e:
-                            print(f'生成 {pair_base} 配对文件失败: {e}')
-            else:
-                print('── 降采样（每路摄像头 x 每个设备各生成一对同名 mp4/csv）──')
-                for d in devices:
-                    if not cameras:
-                        continue
-                    if d.label in dead_devices:
-                        print(f'  跳过 {d.label}：整段没有数据，不生成配对文件')
-                        continue
-                    # 每个设备只需要算一次降采样，但要让每一对 mp4/csv 文件名（去掉
-                    # 扩展名）完全一致才能直接拖进 Label Studio 配对，所以第一路摄像头
-                    # 直接把降采样结果写到配对文件名下，其余摄像头再从这份结果复制过去
-                    # （内容完全相同，只是复制成不同文件名，方便按文件名对拖拽上传）。
-                    want = _pairs_for(cameras, d, pair_filter)
-                    if not want:
-                        continue
-                    first_pair_base = f'{base}_{want[0].label}_{d.label}_resampled{args.resample_hz:g}hz'
-                    resample_raw_imu(
-                        f'{base}_{d.label}_raw.csv', f'{first_pair_base}.csv', args.resample_hz,
-                        t_start_ms=first_tick_ts_ms, t_end_ms=last_tick_ts_ms,
-                    )
-                    for cam in want:
-                        pair_base = f'{base}_{cam.label}_{d.label}_resampled{args.resample_hz:g}hz'
-                        try:
-                            _link_or_copy(f'{base}_{cam.label}_raw.mp4', f'{pair_base}.mp4')
-                            if cam is not want[0]:
-                                _link_or_copy(f'{first_pair_base}.csv', f'{pair_base}.csv')
-                            print(f'  {pair_base}.mp4 / .csv（{cam.label} 视频 + {d.label} 降采样数据，'
-                                  f'文件名一致可直接拖拽配对）')
-                            resampled_pairs.append((cam.label, d.label, pair_base))
-                        except OSError as e:
-                            print(f'生成 {pair_base} 配对文件失败: {e}')
+                        for cam in want:
+                            pair_base = f'{base}_{cam.label}_{d.label}_resampled{args.resample_hz:g}hz'
+                            try:
+                                _link_or_copy(f'{base}_{cam.label}_raw.mp4', f'{pair_base}.mp4')
+                                if cam is not want[0]:
+                                    _link_or_copy(f'{first_pair_base}.csv', f'{pair_base}.csv')
+                                print(f'  {pair_base}.mp4 / .csv（{cam.label} 视频 + {d.label} 降采样数据，'
+                                      f'文件名一致可直接拖拽配对）')
+                                resampled_pairs.append((cam.label, d.label, pair_base))
+                            except OSError as e:
+                                print(f'生成 {pair_base} 配对文件失败: {e}')
 
-            if args.resample_only and not devices:
-                # 没有配置任何IMU设备（纯视频录制模式）时不会生成任何
-                # resampled配对文件——这里如果照常删除原始 {base}_camX.mp4/
-                # .csv，就是把唯一的视频/数据删掉、什么都不剩，所以这种情况
-                # 下 --resample-only 直接忽略，原始文件原样保留。
-                print(f'\n--resample-only: 没有配置IMU设备，没有resampled文件可替代，'
-                      f'已忽略 --resample-only，原始文件保留。')
-            elif args.resample_only:
-                for cam in cameras:
-                    try:
-                        os.remove(f'{base}_{cam.label}_raw.mp4')
-                    except OSError as e:
-                        print(f'删除 {base}_{cam.label}_raw.mp4 失败: {e}')
-                for p in (f'{base}.csv', f'{base}_meta.csv'):
-                    try:
-                        os.remove(p)
-                    except OSError as e:
-                        print(f'删除 {p} 失败: {e}')
-                for d in devices:
-                    try:
-                        os.remove(f'{base}_{d.label}_raw.csv')
-                    except OSError as e:
-                        print(f'删除 {base}_{d.label}_raw.csv 失败: {e}')
-                print(f'\n--resample-only: 已删除原始文件，只保留各摄像头x设备的 resampled mp4/csv')
+                if args.resample_only and not devices:
+                    # 没有配置任何IMU设备（纯视频录制模式）时不会生成任何
+                    # resampled配对文件——这里如果照常删除原始 {base}_camX.mp4/
+                    # .csv，就是把唯一的视频/数据删掉、什么都不剩，所以这种情况
+                    # 下 --resample-only 直接忽略，原始文件原样保留。
+                    print(f'\n--resample-only: 没有配置IMU设备，没有resampled文件可替代，'
+                          f'已忽略 --resample-only，原始文件保留。')
+                elif args.resample_only:
+                    for cam in cameras:
+                        try:
+                            os.remove(f'{base}_{cam.label}_raw.mp4')
+                        except OSError as e:
+                            print(f'删除 {base}_{cam.label}_raw.mp4 失败: {e}')
+                    for p in (f'{base}.csv', f'{base}_meta.csv'):
+                        try:
+                            os.remove(p)
+                        except OSError as e:
+                            print(f'删除 {p} 失败: {e}')
+                    for d in devices:
+                        try:
+                            os.remove(f'{base}_{d.label}_raw.csv')
+                        except OSError as e:
+                            print(f'删除 {base}_{d.label}_raw.csv 失败: {e}')
+                    print(f'\n--resample-only: 已删除原始文件，只保留各摄像头x设备的 resampled mp4/csv')
+
+        # 循环录制且还要继续：后台收尾，主循环马上开下一段。最后一段 / 出错退出：就地收尾，
+        # 免得进程退了文件还没写完
+        if record_mode and args.loop and not should_stop[0]:
+            t = threading.Thread(target=_finalize_guarded, args=(_finalize, base), name=f'finalize-{ts_tag}')
+            t.start()
+            _finalize_threads.append(t)
+        else:
+            _finalize_guarded(_finalize, base)
 
     return should_stop[0]
 
