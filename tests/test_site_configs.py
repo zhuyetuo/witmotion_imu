@@ -442,3 +442,50 @@ def test_yingpeng_records_all_eight_devices_by_default(fake_python):
 def test_yingpeng_can_still_record_only_the_on_duty_group(fake_python):
     labels = opt(cmdline("影棚", fake_python, ALL_DEVICES="0"), "--imu-label")
     assert len(labels) == 4
+
+
+# ── 佛山博朗旺狗场：6 间各一路，两台各 3 路 ────────────────────────────────
+
+BLW = ("佛山博朗旺_狗场1", "佛山博朗旺_狗场2")
+
+
+def test_bolangwang_cameras_and_devices_split_by_room(fake_python):
+    a, b = (cmdline(s, fake_python) for s in BLW)
+    assert opt(a, "--camera-id") == ["1", "2", "3"]
+    assert opt(b, "--camera-id") == ["4", "5", "6"]
+    assert set(opt(a, "--imu-label")) == {f"imu{n}" for n in range(9, 15)}
+    assert set(opt(b, "--imu-label")) == {f"imu{n}" for n in range(15, 21)}
+    for args in (a, b):
+        assert opt(args, "--rotate") == []
+        assert opt(args, "--day-suffix") == ["_bolangwang"]
+        have_cam = set(opt(args, "--camera-id"))
+        have_imu = set(opt(args, "--imu-label"))
+        pairs = opt(args, "--pair")
+        assert {p.split(":")[1] for p in pairs} == have_imu, "每个项圈都要配到本机的房间摄像头"
+        assert {p.split(":")[0].removeprefix("cam") for p in pairs} == have_cam
+        dogs = opt(args, "--dog-name")
+        assert len(set(dogs)) == 3 and all(dogs.count(d) == 2 for d in dogs)
+
+
+def test_bolangwang_aliases_and_cleanup(fake_python, tmp_path):
+    assert opt(cmdline("bolangwang2", fake_python), "--camera-id") == ["4", "5", "6"]
+    for s in BLW:
+        assert "公用机位 = （没有）" in _cleanup(s, str(tmp_path))
+
+
+def test_bolangwang_day_suffix_is_recognised_by_the_platform():
+    """imu_train 从目录名认场地：/(日期)_([a-z]+)/。后缀里带数字或下划线就认不出。"""
+    import re
+    assert re.search(r"/(\d{4}_\d{1,2}_\d{1,2})_([a-z]+)/", "/2026_10_26_bolangwang/").group(2) \
+        == "bolangwang"
+
+
+def test_bolangwang_keep_pairs_cover_every_device_and_camera():
+    import re
+    for site, ids, cams in ((BLW[0], range(9, 15), {"1", "2", "3"}),
+                            (BLW[1], range(15, 21), {"4", "5", "6"})):
+        text = open(os.path.join(REPO, "sites", f"{site}.env"), encoding="utf-8").read()
+        keep = re.search(r'KEEP_PAIRS="([^"]*)"', text, re.S).group(1)
+        assert {m.group(1) for m in re.finditer(r"imu(\d+)", keep)} == {str(n) for n in ids}
+        vids = [m.group(1) for m in re.finditer(r"cam(\d+)_imu\d+(?!:)(?=\s|$)", keep)]
+        assert sorted(vids) == sorted(cams), f"{site} 每路视频要正好传一次: {vids}"
