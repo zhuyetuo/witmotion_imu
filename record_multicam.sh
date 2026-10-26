@@ -196,6 +196,19 @@ if [ -z "$CAMS" ]; then
     echo "没有配置摄像头。用 SITE=... 或者传 CAMS=\"0 1 2\"。"
     exit 1
 fi
+# HQ=1：高质量模式，1080p@30fps 采集、1080p 写盘。
+#   HQ=1 WALL=1 SITE=bolangwang1 ./record_multicam.sh
+#
+# 盖过场地文件里的 CAPTURE_WIDTH/HEIGHT（狗场写的是 720p），不用为了换画质去改
+# 场地文件。体积约是 720p@25 的两倍半，D: 盘能撑的天数跟着缩；摄像头不支持
+# 1080p30 MJPG 的话画面上的实际帧率会低于 30，开录后看一眼监控墙上的 fps。
+case "$(echo "${HQ:-0}" | tr 'A-Z' 'a-z')" in
+    0|no|off|false|n)  ;;
+    1|yes|on|true|y)
+        WIDTH=1920; HEIGHT=1080; CAPTURE_WIDTH=1920; CAPTURE_HEIGHT=1080; CAM_FPS=30
+        echo "高质量模式：1920x1080 @ 30fps（HQ=1）" ;;
+    *) echo "HQ 只认 0/1（或 on/off、yes/no），收到: ${HQ}"; exit 1 ;;
+esac
 WIDTH="${WIDTH:-1280}"
 HEIGHT="${HEIGHT:-720}"
 CAPTURE_WIDTH="${CAPTURE_WIDTH:-1920}"
