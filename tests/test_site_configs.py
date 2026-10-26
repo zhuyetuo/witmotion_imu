@@ -489,3 +489,14 @@ def test_bolangwang_keep_pairs_cover_every_device_and_camera():
         assert {m.group(1) for m in re.finditer(r"imu(\d+)", keep)} == {str(n) for n in ids}
         vids = [m.group(1) for m in re.finditer(r"cam(\d+)_imu\d+(?!:)(?=\s|$)", keep)]
         assert sorted(vids) == sorted(cams), f"{site} 每路视频要正好传一次: {vids}"
+
+
+def test_hq_mode_records_1080p_at_30fps(fake_python):
+    """HQ=1 要盖过场地文件里写的 720p。"""
+    args = cmdline("bolangwang1", fake_python, HQ="1")
+    for flag, want in (("--width", "1920"), ("--height", "1080"),
+                       ("--capture-width", "1920"), ("--capture-height", "1080"),
+                       ("--cam-fps", "30")):
+        assert opt(args, flag) == [want], (flag, opt(args, flag))
+    plain = cmdline("bolangwang1", fake_python)
+    assert opt(plain, "--capture-width") == ["1280"] and opt(plain, "--cam-fps") == ["25"]
