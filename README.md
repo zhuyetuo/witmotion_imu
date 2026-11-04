@@ -16,6 +16,7 @@ IMU 数据采集工具集，支持 WitMotion WT901SDCL-BT50 和 HICC_PetCollar �
 | `hicc_ble_live.py` | HICC BLE 实时采集主程序，导入 `ble_utils` + `hicc_parse`；支持 `--hourly` 长期采集（整点自动切换CSV文件） |
 | `wit_drift_analysis.py` | WitMotion 时间漂移分析与线性补偿验证 |
 | `hicc_drift_analysis.py` | HICC 时间漂移分析与线性补偿验证 |
+| `petcollar_rate_monitor.py` | **自制项圈（行为识别固件，协议 v2.0）**：实时打印 0x08 原始采样，按设备时间戳评估采样率是不是 31.25 Hz、间隔稳不稳（标准差、±10% 占比、0 ms、大缝、长短交替）。独立文件，跟上面老的 HICC（v1.1）工具互不影响 |
 | `imu_camera_sync.py` | IMU + 摄像头同步采集（BLE 后台线程 + 主线程 OpenCV） |
 | `imu_camera_sync_multi.py` | 一个摄像头 + 多个 IMU 设备同步采集，功能已跟 `imu_camera_sync.py` 对齐（含 `--loop`/`--resample-hz`/`--probe`/`--resample-only`） |
 | `imu_camera_sync_multicam.py` | 多个摄像头 + 多个 IMU 设备同步采集，功能已跟 `imu_camera_sync.py`/`imu_camera_sync_multi.py` 对齐（含 `--loop`/`--resample-hz`/`--probe`/`--resample-only`），复用 `imu_camera_sync_multi.py` 的 BLE 部分 |
@@ -118,6 +119,21 @@ python wit_ble_live.py --name WTSDCL --hourly --quiet
 - **CSV 文件写入是空的（0 帧）**：如果设备芯片时钟从来没有被官方上位机校准过（year/month/day 字段无效），`chip_time` 会恒为 `None`。旧版本代码把"`chip_time` 无法解析"和"蓝牙重连导致的时钟复位坏帧"混在一起处理，导致这类设备的所有数据都被当坏帧丢弃，写入 0 帧。已修复：CSV 实际写入用的时间戳始终是 PC 系统时间，与 `chip_time` 是否有效无关；`chip_time` 现在只用于检测重连坏帧（值非单调递增才丢弃），为 `None` 时正常写入。
 
 **状态提示打印**：默认每 60 秒打印一次"已接收 N 帧"状态（`--status-interval` 可调整间隔）；采样率高（比如 100Hz）时按帧数打印会刷屏太快，改成按时间间隔打印。完全不想看到这类提示可以加 `--quiet`（连接、丢帧、整点切换等关键信息仍会打印）。
+
+### 自制项圈（行为识别固件，协议 v2.0）：采样率 / 间隔检查
+
+要 `PB_RAW_STREAM=1` 编的调试固件（TX2 上有 cmd 0x08 原始采样镜像）；正式固件不发 0x08。
+
+```bash
+python petcollar_rate_monitor.py                         # 按名字连，逐帧打印 + 每 5 秒一份评估
+python petcollar_rate_monitor.py --address EA:CB:30:12:30:25 --quiet   # 只看评估
+python petcollar_rate_monitor.py --every 10 --window 10  # 每 10 帧打一行，每 10 秒评估
+python petcollar_rate_monitor.py --duration 120 --csv rate_test.csv    # 跑 2 分钟，原始采样落盘
+```
+
+每份评估看两件事：**采样率**按设备时间戳算（(样本数-1)/首尾时长），期望 31.25 Hz（±2%）；
+**间隔均不均匀**看标准差、落在 32 ms±10% 的占比、0 ms 间隔、>1.5 倍的大缝、长短交替次数。
+「主机收到」那行只反映蓝牙送达（按连接间隔成批送，本来就一会挤一会空），不代表采样不匀。
 
 ### HICC_PetCollar
 
