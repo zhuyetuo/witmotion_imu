@@ -152,7 +152,19 @@ fi
 # （那种情况带的 Python 版本未知，要说清楚）
 get_conda_installer() {
     CONDA_DOWNLOADED=0
-    CONDA_EXE="$(find_local "$TOOLS/$CONDA_INSTALLER" "$CACHE/$CONDA_INSTALLER")" && return 0
+    CONDA_EXE="$(find_local "$TOOLS/$CONDA_INSTALLER" "$CACHE/$CONDA_INSTALLER")" || CONDA_EXE=""
+    if [ -n "$CONDA_EXE" ]; then
+        # 上次下到一半断了的包也叫这个名字（curl 边下边写）。拿半截的包去装，安装器一声不吭地退出，
+        # 脚本就干等 5 分钟再报「装完找不到 python.exe」——看着像卡住了。完整的包九十多 MB，
+        # 小于 60MB 的当成没下完，交给下面 curl -C - 接着下
+        local sz
+        sz=$(wc -c < "$CONDA_EXE" 2>/dev/null || echo 0)
+        if [ "$sz" -ge $((60 * 1024 * 1024)) ]; then
+            return 0
+        fi
+        echo "      $CONDA_EXE 只有 $((sz / 1024 / 1024))MB，是没下完的半截包，接着下..."
+        CONDA_EXE=""
+    fi
     local other
     other="$(find_local "$TOOLS/Miniconda3-*.exe" "$CACHE/Miniconda3-*.exe" "$CACHE/miniconda.exe")" || other=""
     echo "      本地没有 $CONDA_INSTALLER，从官方源下载..."
