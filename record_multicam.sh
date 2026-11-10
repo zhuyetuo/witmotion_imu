@@ -185,10 +185,11 @@ CAMS="${CAMS:-}"
 # 只有明确写了它才放行「没有设备」——不然漏配 DEVICES 也会安静地录一整天没有 IMU 的数据
 VIDEO_ONLY="${VIDEO_ONLY:-0}"
 if [ "$VIDEO_ONLY" = "1" ]; then
+    # 场地文件里写了项圈也照样只录像：临时不连蓝牙就是命令行前面加一个 VIDEO_ONLY=1，不用改文件
     if [ -n "$IMUS" ] || [ -n "$(echo ${DEVICES:-})" ]; then
-        echo "VIDEO_ONLY=1（只录像）但场地配置里又写了设备（DEVICES/IMUS），二选一。"
-        exit 1
+        echo "只录像模式（VIDEO_ONLY=1）：场地配置里的项圈这次不连"
     fi
+    IMUS=""; DEVICES=""; DEVICES_STANDBY=""; PAIRS=""; IMU_IDS=""; DOG_NAMES=""; ALL_DEVICES=0; USE_STANDBY=0
     echo "只录像模式（VIDEO_ONLY=1）：不连蓝牙，每路摄像头存一份 {base}_camN_raw.mp4"
 elif [ -z "$IMUS" ] && [ -z "${DEVICES:-}" ]; then
     echo "没有指定场地。用："
