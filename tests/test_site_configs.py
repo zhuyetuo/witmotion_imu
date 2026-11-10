@@ -500,3 +500,46 @@ def test_hq_mode_records_1080p_at_30fps(fake_python):
         assert opt(args, flag) == [want], (flag, opt(args, flag))
     plain = cmdline("bolangwang1", fake_python)
     assert opt(plain, "--capture-width") == ["1280"] and opt(plain, "--cam-fps") == ["25"]
+
+
+# ── 博朗旺电脑3（户外）：只录像 ──────────────────────────────────────────
+
+
+def test_outdoor_pc3_records_video_only(fake_python):
+    """户外那台只录像：不连任何项圈，3 路摄像头 cam7/8/9，跟电脑1/2 同一个日期目录。"""
+    args = cmdline("佛山博朗旺_狗场3", fake_python)
+    assert opt(args, "--imu") == [], "户外那台不该连蓝牙（会跟电脑1/2 抢项圈）"
+    assert opt(args, "--pair") == []
+    assert opt(args, "--camera-id") == ["7", "8", "9"]
+    assert opt(args, "--day-suffix") == ["_bolangwang"]
+    # 别名也认
+    assert opt(cmdline("bolangwang3", fake_python), "--camera-id") == ["7", "8", "9"]
+
+
+def test_outdoor_pc3_does_not_share_cameras_or_devices_with_pc1_pc2(fake_python):
+    c3 = set(opt(cmdline("佛山博朗旺_狗场3", fake_python), "--camera-id"))
+    for site in ("佛山博朗旺_狗场1", "佛山博朗旺_狗场2"):
+        assert not c3 & set(opt(cmdline(site, fake_python), "--camera-id")), f"跟 {site} 的机位号撞了"
+
+
+def test_outdoor_pc3_uploads_each_camera_video(tmp_path):
+    """归档：每路那份不带 imu 号的原始视频都要传，组合 CSV（没有 IMU 数据）不传。"""
+    env = open(os.path.join(REPO, "sites", "佛山博朗旺_狗场3.env"), encoding="utf-8").read()
+    import re
+    keep = re.search(r'KEEP_PAIRS="(.*?)"', env, re.S).group(1).split()
+    for cam in ("cam7", "cam8", "cam9"):
+        assert f"{cam}_raw:mp4" in keep
+
+
+def test_video_only_is_explicit(tmp_path, fake_python):
+    """没写 VIDEO_ONLY=1 又没有设备的场地照旧拒绝启动——不能因为加了只录像模式，
+    漏配 DEVICES 就安静地录一整天没有 IMU 的数据。"""
+    site = os.path.join(REPO, "sites", "_tmp_no_devices.env")
+    with open(site, "w", encoding="utf-8") as f:
+        f.write('CAMERAS="\n1 0\n"\nDEVICES=""\n')
+    try:
+        e = {**os.environ, "PATH": f"{fake_python}:{os.environ['PATH']}", "SITE": "_tmp_no_devices"}
+        out = subprocess.run(["bash", "record_multicam.sh"], cwd=REPO, env=e, capture_output=True, text=True, timeout=60)
+        assert out.returncode != 0
+    finally:
+        os.remove(site)

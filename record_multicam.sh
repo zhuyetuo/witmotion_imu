@@ -181,7 +181,16 @@ CAMS="${CAMS:-}"
 
 # 没有默认值可以退：这两项填错不会报错，只会安静地录一整天废数据，
 # 所以宁可不启动
-if [ -z "$IMUS" ] && [ -z "${DEVICES:-}" ]; then
+# VIDEO_ONLY=1：这台只录像、不接蓝牙（场地文件里写，比如户外那台 sites/佛山博朗旺_狗场3.env）。
+# 只有明确写了它才放行「没有设备」——不然漏配 DEVICES 也会安静地录一整天没有 IMU 的数据
+VIDEO_ONLY="${VIDEO_ONLY:-0}"
+if [ "$VIDEO_ONLY" = "1" ]; then
+    if [ -n "$IMUS" ] || [ -n "$(echo ${DEVICES:-})" ]; then
+        echo "VIDEO_ONLY=1（只录像）但场地配置里又写了设备（DEVICES/IMUS），二选一。"
+        exit 1
+    fi
+    echo "只录像模式（VIDEO_ONLY=1）：不连蓝牙，每路摄像头存一份 {base}_camN_raw.mp4"
+elif [ -z "$IMUS" ] && [ -z "${DEVICES:-}" ]; then
     echo "没有指定场地。用："
     echo "    SITE=狗场 ./record_multicam.sh"
     echo "  归档同理：SITE=狗场 ./daily_archive.sh"
@@ -496,7 +505,7 @@ done
 # 没给真实编号就只能按位置排 imu1、imu2…，而位置是会漂的：今天 imu1 是 WT9，
 # 明天顺序一改就成了别的设备，文件名却看不出任何差别。平台是按这个号认狗的，
 # 所以这不是小事，喊一声。
-if [ -z "$IMU_IDS" ]; then
+if [ -z "$IMU_IDS" ] && [ "$VIDEO_ONLY" != "1" ]; then
     echo "⚠ 没有设 DEVICES/IMU_IDS，文件名里的 imu 号将按 IMUS 的位置排（imu1、imu2…）。"
     echo "  位置序号会漂：调换 IMUS 的顺序，同一个 imu1 就变成另一台设备，而文件名看不出来；"
     echo "  两个场地也会撞（各自都从 imu1 开始）。平台按这个号认是哪只狗。"
