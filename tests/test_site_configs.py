@@ -513,6 +513,9 @@ def test_outdoor_pc3_records_video_only(fake_python):
     assert opt(args, "--camera-id") == ["7", "8", "9"]
     assert opt(args, "--day-suffix") == ["_bolangwang"]
     assert "--wall" in args, "户外那台默认开监控墙，一个窗口看齐 3 路"
+    assert opt(args, "--cam-fps") == ["30"], "户外那台默认高质量模式 1080p@30"
+    assert "1920" in opt(args, "--capture-width") + opt(args, "--width"), args
+    assert opt(cmdline("佛山博朗旺_狗场3", fake_python, HQ="0"), "--cam-fps") == ["25"], "HQ=0 要能临时退回 720p@25"
     assert "--wall" not in cmdline("佛山博朗旺_狗场3", fake_python, WALL="0"), "命令行 WALL=0 要能临时关掉"
     # 别名也认
     assert opt(cmdline("bolangwang3", fake_python), "--camera-id") == ["7", "8", "9"]
