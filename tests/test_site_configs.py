@@ -505,11 +505,16 @@ def test_hq_mode_records_1080p_at_30fps(fake_python):
 # ── 博朗旺电脑3（户外）：只录像 ──────────────────────────────────────────
 
 
-def test_outdoor_pc3_records_video_only(fake_python):
-    """户外那台只录像：不连任何项圈，3 路摄像头 cam7/8/9，跟电脑1/2 同一个日期目录。"""
+def test_outdoor_pc3_tries_all_12_collars(fake_python):
+    """户外那台：12 个项圈全写上（戴着的在户外、充电的在屋里，连得上哪个录哪个），
+    3 路摄像头 cam7/8/9，每个项圈只配 cam7（出一份 CSV），跟电脑1/2 同一个日期目录。"""
     args = cmdline("佛山博朗旺_狗场3", fake_python)
-    assert opt(args, "--imu") == [], "户外那台不该连蓝牙（会跟电脑1/2 抢项圈）"
-    assert opt(args, "--pair") == []
+    assert opt(args, "--imu-label") == [f"imu{i}" for i in range(9, 21)]
+    pc12 = set()
+    for site in ("佛山博朗旺_狗场1", "佛山博朗旺_狗场2"):
+        pc12 |= set(opt(cmdline(site, fake_python), "--imu"))
+    assert set(opt(args, "--imu")) == pc12, "12 个项圈的 MAC 要跟电脑1/2 的一模一样"
+    assert all(p.startswith("cam7:") for p in opt(args, "--pair")) and len(opt(args, "--pair")) == 12
     assert opt(args, "--camera-id") == ["7", "8", "9"]
     assert opt(args, "--day-suffix") == ["_bolangwang"]
     assert "--wall" in args, "户外那台默认开监控墙，一个窗口看齐 3 路"
@@ -524,13 +529,16 @@ def test_outdoor_pc3_does_not_share_cameras_or_devices_with_pc1_pc2(fake_python)
         assert not c3 & set(opt(cmdline(site, fake_python), "--camera-id")), f"跟 {site} 的机位号撞了"
 
 
-def test_outdoor_pc3_uploads_each_camera_video(tmp_path):
-    """归档：每路那份不带 imu 号的原始视频都要传，组合 CSV（没有 IMU 数据）不传。"""
+def test_outdoor_pc3_uploads_each_camera_video_once(tmp_path):
+    """归档：每路那份不带 imu 号的原始视频传一份；每个项圈只传 CSV（配对 mp4 是同一段视频，不重复传）。"""
     env = open(os.path.join(REPO, "sites", "佛山博朗旺_狗场3.env"), encoding="utf-8").read()
     import re
-    keep = re.search(r'KEEP_PAIRS="(.*?)"', env, re.S).group(1).split()
+    keep = re.search(r'KEEP_PAIRS="(.*?)"', env, re.S).group(1).replace("\\", " ").split()
     for cam in ("cam7", "cam8", "cam9"):
         assert f"{cam}_raw:mp4" in keep
+    for i in range(9, 21):
+        assert f"cam7_imu{i}:csv" in keep
+    assert not [k for k in keep if k.startswith("cam7_imu") and not k.endswith(":csv")], "配对 mp4 别传，NAS 上会多 N 份同一段视频"
 
 
 def test_video_only_is_explicit(tmp_path, fake_python):
