@@ -553,3 +553,10 @@ def test_video_only_is_explicit(tmp_path, fake_python):
         assert out.returncode != 0
     finally:
         os.remove(site)
+
+
+def test_outdoor_pc3_video_only_from_the_command_line(fake_python):
+    """户外那台临时只录像：命令行 VIDEO_ONLY=1，不用改场地文件——项圈一个都不连、没有配对，三路照录。"""
+    args = cmdline("佛山博朗旺_狗场3", fake_python, VIDEO_ONLY="1")
+    assert opt(args, "--imu") == [] and opt(args, "--pair") == []
+    assert opt(args, "--camera-id") == ["7", "8", "9"]
