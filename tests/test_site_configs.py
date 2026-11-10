@@ -512,6 +512,8 @@ def test_outdoor_pc3_records_video_only(fake_python):
     assert opt(args, "--pair") == []
     assert opt(args, "--camera-id") == ["7", "8", "9"]
     assert opt(args, "--day-suffix") == ["_bolangwang"]
+    assert "--wall" in args, "户外那台默认开监控墙，一个窗口看齐 3 路"
+    assert "--wall" not in cmdline("佛山博朗旺_狗场3", fake_python, WALL="0"), "命令行 WALL=0 要能临时关掉"
     # 别名也认
     assert opt(cmdline("bolangwang3", fake_python), "--camera-id") == ["7", "8", "9"]
 
