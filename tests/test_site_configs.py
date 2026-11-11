@@ -519,6 +519,7 @@ def test_outdoor_pc3_tries_all_12_collars(fake_python):
     assert opt(args, "--day-suffix") == ["_bolangwang"]
     assert "--wall" in args, "户外那台默认开监控墙，一个窗口看齐 3 路"
     assert "--wall" not in cmdline("佛山博朗旺_狗场3", fake_python, WALL="0"), "命令行 WALL=0 要能临时关掉"
+    assert "--no-precheck" in args, "户外那台连得上哪个录哪个，预检不能因为屋里的狗扫不到就拦住开录"
     # 别名也认
     assert opt(cmdline("bolangwang3", fake_python), "--camera-id") == ["7", "8"]
     # 命令行直接给 CAMERAS 以命令行为准
