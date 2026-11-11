@@ -161,22 +161,40 @@ def label_tile(tile: np.ndarray, text, down: bool = False) -> np.ndarray:
         return tile
     font, thick = cv2.FONT_HERSHEY_SIMPLEX, 1
     gap = "  "
-    full = gap.join(t for t, _ in segs)
-    (tw, th), base = cv2.getTextSize(full, font, LABEL_SCALE, thick)
+    gap_w = cv2.getTextSize(gap, font, LABEL_SCALE, thick)[0][0]
+    (_, th), base = cv2.getTextSize("Ag", font, LABEL_SCALE, thick)
+
+    # 一行写不下就换行。全采 12 个项圈时一行要写 12 段，挤成一行就伸出格子外、
+    # 被下一格切掉（现场：户外那台 12 个项圈全挤在一行）。按格子宽度把段落
+    # 分到几行里，**一段不拆开**——「dongde#9 50Hz」拆成两行就对不上号了。
+    max_w = max(1, tile.shape[1] - LABEL_PAD * 4)
+    lines: list[list] = [[]]
+    line_w = 0
+    for t, kind in segs:
+        sw = cv2.getTextSize(t, font, LABEL_SCALE, thick)[0][0]
+        need = sw if not lines[-1] else line_w + gap_w + sw
+        if lines[-1] and need > max_w:
+            lines.append([])
+            need = sw
+        lines[-1].append((t, kind, sw))
+        line_w = need
+    widths = [sum(sw for _, _, sw in ln) + gap_w * (len(ln) - 1) for ln in lines]
+    line_h = th + base + 2
+
     x0, y0 = LABEL_PAD, LABEL_PAD
-    x1, y1 = x0 + tw + LABEL_PAD * 2, y0 + th + base + LABEL_PAD
-    x1, y1 = min(x1, tile.shape[1]), min(y1, tile.shape[0])
+    x1 = min(x0 + max(widths) + LABEL_PAD * 2, tile.shape[1])
+    y1 = min(y0 + line_h * len(lines) + LABEL_PAD, tile.shape[0])
     # 半透明底：纯黑底把画面挡死，全透明又看不清字
     patch = tile[y0:y1, x0:x1]
     if patch.size:
         cv2.addWeighted(patch, 0.35, np.zeros_like(patch), 0.65, 0, patch)
-    x = x0 + LABEL_PAD
-    y = y1 - LABEL_PAD - base // 2
-    gap_w = cv2.getTextSize(gap, font, LABEL_SCALE, thick)[0][0]
-    for t, kind in segs:
-        cv2.putText(tile, t, (x, y), font, LABEL_SCALE, SEG_COLORS.get(kind, SEG_COLORS["ok"]),
-                    thick, cv2.LINE_AA)
-        x += cv2.getTextSize(t, font, LABEL_SCALE, thick)[0][0] + gap_w
+    for i, ln in enumerate(lines):
+        x = x0 + LABEL_PAD
+        y = y0 + LABEL_PAD // 2 + th + i * line_h
+        for t, kind, sw in ln:
+            cv2.putText(tile, t, (x, y), font, LABEL_SCALE, SEG_COLORS.get(kind, SEG_COLORS["ok"]),
+                        thick, cv2.LINE_AA)
+            x += sw + gap_w
     return tile
 
 
