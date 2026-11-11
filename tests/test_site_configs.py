@@ -515,16 +515,18 @@ def test_outdoor_pc3_tries_all_12_collars(fake_python):
         pc12 |= set(opt(cmdline(site, fake_python), "--imu"))
     assert set(opt(args, "--imu")) == pc12, "12 个项圈的 MAC 要跟电脑1/2 的一模一样"
     assert all(p.startswith("cam7:") for p in opt(args, "--pair")) and len(opt(args, "--pair")) == 12
-    assert opt(args, "--camera-id") == ["7", "8", "9"]
+    assert opt(args, "--camera-id") == ["7", "8"], "连项圈录只开 2 路（CAMERAS_IMU）"
     assert opt(args, "--day-suffix") == ["_bolangwang"]
     assert "--wall" in args, "户外那台默认开监控墙，一个窗口看齐 3 路"
     assert "--wall" not in cmdline("佛山博朗旺_狗场3", fake_python, WALL="0"), "命令行 WALL=0 要能临时关掉"
     # 别名也认
-    assert opt(cmdline("bolangwang3", fake_python), "--camera-id") == ["7", "8", "9"]
+    assert opt(cmdline("bolangwang3", fake_python), "--camera-id") == ["7", "8"]
+    # 命令行直接给 CAMERAS 以命令行为准
+    assert opt(cmdline("bolangwang3", fake_python, CAMERAS="7 0\n8 1\n9 2"), "--camera-id") == ["7", "8", "9"]
 
 
 def test_outdoor_pc3_does_not_share_cameras_or_devices_with_pc1_pc2(fake_python):
-    c3 = set(opt(cmdline("佛山博朗旺_狗场3", fake_python), "--camera-id"))
+    c3 = set(opt(cmdline("佛山博朗旺_狗场3", fake_python, VIDEO_ONLY="1"), "--camera-id"))
     for site in ("佛山博朗旺_狗场1", "佛山博朗旺_狗场2"):
         assert not c3 & set(opt(cmdline(site, fake_python), "--camera-id")), f"跟 {site} 的机位号撞了"
 

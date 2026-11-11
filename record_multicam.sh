@@ -156,6 +156,12 @@ DOG_NAMES="${DOG_NAMES:-}"
 #
 # 写成一张表而不是 CAMS + CAM_IDS 两个平行数组，理由跟 DEVICES 一样：平行数组
 # 错位一格不报错，只是从此以后 4 号房间的画面存成了 5 号。
+# CAMERAS_IMU：连项圈的时候只开这几路（户外那台：录项圈 2 路、只录像 3 路）。
+# 只录像（VIDEO_ONLY=1）照旧用 CAMERAS；命令行直接给了 CAMERAS 的话以命令行为准。
+if [ "${VIDEO_ONLY:-0}" != "1" ] && [ -n "$(echo ${CAMERAS_IMU:-})" ] && [ -z "${_saved_CAMERAS:-}" ]; then
+    CAMERAS="$CAMERAS_IMU"
+    echo "连项圈模式：摄像头只开 CAMERAS_IMU 这几路（只录像 VIDEO_ONLY=1 才开全部）"
+fi
 CAM_IDS=""
 if [ -n "${CAMERAS:-}" ]; then
     CAMS=""
