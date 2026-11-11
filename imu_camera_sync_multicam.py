@@ -982,7 +982,10 @@ def _run_one_segment(args, cameras: list[CameraStream], devices: list[ImuDevice]
                     for d, hz, _lag, missing, _row in (
                             [x for x in imu_info if (cam.label, x[0].label) in pair_filter]
                             if pair_filter else imu_info):
+                        # 一只狗两个项圈轮换时名字一样，带上编号才分得清是哪个（dongde#9 / dongde#10）
                         name = d.display_name or d.label
+                        if d.display_name and d.display_name != d.label:
+                            name = f'{d.display_name}#{d.label.removeprefix("imu")}'
                         # 「当下断了」红字 MISSING，一眼看得到；最近 10 秒里断过的比例
                         # 跟在后面——只看瞬时会闪，只看比例又看不出此刻是不是断着
                         recent = wall_miss.get(d.label)

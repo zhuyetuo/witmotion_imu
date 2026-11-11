@@ -452,3 +452,25 @@ def test_screen_size_asks_windows_for_the_work_area_not_the_whole_screen():
     body = src.split("def screen_size(", 1)[1].split("\ndef ", 1)[0]
     assert "SPI_GETWORKAREA" in body and "SystemParametersInfoW" in body
     assert "SM_CYCAPTION" in body
+
+
+def test_many_collars_wrap_onto_more_lines_instead_of_running_off_the_tile():
+    """户外那台 12 个项圈：一行写不下要换行，不能伸出格子外被切掉。"""
+    segs = [("cam7", "ok"), ("25fps", "ok")] + [(f"quanshi_mu7m#{i} 50Hz", "ok") for i in range(9, 21)]
+    tile = np.full((540, 960, 3), 120, dtype=np.uint8)
+    w.label_tile(tile, segs)
+    ys, xs = np.where((tile != 120).any(axis=2))
+    assert xs.max() < 960 - w.LABEL_PAD, "字伸到格子边上了，应该换行"
+    one = np.full((540, 960, 3), 120, dtype=np.uint8)
+    w.label_tile(one, "cam7 25fps")
+    h1 = np.where((one != 120).any(axis=2))[0].max()
+    assert ys.max() > h1 * 2, "12 个项圈应该排成好几行"
+    assert ys.max() < 540 * 0.4, "换行后也只占左上角一块"
+
+
+def test_a_short_label_stays_on_one_line():
+    a = np.full((540, 960, 3), 120, dtype=np.uint8)
+    b = np.full((540, 960, 3), 120, dtype=np.uint8)
+    w.label_tile(a, [("cam1", "ok"), ("26fps", "ok")])
+    w.label_tile(b, "cam1")
+    assert abs(np.where((a != 120).any(axis=2))[0].max() - np.where((b != 120).any(axis=2))[0].max()) <= 2
