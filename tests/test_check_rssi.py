@@ -52,3 +52,13 @@ def test_site_brings_all_collars(fake_python, site, n):
     args = out.stdout.splitlines()
     assert args.count("--imu") == n and args.count("--label") == n
     assert "check_rssi.py" in args and args[-2:] == ["--note", "户外"]
+
+
+def test_all_lists_unknown_devices_wt_first():
+    a = r.RssiStat("AA:BB:CC:DD:EE:01", "imu9/dongde")
+    o1, o2 = r.RssiStat("11:22:33:44:55:66", "phone"), r.RssiStat("11:22:33:44:55:77", "WT9")
+    o1.add(100.0, -50)
+    o2.add(100.0, -80)
+    out = r.render([a], 101.0, 90.0, "", {"11:22:33:44:55:66": ("phone", o1), "11:22:33:44:55:77": ("WT9", o2)})
+    tail = out.split("--all")[1]
+    assert tail.index("WT9") < tail.index("phone"), "WT 开头的项圈排前面"

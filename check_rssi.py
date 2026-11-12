@@ -106,7 +106,7 @@ def strength_word(rssi: float | None) -> str:
     return '快够不着'
 
 
-def render(stats: list[RssiStat], now: float, t0: float, note: str) -> str:
+def render(stats: list[RssiStat], now: float, t0: float, note: str, others: dict | None = None) -> str:
     lines = [f'蓝牙信号强度  {datetime.now():%H:%M:%S}  已跑 {now - t0:.0f}s'
              + (f'  [{note}]' if note else '') + '   （Ctrl-C 停止并出汇总）',
              f'{"项圈":<24s}{"10秒中位":>8s}  {"最近":>5s}  {"多久前":>6s}  强弱',
@@ -123,6 +123,19 @@ def render(stats: list[RssiStat], now: float, t0: float, note: str) -> str:
             lines.append(f'{st.label:<24s}{"--":>8s}  {"--":>5s}  {ago:5.0f}s  这 {WINDOW_SEC:.0f} 秒没听到（刚被连上？走远了？）')
         else:
             lines.append(f'{st.label:<24s}{med:8.0f}  {last:5d}  {ago:5.0f}s  {bar(med):<20s} {strength_word(med)}')
+    if others is not None:
+        lines += ['', '配置里没有、但听到了的设备（--all）：名字、MAC、10 秒中位：']
+        rows = []
+        for mac, (name, st) in others.items():
+            st.trim(now)
+            med = st.recent_median()
+            if med is not None:
+                rows.append((med, name, mac))
+        rows.sort(key=lambda x: (not x[1].upper().startswith('WT'), -x[0]))
+        for med, name, mac in rows[:20]:
+            lines.append(f'  {(name or "(无名称)"):<22s}{mac}  {med:5.0f}  {strength_word(med)}')
+        if not rows:
+            lines.append('  （一个都没有）')
     return '\n'.join(lines)
 
 
@@ -139,7 +152,8 @@ def final_report(stats: list[RssiStat], note: str) -> str:
     return '\n'.join(lines)
 
 
-async def run(stats: list[RssiStat], duration: float, refresh: float, note: str, log_path: str):
+async def run(stats: list[RssiStat], duration: float, refresh: float, note: str, log_path: str,
+              show_all: bool = False):
     from bleak import BleakScanner
 
     by_mac = {st.mac: st for st in stats}
@@ -151,9 +165,21 @@ async def run(stats: list[RssiStat], duration: float, refresh: float, note: str,
         w.writerow(['time', 'host', 'label', 'mac', 'rssi', 'note'])
     host = socket.gethostname()
 
+    others: dict | None = {} if show_all else None
+
     def _cb(dev, adv):
-        st = by_mac.get((dev.address or '').upper())
+        mac = (dev.address or '').upper()
+        st = by_mac.get(mac)
         if st is None:
+            # --all：配置里没有的也记下来——项圈换过、MAC 跟配置对不上的话，
+            # 它会出现在这里（WT 开头的名字排最前）
+            if others is not None and getattr(adv, 'rssi', None) is not None:
+                name = adv.local_name or dev.name or ''
+                if mac not in others:
+                    others[mac] = (name, RssiStat(mac, name))
+                elif name and not others[mac][0]:
+                    others[mac] = (name, others[mac][1])
+                others[mac][1].add(time.monotonic(), int(adv.rssi))
             return
         rssi = getattr(adv, 'rssi', None)
         if rssi is None:
@@ -169,7 +195,7 @@ async def run(stats: list[RssiStat], duration: float, refresh: float, note: str,
             await asyncio.sleep(refresh)
             f.flush()
             # 清屏重画（Git Bash / Windows Terminal 都认 ANSI）
-            sys.stdout.write('\033[H\033[J' + render(stats, time.monotonic(), t0, note) + '\n')
+            sys.stdout.write('\033[H\033[J' + render(stats, time.monotonic(), t0, note, others) + '\n')
             sys.stdout.flush()
     finally:
         await scanner.stop()
@@ -183,6 +209,8 @@ def main():
     ap.add_argument('--duration', type=float, default=0, help='跑多少秒，默认 0 = 一直跑到 Ctrl-C')
     ap.add_argument('--refresh', type=float, default=1.0, help='屏幕刷新间隔（秒），默认 1')
     ap.add_argument('--note', default='', help='这次测量的标记，比如 户外 / 室内 / 狗在1号单间，会写进 CSV')
+    ap.add_argument('--all', action='store_true',
+                    help='配置里没有的设备也列出来（WT 开头的排前面）：查项圈是不是换过、MAC 对不上')
     ap.add_argument('--log-dir', default='logs/rssi', help='CSV 存哪，默认 logs/rssi')
     args = ap.parse_args()
 
@@ -202,7 +230,7 @@ def main():
     print(f'记录写到 {log_path}')
     print('提醒：项圈被任何一台电脑连着就不广播，测不到。三台的录制先停掉再测。')
     try:
-        asyncio.run(run(stats, args.duration, args.refresh, args.note, log_path))
+        asyncio.run(run(stats, args.duration, args.refresh, args.note, log_path, show_all=args.all))
     except KeyboardInterrupt:
         pass
     print(final_report(stats, args.note))
