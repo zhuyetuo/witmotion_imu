@@ -347,7 +347,7 @@ sync_stage() {
         # 限速：边录边传时别把这台机器的网卡 / 磁盘 / CPU 吃满（见 ARCHIVE_MT / ARCHIVE_IPG 的说明）
         local ipg=()
         [ "${ARCHIVE_IPG:-0}" -gt 0 ] 2>/dev/null && ipg=("/IPG:${ARCHIVE_IPG}")
-        robocopy "$src_win" "$dst_win" /E /Z /R:2 /W:5 "/MT:${ARCHIVE_MT:-8}" "${ipg[@]}" /NP /NDL /XF ".*" >>"$LOG_FILE" 2>&1
+        robocopy "$src_win" "$dst_win" /E /Z /R:2 /W:5 "/MT:${ARCHIVE_MT:-8}" ${ipg[@]+"${ipg[@]}"} /NP /NDL /XF ".*" >>"$LOG_FILE" 2>&1
         rc=$?
         # robocopy 退出码不按常规来：0-7 都算成功（1=有文件被复制），>=8 才是真出错
         if [ "$rc" -ge 8 ]; then
