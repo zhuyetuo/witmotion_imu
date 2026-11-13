@@ -521,7 +521,6 @@ def test_outdoor_pc3_tries_all_12_collars(fake_python):
     assert "--wall" in args, "户外那台默认开监控墙，一个窗口看齐 3 路"
     assert "--wall" not in cmdline("佛山博朗旺_狗场3", fake_python, WALL="0", VIDEO_ONLY="0"), "命令行 WALL=0 要能临时关掉"
     assert opt(args, "--rotate") == [], "连项圈只开 cam7，cam8 的旋转自动去掉"
-    assert opt(cmdline("bolangwang3", fake_python, VIDEO_ONLY="1"), "--rotate") == ["cam8:180"]
     assert "--no-precheck" in args, "户外那台连得上哪个录哪个，预检不能因为屋里的狗扫不到就拦住开录"
     # 别名也认
     assert opt(cmdline("bolangwang3", fake_python, VIDEO_ONLY="0"), "--camera-id") == ["7"]
@@ -533,7 +532,7 @@ def test_outdoor_pc3_默认只录像_不跟电脑1_2抢项圈(fake_python):
     """一个项圈同一时间只能被一台连上：户外那台也连的话，电脑1/2 的「12 个全采」就缺了它抢走的那几个。"""
     args = cmdline("佛山博朗旺_狗场3", fake_python)
     assert opt(args, "--imu") == [] and opt(args, "--pair") == []
-    assert opt(args, "--camera-id") == ["7", "8", "9"]
+    assert opt(args, "--camera-id") == ["7"], "现场只接了 1 路（cam7）"
 
 
 def test_outdoor_pc3_does_not_share_cameras_or_devices_with_pc1_pc2(fake_python):
@@ -572,7 +571,7 @@ def test_outdoor_pc3_video_only_from_the_command_line(fake_python):
     """户外那台临时只录像：命令行 VIDEO_ONLY=1，不用改场地文件——项圈一个都不连、没有配对，三路照录。"""
     args = cmdline("佛山博朗旺_狗场3", fake_python, VIDEO_ONLY="1")
     assert opt(args, "--imu") == [] and opt(args, "--pair") == []
-    assert opt(args, "--camera-id") == ["7", "8", "9"]
+    assert opt(args, "--camera-id") == ["7"]
 
 
 def test_博朗旺三台都不自动复位蓝牙适配器(fake_python):
