@@ -565,3 +565,13 @@ def test_outdoor_pc3_video_only_from_the_command_line(fake_python):
     args = cmdline("佛山博朗旺_狗场3", fake_python, VIDEO_ONLY="1")
     assert opt(args, "--imu") == [] and opt(args, "--pair") == []
     assert opt(args, "--camera-id") == ["7", "8", "9"]
+
+
+def test_博朗旺三台都不自动复位蓝牙适配器(fake_python):
+    """远程管理：复位到一半出岔子适配器就停在「已禁用」，人不在现场恢复不了。"""
+    for site in ("佛山博朗旺_狗场1", "佛山博朗旺_狗场2", "佛山博朗旺_狗场3"):
+        e = {**os.environ, "SITE": site}
+        e.pop("BT_RESET", None)
+        out = subprocess.run(["bash", "-c", f'. "sites/{site}.env"; echo "$BT_RESET"'], cwd=REPO, env=e,
+                             capture_output=True, text=True)
+        assert out.stdout.strip() == "0", site
