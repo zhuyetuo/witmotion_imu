@@ -142,6 +142,14 @@ class SharedScanner:
     # 重建之间的最小间隔：四个设备的重连协程可能同时判定"该重建了"，不加冷却
     # 会连着重建好几次，每次都清空 _seen、动一次蓝牙栈，反而更难恢复。
     RESTART_COOLDOWN_S = 30.0
+    # 有设备正连着、数据在进（适配器明明活着）时，看门狗重建的间隔往上翻倍到这个上限。
+    #
+    # 2026-11-12 狗场1/2 每天死机 / WiFi 蓝牙一起掉：每只狗两个项圈，充电那组拿去了别的屋子，
+    # 整天收不到；戴着那组连着、连着的设备不广播——于是「有设备掉线 + 90 秒没广播」一直成立，
+    # 每 90 秒重建一次扫描器，每 3 次没广播又「判定适配器假死」去禁用 / 启用适配器（15 分钟一次，
+    # 一天近百次）。笔记本那种 WiFi + 蓝牙一体的网卡经不起这么拔插，WiFi 跟着掉、整机卡死。
+    # 数据在进就说明适配器是好的：不复位，重建也越来越稀（掉线那几个反正有半小时一次的重扫 + 盲连兜着）
+    STALL_MAX_S = 1800.0
 
     def __init__(self, max_age_s: float = 15.0):
         self.max_age_s = max_age_s
@@ -156,12 +164,24 @@ class SharedScanner:
         # 见 bt_adapter_reset.py。这里只数"连着几次重建之间一条广播都没有"
         self.reset_policy = bt_adapter_reset.ResetPolicy()
         self._reset_unavailable_said = False
+        # 适配器活着的证据：有设备连着在收数据（watchdog 里设成看设备的函数）
+        self._alive_fn = None
+        # 看门狗当前的重建门槛（见 STALL_MAX_S）
+        self.stall_limit_s = self.STALL_RESTART_S
+
+    def data_flowing(self) -> bool:
+        """有设备连着（在收数据）= 适配器是好的。"""
+        try:
+            return bool(self._alive_fn and self._alive_fn())
+        except Exception:  # noqa: BLE001
+            return False
 
     def _on_detect(self, device, _adv_data):
         now = time.monotonic()
         self._seen[device.address.upper()] = (device, now)
         self.last_detect = now
         self.reset_policy.on_advert()
+        self.stall_limit_s = self.STALL_RESTART_S
 
     async def start(self):
         self._scanner = BleakScanner(detection_callback=self._on_detect)
@@ -187,7 +207,11 @@ class SharedScanner:
     async def _restart_locked(self, reason: str):
         self._last_restart = time.monotonic()
         self.restarts += 1
-        self.reset_policy.on_restart()
+        if self.data_flowing():
+            # 有设备在收数据：适配器好好的，收不到广播只是因为掉线那几个真不在。不往「该复位了」上数
+            self.reset_policy.on_advert()
+        else:
+            self.reset_policy.on_restart()
         print(f'[扫描器] {reason}，重建 BLE 扫描器（第 {self.restarts} 次）')
         await self.stop()
         # 旧扫描器缓存的 BLEDevice 对象跟着作废，等新扫描器重新收到广播再用
@@ -235,14 +259,23 @@ class SharedScanner:
         """每 5 秒检查一次扫描器还活着没（见 STALL_RESTART_S 的说明）。只在有设备
         掉线等着重连时才管——全部设备都连着的时候它们不再广播，收不到广播是
         正常的，不用重建。"""
+        wit = [d for d in devices if d.dev_type == 'wit']
+        self._alive_fn = lambda: any(getattr(d, 'connected', False) for d in wit)
         while not stop_event.is_set():
             await asyncio.sleep(5.0)
-            if all(getattr(d, 'connected', False) for d in devices if d.dev_type == 'wit'):
+            if all(getattr(d, 'connected', False) for d in wit):
                 self.last_detect = time.monotonic()
+                self.stall_limit_s = self.STALL_RESTART_S
                 continue
             stalled = time.monotonic() - self.last_detect
-            if self._scanner is None or stalled >= self.STALL_RESTART_S:
-                await self.restart(f'有设备掉线等重连，但 {stalled:.0f}s 没收到任何 BLE 广播' if self._scanner else '扫描器不存在')
+            if self._scanner is None or stalled >= self.stall_limit_s:
+                flowing = self.data_flowing()
+                await self.restart(f'有设备掉线等重连，但 {stalled:.0f}s 没收到任何 BLE 广播'
+                                   + ('（别的设备数据照常在进，适配器没事，下次隔久一点）' if flowing else '')
+                                   if self._scanner else '扫描器不存在')
+                self.last_detect = time.monotonic()
+                self.stall_limit_s = next_stall_limit(self.stall_limit_s, flowing,
+                                                      self.STALL_RESTART_S, self.STALL_MAX_S)
 
     def find(self, name_filter: str = None, address: str = None):
         """在最近 max_age_s 秒内见过的广播里找匹配的设备，找不到返回 None
@@ -398,6 +431,16 @@ def next_rescan_after(current_s: float, rescans_done: int, scanner_alive: bool,
     if rescans_done >= max_rescans and scanner_alive:
         return max(doubled, floor_s)
     return doubled
+
+
+def next_stall_limit(current_s: float, data_flowing: bool, base_s: float, max_s: float) -> float:
+    """看门狗重建之后，下一次要等多久没广播才再重建。
+
+    有设备在收数据（适配器活着）：翻倍，最多 max_s——掉线那几个多半真不在（充电座在别的屋子），
+    每 90 秒折腾一次蓝牙栈只会把适配器折腾坏。一个设备都没连着：保持 base_s，扫描器可能真死了。"""
+    if not data_flowing:
+        return base_s
+    return min(max_s, max(base_s, current_s) * 2)
 
 
 def should_blind_connect(since_blind_s: float, have_mac: bool,
