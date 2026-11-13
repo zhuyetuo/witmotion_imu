@@ -137,6 +137,12 @@ class _FakeScanner:
     def evict(self, address):
         pass
 
+    # 别的设备有没有在收数据（见 SharedScanner.data_flowing）。默认 False = 跟以前的行为一样
+    flowing = False
+
+    def data_flowing(self):
+        return self.flowing
+
 
 def _run_device_for(device, scanner, *, fake_clock, stop_after_s):
     """把 run_wit_device 跑到假时钟走完 stop_after_s 为止。
@@ -308,3 +314,23 @@ def test_fails_keep_counting_when_the_advert_is_there_all_along(monkeypatch):
     assert scanner.restarts, "连着失败这么多次，一次扫描器重建都没触发"
     assert any(isinstance(c.target, str) for c in _FakeClient.instances), \
         "失败够多次之后应该改成按地址连"
+
+
+
+def test_别的设备数据照常在进_缺席很久的放慢到两小时(monkeypatch):
+    """2026-11-13 狗场1/2：充电那组 6 个整天不在，每个半小时一次重建 + 一次盲连，蓝牙栈被折腾坏。
+    别的设备在收数据 = 适配器好好的，缺席很久的那几个两小时问一次就够。"""
+    monkeypatch.setattr(m, "BleakClient", _FakeClient)
+
+    def count(flowing):
+        _FakeClient.instances.clear()
+        clock = [0.0]
+        sc = _FakeScanner(found=None, clock=clock)
+        sc.flowing = flowing
+        _run_device_for(_device(), sc, fake_clock=clock, stop_after_s=86400.0)
+        return len(sc.restarts), len(_FakeClient.instances)
+
+    r_busy, b_busy = count(False)
+    r_calm, b_calm = count(True)
+    assert b_calm <= 16 and r_calm <= 16, (r_calm, b_calm)
+    assert b_calm < b_busy / 2 and r_calm < r_busy / 2, ((r_busy, b_busy), (r_calm, b_calm))

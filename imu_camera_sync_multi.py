@@ -416,6 +416,13 @@ ABSENT_RESCAN_MIN_INTERVAL_S = 1800.0
 # 代价是恢复最慢要等半小时。跟原来的"要等到人去重启命令"（现场是一整天）
 # 比，这个代价可以接受。
 BLIND_CONNECT_INTERVAL_S = 1800.0
+# 「别的设备数据照常在进、这个设备已经缺席很久」时，重建扫描器 / 盲连都放慢到这个间隔。
+#
+# 2026-11-13 狗场1/2：充电那组项圈拿去了别的屋子，6 个整天不在，每个每半小时一次重建 + 一次盲连，
+# 一台电脑一天几百次蓝牙操作（盲连在 WinRT 上会挂一个连不上的连接请求），之后那两台天天要重启、
+# WiFi 蓝牙适配器一起卡死。别的设备在收数据 = 适配器好好的，缺席的那几个多半就是真不在，
+# 两小时问一次足够（拿回来最多晚两小时连上；重启录制立刻就连）
+ABSENT_CALM_INTERVAL_S = 7200.0
 
 
 def next_rescan_after(current_s: float, rescans_done: int, scanner_alive: bool,
@@ -562,7 +569,9 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
             if waited - last_report >= 300:
                 last_report = waited
                 print(f'[{device.label}] 仍未收到广播，已等待 {waited / 60:.0f} 分钟')
-            if waited >= rescan_after:
+            # 缺席很久 + 别的设备照常在收数据：放慢，别整天折腾蓝牙栈
+            calm = rescans_done >= MAX_RESCANS_FOR_ABSENT and scanner.data_flowing()
+            if waited >= (max(rescan_after, ABSENT_CALM_INTERVAL_S) if calm else rescan_after):
                 # 广播收不到不一定是设备的问题，也可能是本机适配器留着陈旧状态。
                 # 重建几次还收不到就把间隔拉长（见 ABSENT_RESCAN_MIN_INTERVAL_S），
                 # **但不停下来**——停下来就再也出不去了。
@@ -579,7 +588,8 @@ async def run_wit_device(device: ImuDevice, scanner: SharedScanner, reconnect_ma
             # 光靠重建扫描器复现不出来的那一半：陈旧的连接记录要靠新的 connect
             # 请求才会被清掉。设备真不在的话它会失败，等下一轮。
             mac = device.mac or (device.ident if is_mac else None)
-            if should_blind_connect(time.monotonic() - last_blind, bool(mac)):
+            if should_blind_connect(time.monotonic() - last_blind, bool(mac),
+                                    ABSENT_CALM_INTERVAL_S if calm else BLIND_CONNECT_INTERVAL_S):
                 last_blind = time.monotonic()
                 print(f'[{device.label}] 收不到广播已久，直接按 MAC 盲连一次: {mac}')
                 ble_device = None
