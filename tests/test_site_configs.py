@@ -582,3 +582,9 @@ def test_博朗旺三台都不自动复位蓝牙适配器(fake_python):
         out = subprocess.run(["bash", "-c", f'. "sites/{site}.env"; echo "$BT_RESET"'], cwd=REPO, env=e,
                              capture_output=True, text=True)
         assert out.stdout.strip() == "0", site
+
+
+def test_博朗旺三台都默认开监控墙(fake_python):
+    for site in ("佛山博朗旺_狗场1", "佛山博朗旺_狗场2", "佛山博朗旺_狗场3"):
+        assert "--wall" in cmdline(site, fake_python), site
+        assert "--wall" not in cmdline(site, fake_python, WALL="0"), site
