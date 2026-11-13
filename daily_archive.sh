@@ -86,6 +86,11 @@ fi
 # 否则会漏传一多半。
 KEEP_PAIRS="${KEEP_PAIRS:-cam1_imu1 cam2_imu2 cam3_imu3 cam1_imu4:csv}"
 NAS_DEST="${NAS_DEST:-//192.168.2.249/ai_data/data_raw}"
+# 传 NAS 的速度：ARCHIVE_MT = robocopy 同时传几个文件（默认 8），ARCHIVE_IPG = 每传 64KB 歇几毫秒
+# （robocopy /IPG，默认 0 = 不限速）。边录边传的机器（狗场）在场地文件里调小：
+# 一天 30GB 走 VPN、8 路一起全速灌，WiFi / 蓝牙一体的适配器先扛不住，蓝牙跟着掉、整机卡死
+ARCHIVE_MT="${ARCHIVE_MT:-8}"
+ARCHIVE_IPG="${ARCHIVE_IPG:-0}"
 
 # NAS 上的目录名 = 日期 + 这个后缀，比如 2026_9_9_gouchang。
 #
@@ -339,7 +344,10 @@ sync_stage() {
         local src_win dst_win
         src_win="$(cygpath -w "$stage")"
         dst_win="$(cygpath -w "$dest")"
-        robocopy "$src_win" "$dst_win" /E /Z /R:2 /W:5 /MT:8 /NP /NDL /XF ".*" >>"$LOG_FILE" 2>&1
+        # 限速：边录边传时别把这台机器的网卡 / 磁盘 / CPU 吃满（见 ARCHIVE_MT / ARCHIVE_IPG 的说明）
+        local ipg=()
+        [ "${ARCHIVE_IPG:-0}" -gt 0 ] 2>/dev/null && ipg=("/IPG:${ARCHIVE_IPG}")
+        robocopy "$src_win" "$dst_win" /E /Z /R:2 /W:5 "/MT:${ARCHIVE_MT:-8}" ${ipg[@]+"${ipg[@]}"} /NP /NDL /XF ".*" >>"$LOG_FILE" 2>&1
         rc=$?
         # robocopy 退出码不按常规来：0-7 都算成功（1=有文件被复制），>=8 才是真出错
         if [ "$rc" -ge 8 ]; then
