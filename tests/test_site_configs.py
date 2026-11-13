@@ -507,8 +507,9 @@ def test_hq_mode_records_1080p_at_30fps(fake_python):
 
 def test_outdoor_pc3_tries_all_12_collars(fake_python):
     """户外那台：12 个项圈全写上（戴着的在户外、充电的在屋里，连得上哪个录哪个），
-    3 路摄像头 cam7/8/9，每个项圈只配 cam7（出一份 CSV），跟电脑1/2 同一个日期目录。"""
-    args = cmdline("佛山博朗旺_狗场3", fake_python)
+    3 路摄像头 cam7/8/9，每个项圈只配 cam7（出一份 CSV），跟电脑1/2 同一个日期目录。
+    默认只录像（项圈交给电脑1/2），这里测的是命令行 VIDEO_ONLY=0 临时连项圈的时候。"""
+    args = cmdline("佛山博朗旺_狗场3", fake_python, VIDEO_ONLY="0")
     assert opt(args, "--imu-label") == [f"imu{i}" for i in range(9, 21)]
     pc12 = set()
     for site in ("佛山博朗旺_狗场1", "佛山博朗旺_狗场2"):
@@ -518,14 +519,21 @@ def test_outdoor_pc3_tries_all_12_collars(fake_python):
     assert opt(args, "--camera-id") == ["7"], "连项圈录只开 1 路（CAMERAS_IMU）"
     assert opt(args, "--day-suffix") == ["_bolangwang"]
     assert "--wall" in args, "户外那台默认开监控墙，一个窗口看齐 3 路"
-    assert "--wall" not in cmdline("佛山博朗旺_狗场3", fake_python, WALL="0"), "命令行 WALL=0 要能临时关掉"
+    assert "--wall" not in cmdline("佛山博朗旺_狗场3", fake_python, WALL="0", VIDEO_ONLY="0"), "命令行 WALL=0 要能临时关掉"
     assert opt(args, "--rotate") == [], "连项圈只开 cam7，cam8 的旋转自动去掉"
     assert opt(cmdline("bolangwang3", fake_python, VIDEO_ONLY="1"), "--rotate") == ["cam8:180"]
     assert "--no-precheck" in args, "户外那台连得上哪个录哪个，预检不能因为屋里的狗扫不到就拦住开录"
     # 别名也认
-    assert opt(cmdline("bolangwang3", fake_python), "--camera-id") == ["7"]
+    assert opt(cmdline("bolangwang3", fake_python, VIDEO_ONLY="0"), "--camera-id") == ["7"]
     # 命令行直接给 CAMERAS 以命令行为准
-    assert opt(cmdline("bolangwang3", fake_python, CAMERAS="7 0\n8 1\n9 2"), "--camera-id") == ["7", "8", "9"]
+    assert opt(cmdline("bolangwang3", fake_python, CAMERAS="7 0\n8 1\n9 2", VIDEO_ONLY="0"), "--camera-id") == ["7", "8", "9"]
+
+
+def test_outdoor_pc3_默认只录像_不跟电脑1_2抢项圈(fake_python):
+    """一个项圈同一时间只能被一台连上：户外那台也连的话，电脑1/2 的「12 个全采」就缺了它抢走的那几个。"""
+    args = cmdline("佛山博朗旺_狗场3", fake_python)
+    assert opt(args, "--imu") == [] and opt(args, "--pair") == []
+    assert opt(args, "--camera-id") == ["7", "8", "9"]
 
 
 def test_outdoor_pc3_does_not_share_cameras_or_devices_with_pc1_pc2(fake_python):
