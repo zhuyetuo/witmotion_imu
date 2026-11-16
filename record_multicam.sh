@@ -246,6 +246,27 @@ RECONNECT_MAX_BACKOFF="${RECONNECT_MAX_BACKOFF:-300}"
 # 为什么换成一张表：那三个是平行数组，要靠人手工对齐——错位一格不会报错，
 # 只是从此以后 A 狗的数据记在 B 狗名下。而"真实编号"这件事本来就该跟 MAC
 # 写在同一行，分成三处填就是在制造错位的机会。
+# ONLY_IMUS：这次只连这几号项圈，只写编号就行，MAC 和狗名从场地文件的
+# DEVICES 里现取，不用整行重写一遍：
+#     ONLY_IMUS="9 11 13" VIDEO_ONLY=0 SITE=bolangwang3 ./record_multicam.sh
+# 写 imu9 或 9 都认（逗号分隔也行）。PAIRS 会照旧按狗名收拢到这几个号上。
+_filter_devices_block() {
+    local _block="$1" _line _id _w
+    [ -n "${ONLY_IMUS:-}" ] || { printf '%s' "$_block"; return 0; }
+    while IFS= read -r _line; do
+        local -a _f=()
+        read -ra _f <<< "${_line%%#*}"
+        [ ${#_f[@]} -eq 3 ] || continue
+        _id="${_f[0]#imu}"
+        for _w in $ONLY_IMUS; do
+            if [ "${_w#imu}" = "$_id" ]; then
+                printf '%s\n' "$_line"
+                break
+            fi
+        done
+    done <<< "$_block"
+}
+
 _parse_devices_block() {
     local _block="$1" _tag="$2"
     [ -n "$_block" ] || return 0
@@ -287,6 +308,33 @@ if [ "${USE_STANDBY:-0}" = "1" ]; then
     if [ "${ALL_DEVICES:-0}" = "1" ]; then
         echo "USE_STANDBY=1 跟 ALL_DEVICES=1 一起用没有意义（两组都会录），忽略前者的影响"
     fi
+fi
+
+# 只录指定项圈时，先按编号把 DEVICES 过滤一遍；MAC / 狗名还是用场地文件里的。
+# 放在 USE_STANDBY 之后：换组之后再过滤，这样两组都能用。
+ONLY_IMUS="$(echo ${ONLY_IMUS:-} | tr ',' ' ')"
+if [ -n "$ONLY_IMUS" ] && [ "$VIDEO_ONLY" != "1" ]; then
+    _avail=""; _f=()
+    while IFS= read -r _line; do
+        _f=()
+        read -ra _f <<< "${_line%%#*}"
+        [ ${#_f[@]} -eq 3 ] || continue
+        _avail="$_avail ${_f[0]#imu}"
+    done <<< "${DEVICES:-}"
+    _bad=""
+    for _w in $ONLY_IMUS; do
+        case " $_avail " in *" ${_w#imu} "*) ;; *) _bad="$_bad $_w" ;; esac
+    done
+    if [ -n "$_bad" ]; then
+        echo "ONLY_IMUS 里这些项圈不在本次要录的 DEVICES 里：$_bad"
+        echo "  可用：imu$(echo $_avail | tr ' ' ',')"
+        exit 1
+    fi
+    DEVICES="$(_filter_devices_block "$DEVICES")"
+    if [ -n "${DEVICES_STANDBY:-}" ]; then
+        DEVICES_STANDBY="$(_filter_devices_block "$DEVICES_STANDBY")"
+    fi
+    echo "只连项圈：imu$(echo $ONLY_IMUS | tr ' ' ',')"
 fi
 
 if [ -n "${DEVICES:-}" ]; then
