@@ -375,7 +375,7 @@ _TS_FMT = '%Y-%m-%d %H:%M:%S.%f'
 def write_anchored_raw_csv(raw_path: str, out_path: str,
                             t_start_ms: float = None, t_end_ms: float = None,
                             gap_threshold_s: float = 1.0,
-                            fallback_hz: float = 25.0):
+                            fill_hz: float = 50.0):
     """
     --no-resample（保留原始未降采样数据）模式专用：把原始IMU CSV复制一份，
     但把时间轴对齐到 [t_start_ms, t_end_ms]（通常是视频第一帧/最后一帧的真实
@@ -394,12 +394,14 @@ def write_anchored_raw_csv(raw_path: str, out_path: str,
        中间这段是真实信号缺失（比如狗趴着压住项圈、信号被身体遮挡）。
 
     缺失区间按"每一帧"密集填充"6轴全0"的哨兵行，而不是只在缺口两头各插
-    一行——按该设备真实数据推算出的原始采样间隔（同一份文件里所有相邻真实
-    样本间隔的中位数；整段文件都没有任何真实数据时，用 fallback_hz 参数
-    兜底，默认25Hz，对应HICC设备的原生频率，比WitMotion的50Hz更保守，
-    宁可行数偏多也不漏标），把每一段缺口逐帧补成全0行。这样不管是画图
-    还是下游代码逐行/逐样本处理，缺失区间每一行实际拿到的都是全0，不依赖
-    图表软件"两点连线"的假设。
+    一行——按固定的 fill_hz（默认50Hz，跟WitMotion原始流的采样率一致）逐帧
+    补，把每一段缺口补成全0行。这样不管是画图还是下游代码逐行/逐样本处理，
+    缺失区间每一行实际拿到的都是全0，不依赖图表软件"两点连线"的假设。
+
+    这里**不能**再用"相邻真实样本间隔的中位数"倒推采样率：BLE 是一包几帧
+    一起到，同一批的时间戳大量重复（实测某份文件 61% 的相邻间隔是 0），
+    中位数直接是 0，以前就退化成 25Hz 占位；偶尔又会算成 1ms，填出来的
+    行数直接爆掉。固定 50Hz 既跟采集端一致，行数也稳定。
 
     真实数值本身永远不会被改动/插值；哪怕整段时间完全没有任何真实数据
     （比如某个设备这一小时完全没连上），也只是从起始边界到结束边界之间
@@ -438,16 +440,9 @@ def write_anchored_raw_csv(raw_path: str, out_path: str,
             continue
         kept.append((ts, row))
 
-    # 用这份文件里真实样本间隔的中位数估算原始采样周期，用来给缺口逐帧
-    # 打点；完全没有真实数据（长度<2）时用 fallback_hz 兜底。
-    if len(kept) >= 2:
-        real_diffs = sorted((b[0] - a[0]).total_seconds() for a, b in zip(kept, kept[1:]))
-        median_interval_s = real_diffs[len(real_diffs) // 2]
-        if median_interval_s <= 0:
-            median_interval_s = 1.0 / fallback_hz
-    else:
-        median_interval_s = 1.0 / fallback_hz
-    step = timedelta(seconds=median_interval_s)
+    # 缺口里按固定 fill_hz 逐帧填全 0。不按真实样本间隔倒推：BLE 一包几帧
+    # 一起到，时间戳大量重复，中位数会是 0（退化成 25Hz）甚至 1ms（行数爆掉）。
+    step = timedelta(seconds=1.0 / fill_hz)
 
     def zero_row(ts):
         ts_str = ts.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
