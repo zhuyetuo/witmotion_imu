@@ -742,16 +742,42 @@ fi
 echo "  只想认摄像头、不录数据：先退出，改跑 ./debug_cameras.sh"
 trap 'rm -f "$LOCK"' EXIT
 
-python imu_camera_sync_multicam.py \
-    "${imu_args[@]}" "${imu_label_args[@]+"${imu_label_args[@]}"}" "${dog_name_args[@]}" \
-    "${segment_args[@]}" --resample-hz "$RESAMPLE_HZ" \
-    "${cam_args[@]}" "${cam_id_args[@]+"${cam_id_args[@]}"}" \
-    "${pair_args[@]+"${pair_args[@]}"}" \
-    "${rotate_args[@]+"${rotate_args[@]}"}" \
-    --width "$WIDTH" --height "$HEIGHT" \
-    --capture-width "$CAPTURE_WIDTH" --capture-height "$CAPTURE_HEIGHT" \
-    "${resample_flag[@]}" --out-dir "$OUT_DIR" \
-    --warmup-sec "$WARMUP_SEC" --cam-fps "$CAM_FPS" \
-    --day-suffix "$DAY_SUFFIX" \
-    --reconnect-max-backoff "$RECONNECT_MAX_BACKOFF" \
-    $EXTRA_ARGS "${@}"
+# 摄像头驱动偶尔会把整个进程带崩：OpenCV 在 Windows MSMF 后端上遇到设备掉线，
+# 会直接段错误（Segmentation fault），Python 层接不住。2026-11 那次 cam6 拔线
+# 11 小时后就撞上了，进程一死，六路摄像头和所有 IMU 一起停，后面的数据全没了。
+#
+# python 内部已经做到"某一路掉线只写占位帧、后台重连、插回去自动续上"；
+# 这里再加一道兜底：**只对"被信号杀死"（rc >= 128，比如段错误 139）自动重启**，
+# 正常结束（0）和配置/参数错误（1）不重试——后者重拉多少次都一样，只会把
+# 报错刷满屏。重启后新进程几秒内重新接上还插着的设备，从当前整点继续录下一段，
+# 崩之前已经写好的文件不受影响。
+_delay=5
+while :; do
+    _started=$SECONDS
+    python imu_camera_sync_multicam.py \
+        "${imu_args[@]}" "${imu_label_args[@]+"${imu_label_args[@]}"}" "${dog_name_args[@]}" \
+        "${segment_args[@]}" --resample-hz "$RESAMPLE_HZ" \
+        "${cam_args[@]}" "${cam_id_args[@]+"${cam_id_args[@]}"}" \
+        "${pair_args[@]+"${pair_args[@]}"}" \
+        "${rotate_args[@]+"${rotate_args[@]}"}" \
+        --width "$WIDTH" --height "$HEIGHT" \
+        --capture-width "$CAPTURE_WIDTH" --capture-height "$CAPTURE_HEIGHT" \
+        "${resample_flag[@]}" --out-dir "$OUT_DIR" \
+        --warmup-sec "$WARMUP_SEC" --cam-fps "$CAM_FPS" \
+        --day-suffix "$DAY_SUFFIX" \
+        --reconnect-max-backoff "$RECONNECT_MAX_BACKOFF" \
+        $EXTRA_ARGS "${@}"
+    _rc=$?
+    if [ "$_rc" -lt 128 ]; then
+        exit "$_rc"
+    fi
+    _ran=$((SECONDS - _started))
+    if [ "$_ran" -ge 600 ]; then
+        _delay=5            # 正常跑了一阵才崩：大概还是偶发，立刻重拉
+    else
+        _delay=$((_delay * 2))
+        [ "$_delay" -gt 300 ] && _delay=300   # 启动就崩：越拉越慢，避免刷屏
+    fi
+    echo "!! 录制进程被信号 $_rc 结束（跑了 ${_ran}s），${_delay}s 后自动重启；已经写好的文件不受影响" >&2
+    sleep "$_delay"
+done

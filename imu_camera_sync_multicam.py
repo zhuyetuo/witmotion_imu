@@ -102,6 +102,13 @@ class CameraStream:
         self._open_kwargs = dict(index=index, width=capture_width or width, height=capture_height or height,
                                  fps=target_fps, backend=backend, fourcc=fourcc, autofocus=autofocus,
                                  auto_wb=auto_wb, show_settings_dialog=False)
+        # 重连时换 DSHOW：Windows 上默认后端是 MSMF，设备被拔掉后它的异步读取回调
+        # 会在 VideoCapture 释放之后才回来，OpenCV 原生层直接段错误（整个进程没了，
+        # 其它几路和 IMU 一起陪葬）。DSHOW 是同步拉流的，没这个问题。只在重连时换，
+        # 正常录制仍用 MSMF（实测 MSMF 的 fps 更准）
+        self._retry_kwargs = dict(self._open_kwargs)
+        if sys.platform.startswith('win') and backend in ('auto', 'msmf'):
+            self._retry_kwargs['backend'] = 'dshow'
         # 开之前先报一声，而且立刻刷出去。
         # open_camera 走的是 OpenCV 的原生后端（Windows 上是 MSMF/DSHOW），
         # 那一层崩了是 Segmentation fault——没有 Python 异常、没有 traceback，
@@ -142,6 +149,7 @@ class CameraStream:
         self.last_down_report = 0.0
 
     FAIL_STREAK_TO_DOWN = 3
+    DOWN_AFTER_SEC = 5.0        # 读取线程连续这么多秒抓不到帧就退出，交给主线程重连
     RETRY_MIN_INTERVAL = 5.0
     RETRY_MAX_INTERVAL = 60.0
     DOWN_REPORT_INTERVAL = 60.0  # 断联期间每隔这么久在终端提醒一次
@@ -168,11 +176,19 @@ class CameraStream:
         将近 90ms。多机位同步采集的意义就在于"同一时刻各个角度"，差 90ms 等于
         这个前提本身不成立。各读各的之后，每路都是自己最新的一帧，偏差降到
         一帧以内。
+
+        **这个 cam 的 VideoCapture 归读取线程独占**：打开它的是主线程，但只有
+        这个线程会 grab/retrieve，也只由它自己在退出时 release。反过来做（主线程
+        释放一个别的线程正在 grab 的 cap）在 Windows MSMF 上会段错误——设备被拔掉
+        时回调还在飞，释放后回调写进已释放的内存，整个进程直接没。
         """
         self._latest = (False, None)
         self._latest_lock = threading.Lock()
-        self._cap_lock = threading.Lock()
         self._reader_stop = threading.Event()
+        # 读取线程自己退出了（连续抓不到帧 / 被要求停），主线程据此判定断联并重连。
+        # 用 Event 而不是 join 判断，是为了让主循环每 tick 都能无阻塞地看它一眼
+        self._reader_dead = threading.Event()
+        self._reader_cap = self.cap     # 线程独占；主线程不再碰它
         # 主循环取走上一帧后才解下一帧。初值 set：先解一帧出来垫底
         self._want = threading.Event()
         self._want.set()
@@ -180,9 +196,16 @@ class CameraStream:
         self._reader.start()
 
     def stop_reader(self):
-        if getattr(self, '_reader', None) is not None:
+        reader = getattr(self, '_reader', None)
+        if reader is not None:
             self._reader_stop.set()
-            self._reader.join(timeout=2.0)
+            reader.join(timeout=2.0)
+            if reader.is_alive():
+                # 线程卡在驱动里（设备掉线时 grab 偶尔不退）。这时候千万不能把
+                # self._reader 置空、更不能由主线程去 release cap——它还在用
+                print(f'{self.label}: 读取线程 2s 内没退出（可能卡在驱动里），'
+                      f'不释放 cap，避免段错误', flush=True)
+                return
             self._reader = None
 
     def _reader_loop(self):
@@ -197,31 +220,53 @@ class CameraStream:
 
         原来串行读时反而没这问题：没被读走的帧驱动直接丢，压根不解码。
         所以这里要把这个特性显式做出来——grab 保持画面新鲜，retrieve 按需。
+
+        连续抓不到帧超过 DOWN_AFTER_SEC 秒就自己收尾退出（在**本线程里** release
+        自己独占的 cap），把"这一路断了"交给主线程处理：主线程换个后端重新打开，
+        再起一个新的读取线程。这样无论驱动怎么坏，native 层的句柄都不存在
+        "这边还在用、那边已经被释放"的窗口。
         """
-        while not self._reader_stop.is_set():
-            with self._cap_lock:
-                cap = self.cap
-            try:
-                ok = cap.grab()
+        cap = self._reader_cap
+        fail_since = None
+        try:
+            while not self._reader_stop.is_set():
+                try:
+                    ok = cap.grab()
+                except Exception:  # noqa: BLE001 驱动层什么都可能抛
+                    ok = False
                 if not ok:
+                    now = time.monotonic()
+                    if fail_since is None:
+                        fail_since = now
+                    elif now - fail_since >= self.DOWN_AFTER_SEC:
+                        print(f'{self.label}: 连续 {now - fail_since:.0f}s 抓不到帧，读取线程退出，'
+                              f'改由主线程重连', flush=True)
+                        break
                     with self._latest_lock:
                         self._latest = (False, None)
-                    time.sleep(0.01)
+                    time.sleep(0.05)
                     continue
+                fail_since = None
                 if not self._want.is_set():
                     continue        # 主循环还没消费上一帧，这一帧不解码，直接扔
-                ret, frame = cap.retrieve()
-            except Exception:  # noqa: BLE001 驱动层什么都可能抛，交给上面的重连逻辑
-                ret, frame = False, None
-            if ret and self.need_resize:
-                frame = cv2.resize(frame, (self.actual_w, self.actual_h))
-            if ret and self._rot_code is not None:
-                frame = cv2.rotate(frame, self._rot_code)
-            with self._latest_lock:
-                self._latest = (ret, frame)
-            self._want.clear()
-            if not ret:
-                time.sleep(0.01)
+                try:
+                    ret, frame = cap.retrieve()
+                except Exception:  # noqa: BLE001
+                    ret, frame = False, None
+                if ret and self.need_resize:
+                    frame = cv2.resize(frame, (self.actual_w, self.actual_h))
+                if ret and self._rot_code is not None:
+                    frame = cv2.rotate(frame, self._rot_code)
+                with self._latest_lock:
+                    self._latest = (ret, frame)
+                self._want.clear()
+        finally:
+            try:
+                cap.release()
+            except Exception:  # noqa: BLE001
+                pass
+            self._reader_cap = None
+            self._reader_dead.set()
 
     def read(self):
         if getattr(self, '_reader', None) is None:
@@ -254,10 +299,14 @@ class CameraStream:
                   f'（间隔 {self.retry_interval:.0f}s）——如果是线松了需要人去插回去')
         if now < self.next_retry:
             return False
+        # 旧 cap 必须已经完全退出（读取线程自己 release 完）才能开新的。否则旧后端的
+        # 回调还在飞，新开同一台设备会把驱动栈一起搞坏
+        if getattr(self, '_reader', None) is not None and not self._reader_dead.is_set():
+            return False
         self.next_retry = now + self.retry_interval
         self.retry_interval = min(self.retry_interval * 2, self.RETRY_MAX_INTERVAL)
         try:
-            cap = open_camera(**self._open_kwargs)
+            cap = open_camera(**self._retry_kwargs)
             ok = cap.isOpened()
             if ok:
                 ret, _ = cap.read()
@@ -268,28 +317,38 @@ class CameraStream:
         except Exception as e:  # noqa: BLE001 驱动层什么异常都可能抛，重连失败就下次再试
             print(f'{self.label} 重连异常: {e}')
             return False
-        # 换 cap 要加锁：读取线程可能正拿着旧的那个
-        old = self.cap
-        if getattr(self, '_cap_lock', None) is not None:
-            with self._cap_lock:
-                self.cap = cap
-        else:
-            self.cap = cap
-        try:
-            old.release()
-        except Exception:  # noqa: BLE001
-            pass
+        # 走到这里读取线程已经退出了，没有别人还拿着 self.cap
+        self.cap = cap
         self._after_open()
-        print(f'{self.label} 已重新连上（断了 {_fmt_duration(self.down_seconds(now))}）')
+        print(f'{self.label} 已重新连上（断了 {_fmt_duration(self.down_seconds(now))}）', flush=True)
         self.down = False
         self.fail_streak = 0
         self.down_since = None
         self.retry_interval = self.RETRY_MIN_INTERVAL
+        if getattr(self, '_reader', None) is not None:
+            self.start_reader()     # 换新 cap、起新读取线程
         return True
+
+    def _enter_down(self, now: float, reason: str):
+        """判定这一路断联。**不在这里 release**：cap 归读取线程独占，由它自己收尾。"""
+        self.down = True
+        self.down_since = now
+        self.retry_interval = self.RETRY_MIN_INTERVAL
+        self.next_retry = now + self.retry_interval
+        self.last_down_report = now
+        print(f'{self.label} {reason}，其它摄像头/IMU 继续录，'
+              f'这一路写占位帧并尝试重连（{self.RETRY_MIN_INTERVAL:.0f}s 起指数退避到 '
+              f'{self.RETRY_MAX_INTERVAL:.0f}s）', flush=True)
 
     def read_resilient(self, now: float):
         """主循环用这个：永远返回一帧（真实帧或占位帧）+ 这帧是不是真的。
         掉线了就走重连逻辑，不抛异常、不让调用方停。"""
+        # 读取线程自己退了（连续抓不到帧）：这一路算断联。比按 tick 计失败更准，
+        # 也不会出现"主循环还在读一个已经死掉的 cap"
+        if (not self.down and getattr(self, '_reader', None) is not None
+                and self._reader_dead.is_set()):
+            self._enter_down(now, f'读取线程连续 {self.DOWN_AFTER_SEC:.0f}s 抓不到帧')
+
         if self.down:
             if self._try_reconnect(now):
                 ret, frame = self.read()
@@ -308,17 +367,7 @@ class CameraStream:
 
         self.fail_streak += 1
         if self.fail_streak >= self.FAIL_STREAK_TO_DOWN:
-            self.down = True
-            self.down_since = now
-            self.retry_interval = self.RETRY_MIN_INTERVAL
-            self.next_retry = now + self.retry_interval
-            self.last_down_report = now
-            print(f'{self.label} 连续 {self.fail_streak} 次读取失败，判定断联，其它摄像头/IMU 继续录，'
-                  f'这一路写占位帧并尝试重连（{self.RETRY_MIN_INTERVAL:.0f}s 起指数退避到 {self.RETRY_MAX_INTERVAL:.0f}s）')
-            try:
-                self.cap.release()
-            except Exception:  # noqa: BLE001
-                pass
+            self._enter_down(now, f'连续 {self.fail_streak} 次读取失败')
         self.dropped_ticks += 1
         # 还没判定掉线的那一两帧，用上一帧顶一下比黑帧自然
         if self.last_frame is not None:
@@ -338,10 +387,14 @@ class CameraStream:
             self.video_writer = None
 
     def release(self):
-        try:
-            self.cap.release()
-        except Exception:  # noqa: BLE001 掉线时 cap 可能已经 release 过
-            pass
+        reader = getattr(self, '_reader', None)
+        # 读取线程若还活着（stop_reader 已警告过），主线程就不要碰 cap：
+        # Windows MSMF 上跨线程释放正在 grab 的句柄会段错误
+        if reader is None or not reader.is_alive():
+            try:
+                self.cap.release()
+            except Exception:  # noqa: BLE001 掉线时 cap 可能已经 release 过
+                pass
         self.close_writer()
 
 
