@@ -118,13 +118,27 @@ class CameraStream:
         print(f'{label}: 正在打开（设备 {index}，{self._open_kwargs["width"]}x'
               f'{self._open_kwargs["height"]} {backend}）...', flush=True)
         self.cap = open_camera(**{**self._open_kwargs, 'show_settings_dialog': show_settings_dialog})
-        if not self.cap.isOpened():
-            raise RuntimeError(
-                f'无法打开摄像头 {index}（{label}）。\n'
-                f'  换后端试试:   SITE=... ./record_multicam.sh --backend dshow\n'
-                f'  确认设备存在: 设备管理器 → 照相机；或者先只开前几路 CAMS="0 1"'
-            )
-        self._after_open()
+        opened = self.cap.isOpened()
+        if not opened and self._retry_kwargs != self._open_kwargs:
+            # 启动时先自己换一次后端。Windows 上有的设备 MSMF 按序号根本打不开
+            # （"backend is generally available but can't be used to capture by
+            # index"），DSHOW 却能开；这一路不该因为后端不合就把整个录制卡住。
+            print(f'{label}: 设备 {index} 用 {backend} 打不开，换 {self._retry_kwargs["backend"]} 再试...',
+                  flush=True)
+            try:
+                self.cap.release()
+            except Exception:  # noqa: BLE001
+                pass
+            self.cap = open_camera(**self._retry_kwargs)
+            opened = self.cap.isOpened()
+        if opened:
+            self._after_open()
+        else:
+            try:
+                self.cap.release()
+            except Exception:  # noqa: BLE001
+                pass
+            self.need_resize = False
         # 转 90/270 之后宽高对调。不改这两个值的话，ffmpeg 按原尺寸开管道、实际
         # 喂进去的是转置过的帧，画面会撕成斜条纹——而且不报错。
         if self.rotate in (90, 270):
@@ -147,6 +161,16 @@ class CameraStream:
         self.last_frame = None
         self.dropped_ticks = 0  # 这一段里写了多少个占位帧，结束时汇报
         self.last_down_report = 0.0
+        # 主循环是否已经进入"后台读取线程"阶段。预热阶段还要在主线程同步量 fps，
+        # 这时重连成功也不能起读取线程（否则两端同时 grab 同一个句柄）
+        self._reader_started = False
+        if not opened:
+            # 启动时这一路就打不开（线松了、接口没插好、编号变了）不再让整个
+            # 录制退出：其它摄像头和 IMU 照常录，这一路写占位帧并按退避重连，
+            # 插回去以后自动接上
+            self._enter_down(time.time(), f'启动时打不开（设备 {index}）')
+            print(f'  （先录其它路；确认设备存在：设备管理器 → 照相机，或先只开前几路 CAMS="0 1"）',
+                  flush=True)
 
     FAIL_STREAK_TO_DOWN = 3
     DOWN_AFTER_SEC = 5.0        # 读取线程连续这么多秒抓不到帧就退出，交给主线程重连
@@ -182,6 +206,15 @@ class CameraStream:
         释放一个别的线程正在 grab 的 cap）在 Windows MSMF 上会段错误——设备被拔掉
         时回调还在飞，释放后回调写进已释放的内存，整个进程直接没。
         """
+        self._reader_started = True
+        if not self.cap.isOpened():
+            # 启动时就没打开：不起线程（它只会在死句柄上空转、5s 后判定断联）。
+            # 主循环的 read_resilient 在 down 分支里重连，连上后自己起线程
+            self._reader = None
+            self._latest = (False, None)
+            self._reader_dead = threading.Event()
+            self._reader_dead.set()
+            return
         self._latest = (False, None)
         self._latest_lock = threading.Lock()
         self._reader_stop = threading.Event()
@@ -325,8 +358,10 @@ class CameraStream:
         self.fail_streak = 0
         self.down_since = None
         self.retry_interval = self.RETRY_MIN_INTERVAL
-        if getattr(self, '_reader', None) is not None:
-            self.start_reader()     # 换新 cap、起新读取线程
+        if self._reader_started:
+            # 换新 cap、起新读取线程。启动时就没打开的那一路 _reader 一直是 None，
+            # 这里也要起来——不然画面回来了还是没人读
+            self.start_reader()
         return True
 
     def _enter_down(self, now: float, reason: str):
@@ -355,7 +390,10 @@ class CameraStream:
                 if ret:
                     self.last_frame = frame
                     return frame, True
-                self.down = True
+                # 刚 open 完第一帧还没到（后台线程要 grab + retrieve 一下）。
+                # **这一 tick 先占位，但不要重新置 down**——否则下一 tick 又走
+                # 重连分支，而这时线程已经活着、不会再重开，"断联"画面就永远
+                # 停在那儿了。保持 down=False，下一 tick 走正常读取就恢复了
             self.dropped_ticks += 1
             return self._placeholder(now), False
 
@@ -1630,18 +1668,16 @@ def main():
               f'（{", ".join(sorted(cam_labels, key=lambda x: int(x[3:])))}）')
         sys.exit(1)
 
-    cameras = []
-    for cam_idx, cam_label in zip(args.camera, cam_label_list):
-        try:
-            cameras.append(CameraStream(cam_idx, cam_label, args.width, args.height, args.cam_fps,
-                                         backend=args.backend, fourcc=args.fourcc,
-                                         autofocus=autofocus, auto_wb=auto_wb,
-                                         capture_width=args.capture_width, capture_height=args.capture_height,
-                                         show_settings_dialog=args.show_settings_dialog,
-                                         rotate=rotate_of.get(cam_label, 0)))
-        except RuntimeError as e:
-            print(e)
-            sys.exit(1)
+    cameras = [
+        # 某一路打不开不再退出（CameraStream 自己进"断联"状态、写占位帧并重连）
+        CameraStream(cam_idx, cam_label, args.width, args.height, args.cam_fps,
+                     backend=args.backend, fourcc=args.fourcc,
+                     autofocus=autofocus, auto_wb=auto_wb,
+                     capture_width=args.capture_width, capture_height=args.capture_height,
+                     show_settings_dialog=args.show_settings_dialog,
+                     rotate=rotate_of.get(cam_label, 0))
+        for cam_idx, cam_label in zip(args.camera, cam_label_list)
+    ]
 
     t = None
     if devices:
